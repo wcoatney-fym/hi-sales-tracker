@@ -1,0 +1,197 @@
+import { useState, useMemo } from "react";
+import { Navigate, useNavigate, useParams } from "react-router-dom";
+import {
+  LogOut,
+  LayoutDashboard,
+  FileSpreadsheet,
+  Settings,
+  Home,
+  AlertTriangle,
+  Loader2,
+  Trophy,
+  ClipboardList,
+} from "lucide-react";
+import { useAdminAuth } from "../hooks/useAdminAuth";
+import DateRangeSelector from "../components/dashboard/DateRangeSelector";
+import PoliciesTable from "../components/dashboard/PoliciesTable";
+import AdminLeaderboardTab from "../components/admin/AdminLeaderboardTab";
+import OverviewTab from "../components/production/OverviewTab";
+import InternalTab from "../components/production/InternalTab";
+import SettingsPanel from "../components/production/SettingsPanel";
+import AtRiskTab from "../components/production/AtRiskTab";
+import AgencyRosterPanel from "../components/admin/AgencyRosterPanel";
+import type { DateRange, DatePreset } from "../types/dashboard";
+import { getDateRange } from "../lib/dateUtils";
+
+type Tab = "overview" | "internal" | "at-risk" | "policies" | "leaderboard" | "settings" | "roster";
+
+export default function AdminDashboard() {
+  const navigate = useNavigate();
+  const { agencySlug } = useParams<{ agencySlug?: string }>();
+  const { token, email, isAuthenticated, isGlobalAdmin, agencyId: adminAgencyId, agencySlug: adminAgencySlug, agencyName, verifying, logout } = useAdminAuth();
+  const [activeTab, setActiveTab] = useState<Tab>(isGlobalAdmin ? "internal" : "overview");
+
+  const [dateRange, setDateRange] = useState<DateRange>(getDateRange("thisMonth"));
+  const [datePreset, setDatePreset] = useState<DatePreset>("thisMonth");
+
+  // Build available tabs based on role (must be above conditional returns for hooks rules)
+  const tabs: { key: Tab; label: string; icon: React.ElementType }[] = useMemo(() => {
+    const isAgencyView = !!agencySlug;
+    const allTabs: { key: Tab; label: string; icon: React.ElementType; globalOnly?: boolean; fymOnly?: boolean; agencyOnly?: boolean }[] = [
+      { key: "overview", label: "Overview", icon: LayoutDashboard },
+      { key: "internal", label: "Internal", icon: Home, fymOnly: true },
+      { key: "at-risk", label: "At Risk", icon: AlertTriangle },
+      { key: "policies", label: "Policies", icon: FileSpreadsheet },
+      { key: "leaderboard", label: "Leaderboard", icon: Trophy },
+      { key: "roster", label: "Roster", icon: ClipboardList, agencyOnly: true },
+      { key: "settings", label: "Settings", icon: Settings, globalOnly: true },
+    ];
+
+    return allTabs.filter((tab) => {
+      if (tab.globalOnly && !isGlobalAdmin) return false;
+      if (tab.fymOnly && isAgencyView) return false;
+      if (tab.agencyOnly && !isAgencyView && !isGlobalAdmin) return false;
+      return true;
+    });
+  }, [agencySlug, isGlobalAdmin]);
+
+  if (verifying) {
+    return (
+      <main className="max-w-7xl mx-auto px-4 py-20 flex items-center justify-center">
+        <Loader2 className="animate-spin text-gold" size={32} />
+      </main>
+    );
+  }
+
+  if (!isAuthenticated || !token) {
+    return <Navigate to="/admin" replace />;
+  }
+
+  // Agency admin trying to access global dashboard
+  if (agencySlug && !isGlobalAdmin) {
+    const storedSlug = localStorage.getItem("admin_agency_slug");
+    if (storedSlug && storedSlug !== agencySlug) {
+      return <Navigate to={`/admin/dashboard/${storedSlug}`} replace />;
+    }
+  }
+
+  const handleLogout = async () => {
+    await logout();
+    navigate("/admin", { replace: true });
+  };
+
+  const handleDateChange = (range: DateRange, preset: DatePreset) => {
+    setDateRange(range);
+    setDatePreset(preset);
+  };
+
+  const handleNavigatePolicies = () => {
+    setActiveTab("policies");
+  };
+
+  const showDateRange = activeTab === "overview" || activeTab === "internal";
+
+  // Determine if this admin is locked to a specific agency
+  const lockedAgencyName = agencySlug && !isGlobalAdmin ? (agencyName || null) : null;
+
+  const dashboardTitle = agencySlug
+    ? `${agencyName || agencySlug.charAt(0).toUpperCase() + agencySlug.slice(1)} Dashboard`
+    : "Activity Tracker";
+
+  return (
+    <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold text-white">{dashboardTitle}</h1>
+          <p className="text-xs sm:text-sm text-slate-400 mt-0.5">Signed in as {email}</p>
+        </div>
+        <div className="flex items-center gap-2 sm:gap-3">
+          {showDateRange && (
+            <DateRangeSelector
+              value={dateRange}
+              preset={datePreset}
+              onChange={handleDateChange}
+            />
+          )}
+          <button
+            onClick={handleLogout}
+            className="btn-secondary flex items-center gap-2 text-sm !px-3 sm:!px-6"
+          >
+            <LogOut size={16} />
+            <span className="hidden sm:inline">Sign Out</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="relative mb-6">
+        <div className="flex gap-1 bg-navy p-1 rounded-lg w-full sm:w-fit border border-slate-700/50 overflow-x-auto scrollbar-hide snap-x snap-mandatory">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                data-tour={`admin-tab-${tab.key}`}
+                className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap snap-start min-h-[44px] ${
+                  activeTab === tab.key
+                    ? "bg-navy-light text-gold shadow-sm border border-gold/20"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <Icon size={16} />
+                <span className="hidden sm:inline">{tab.label}</span>
+                <span className="sm:hidden text-xs">{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {activeTab === "overview" && (
+        <OverviewTab
+          token={token}
+          dateRange={dateRange}
+          lockedAgency={lockedAgencyName || undefined}
+          onNavigatePolicies={handleNavigatePolicies}
+        />
+      )}
+
+      {activeTab === "internal" && (
+        <InternalTab
+          token={token}
+          dateRange={dateRange}
+          onNavigatePolicies={handleNavigatePolicies}
+        />
+      )}
+
+      {activeTab === "at-risk" && (
+        <AtRiskTab token={token} lockedAgency={lockedAgencyName || undefined} />
+      )}
+
+      {activeTab === "policies" && (
+        <div className="animate-fade-in">
+          <PoliciesTable token={token} lockedAgency={lockedAgencyName || undefined} />
+        </div>
+      )}
+
+
+      {activeTab === "leaderboard" && (
+        <AdminLeaderboardTab
+          agencyId={adminAgencyId}
+          agencyName={agencyName}
+          isFymAdmin={isGlobalAdmin || adminAgencySlug === "fym"}
+        />
+      )}
+
+      {activeTab === "roster" && (
+        <div className="animate-fade-in">
+          <AgencyRosterPanel token={token} />
+        </div>
+      )}
+
+      {activeTab === "settings" && (
+        <SettingsPanel token={token} />
+      )}
+    </main>
+  );
+}

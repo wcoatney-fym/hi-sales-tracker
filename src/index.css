@@ -1,0 +1,239 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply antialiased text-white bg-navy-dark;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-gold text-navy-dark px-6 py-2.5 rounded-lg font-semibold
+      hover:bg-gold-light active:bg-gold-dark active:scale-[0.98] transition-all duration-200
+      focus:outline-none focus:ring-2 focus:ring-gold focus:ring-offset-2 focus:ring-offset-navy-dark
+      disabled:opacity-50 disabled:cursor-not-allowed min-h-[44px];
+  }
+
+  .btn-secondary {
+    @apply bg-navy-light text-white px-6 py-2.5 rounded-lg font-medium border border-slate-600
+      hover:bg-navy-mid active:bg-navy active:scale-[0.98] transition-all duration-200
+      focus:outline-none focus:ring-2 focus:ring-gold/50 focus:ring-offset-2 focus:ring-offset-navy-dark min-h-[44px];
+  }
+
+  .input-field {
+    @apply w-full px-4 py-2.5 rounded-lg border border-slate-600 bg-navy-light
+      text-white placeholder-slate-400
+      focus:outline-none focus:ring-2 focus:ring-gold focus:border-gold
+      transition-all duration-200 min-h-[44px];
+  }
+
+  .input-error {
+    @apply border-red-400 focus:ring-red-500 focus:border-red-500;
+  }
+
+  .card-navy {
+    @apply bg-navy rounded-xl border border-slate-700/50 shadow-lg;
+  }
+
+  .card-navy-light {
+    @apply bg-navy-light rounded-xl border border-slate-700/50 shadow-lg;
+  }
+
+  .gold-shimmer {
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(212, 168, 75, 0.1) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2.5s ease-in-out infinite;
+  }
+
+  .text-gold-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #d4a84b 0%, #e8c876 50%, #d4a84b 100%);
+  }
+
+  .gold-glow-card {
+    box-shadow: 0 0 20px rgba(212, 168, 75, 0.15), 0 0 60px rgba(212, 168, 75, 0.05);
+  }
+
+  .rank-1-glow {
+    background: linear-gradient(135deg, rgba(212, 168, 75, 0.08) 0%, transparent 50%);
+    box-shadow: 0 0 25px rgba(212, 168, 75, 0.2), inset 0 1px 0 rgba(212, 168, 75, 0.2);
+  }
+
+  .progress-bar-shimmer {
+    background: linear-gradient(
+      90deg,
+      rgba(212, 168, 75, 1) 0%,
+      rgba(232, 200, 118, 1) 50%,
+      rgba(212, 168, 75, 1) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2s ease-in-out infinite;
+  }
+
+  .hero-glow {
+    background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(212, 168, 75, 0.08) 0%, transparent 70%);
+  }
+
+  .live-dot {
+    @apply w-2 h-2 rounded-full bg-emerald-400;
+    box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+    animation: livePulse 2s ease-in-out infinite;
+  }
+
+  /* XP Bar - RPG style */
+  .xp-bar {
+    @apply relative h-2 rounded-full overflow-hidden;
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(100, 116, 139, 0.3);
+  }
+
+  .xp-bar-fill {
+    @apply h-full rounded-full transition-all duration-1000 ease-out;
+    background: linear-gradient(90deg, #059669 0%, #34d399 50%, #6ee7b7 100%);
+    box-shadow: 0 0 8px rgba(52, 211, 153, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  }
+
+  /* Champion card - rank 1 special treatment */
+  .champion-card {
+    position: relative;
+    background: linear-gradient(135deg, rgba(212, 168, 75, 0.1) 0%, rgba(30, 58, 95, 1) 40%, rgba(30, 58, 95, 1) 60%, rgba(212, 168, 75, 0.05) 100%);
+    box-shadow:
+      0 0 30px rgba(212, 168, 75, 0.25),
+      0 0 60px rgba(212, 168, 75, 0.1),
+      inset 0 1px 0 rgba(212, 168, 75, 0.3);
+  }
+
+  .champion-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: linear-gradient(135deg, rgba(212, 168, 75, 0.6), transparent 40%, transparent 60%, rgba(212, 168, 75, 0.4));
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* Combo multiplier neon text */
+  .combo-text {
+    text-shadow: 0 0 10px currentColor, 0 0 20px currentColor, 0 0 40px currentColor;
+  }
+
+  /* VS badge */
+  .vs-badge {
+    @apply font-black text-xs;
+    text-shadow: 0 0 10px rgba(239, 68, 68, 0.8), 0 0 20px rgba(239, 68, 68, 0.4);
+  }
+
+  /* Scan-line overlay for arcade header */
+  .scan-lines {
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 2px,
+      rgba(0, 0, 0, 0.03) 4px
+    );
+  }
+
+  /* Quest card */
+  .quest-card {
+    @apply relative rounded-lg border overflow-hidden;
+    background: linear-gradient(145deg, rgba(26, 39, 68, 0.9) 0%, rgba(17, 24, 39, 0.95) 100%);
+  }
+
+  /* Tier glow rings */
+  .tier-glow-diamond {
+    box-shadow: 0 0 12px rgba(96, 165, 250, 0.5), 0 0 24px rgba(96, 165, 250, 0.2);
+    animation: tierGlowBlue 2s ease-in-out infinite;
+  }
+
+  .tier-glow-platinum {
+    box-shadow: 0 0 10px rgba(229, 231, 235, 0.4), 0 0 20px rgba(229, 231, 235, 0.15);
+    animation: tierGlowWhite 2.5s ease-in-out infinite;
+  }
+
+  .tier-glow-gold {
+    box-shadow: 0 0 10px rgba(212, 168, 75, 0.4), 0 0 20px rgba(212, 168, 75, 0.15);
+    animation: tierGlowGold 2s ease-in-out infinite;
+  }
+
+  /* Particle container */
+  .particles {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .particle {
+    position: absolute;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: rgba(212, 168, 75, 0.6);
+    animation: particleRise 3s ease-out infinite;
+  }
+
+  /* Trophy case locked badge */
+  .badge-locked {
+    @apply opacity-30 grayscale;
+    filter: grayscale(1) brightness(0.4);
+  }
+
+  /* Digital clock font style */
+  .digital-clock {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
+  }
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); }
+  50% { opacity: 0.6; box-shadow: 0 0 12px rgba(52, 211, 153, 0.8); }
+}
+
+@keyframes tierGlowBlue {
+  0%, 100% { box-shadow: 0 0 12px rgba(96, 165, 250, 0.5), 0 0 24px rgba(96, 165, 250, 0.2); }
+  50% { box-shadow: 0 0 18px rgba(96, 165, 250, 0.7), 0 0 36px rgba(96, 165, 250, 0.3); }
+}
+
+@keyframes tierGlowWhite {
+  0%, 100% { box-shadow: 0 0 10px rgba(229, 231, 235, 0.4), 0 0 20px rgba(229, 231, 235, 0.15); }
+  50% { box-shadow: 0 0 16px rgba(229, 231, 235, 0.6), 0 0 30px rgba(229, 231, 235, 0.25); }
+}
+
+@keyframes tierGlowGold {
+  0%, 100% { box-shadow: 0 0 10px rgba(212, 168, 75, 0.4), 0 0 20px rgba(212, 168, 75, 0.15); }
+  50% { box-shadow: 0 0 16px rgba(212, 168, 75, 0.6), 0 0 30px rgba(212, 168, 75, 0.25); }
+}
+
+@keyframes particleRise {
+  0% { transform: translateY(100%) scale(0); opacity: 0; }
+  10% { opacity: 1; }
+  100% { transform: translateY(-100px) scale(1); opacity: 0; }
+}
+
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
