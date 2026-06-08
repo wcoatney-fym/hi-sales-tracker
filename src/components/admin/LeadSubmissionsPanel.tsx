@@ -185,6 +185,3 @@ export default function LeadSubmissionsPanel({ token }: { token: string }) {
     </div>
   );
 }
-
-
-export default LeadSubmissionsPanel
