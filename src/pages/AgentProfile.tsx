@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   LogOut,
   Loader2,
   LayoutDashboard,
   BookOpen,
   Award,
+  Send,
 } from "lucide-react";
 import { useAgentAuth } from "../hooks/useAgentAuth";
-import { getAgentStats } from "../lib/api";
+import { getAgentStats, getLeadFormConfig } from "../lib/api";
 import { TIER_CONFIG } from "../types/leaderboard";
 import AgentDashboardTab from "../components/agent/AgentDashboardTab";
 import AgentBookTab from "../components/agent/AgentBookTab";
@@ -37,6 +38,7 @@ export default function AgentProfile() {
   const [profile, setProfile] = useState<AgentProfileData | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [showLeadForm, setShowLeadForm] = useState(false);
 
   const fetchProfile = useCallback(async () => {
     if (!agent) return;
@@ -44,6 +46,14 @@ export default function AgentProfile() {
     try {
       const statsData = await getAgentStats(agent.id);
       setProfile(statsData.profile);
+
+      // Check if lead form is available for FYM agents
+      if (!agent.agencySlug || agent.agencySlug === "fym") {
+        try {
+          const config = await getLeadFormConfig();
+          setShowLeadForm(config.enabled);
+        } catch { /* ignore */ }
+      }
     } catch {
       // silently fail
     } finally {
@@ -164,6 +174,16 @@ export default function AgentProfile() {
 
       {/* Tab Content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 pt-5">
+        {showLeadForm && (
+          <Link
+            to="/lead-submit"
+            className="flex items-center gap-2 mb-5 px-4 py-3 bg-blue-600/10 border border-blue-500/20 rounded-xl text-blue-400 hover:bg-blue-600/20 transition-all group"
+          >
+            <Send size={16} className="text-blue-400 group-hover:text-blue-300" />
+            <span className="text-sm font-medium">Submit a Lead</span>
+            <span className="ml-auto text-xs text-blue-500/60">New client lead form</span>
+          </Link>
+        )}
         {activeTab === "dashboard" && (
           <AgentDashboardTab
             sessionToken={sessionToken}

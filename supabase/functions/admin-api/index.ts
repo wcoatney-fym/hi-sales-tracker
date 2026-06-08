@@ -4600,6 +4600,103 @@ Deno.serve(async (req: Request) => {
         });
       }
 
+      case "get-lead-vendors": {
+        const { data: vendors, error: vErr } = await supabase
+          .from("lead_vendors")
+          .select("id, name, is_active, created_at")
+          .order("name");
+        if (vErr) throw vErr;
+        return jsonResponse({ vendors: vendors || [] });
+      }
+
+      case "create-lead-vendor": {
+        const { name: vendorName } = body;
+        if (!vendorName?.trim()) return jsonResponse({ error: "Vendor name required" }, 400);
+        const { data: newVendor, error: cvErr } = await supabase
+          .from("lead_vendors")
+          .insert({ name: vendorName.trim() })
+          .select()
+          .single();
+        if (cvErr) {
+          if (cvErr.code === "23505") return jsonResponse({ error: "Vendor already exists" }, 409);
+          throw cvErr;
+        }
+        return jsonResponse({ vendor: newVendor });
+      }
+
+      case "update-lead-vendor": {
+        const { id: vendorId, name: newName, is_active: vendorActive } = body;
+        if (!vendorId) return jsonResponse({ error: "Vendor ID required" }, 400);
+        const updates: Record<string, unknown> = {};
+        if (newName !== undefined) updates.name = newName.trim();
+        if (vendorActive !== undefined) updates.is_active = !!vendorActive;
+        if (Object.keys(updates).length === 0) return jsonResponse({ error: "No updates provided" }, 400);
+        const { data: updatedVendor, error: uvErr } = await supabase
+          .from("lead_vendors")
+          .update(updates)
+          .eq("id", vendorId)
+          .select()
+          .single();
+        if (uvErr) {
+          if (uvErr.code === "23505") return jsonResponse({ error: "Vendor name already exists" }, 409);
+          throw uvErr;
+        }
+        return jsonResponse({ vendor: updatedVendor });
+      }
+
+      case "delete-lead-vendor": {
+        const { id: delVendorId } = body;
+        if (!delVendorId) return jsonResponse({ error: "Vendor ID required" }, 400);
+        const { error: dvErr } = await supabase
+          .from("lead_vendors")
+          .update({ is_active: false })
+          .eq("id", delVendorId);
+        if (dvErr) throw dvErr;
+        return jsonResponse({ success: true });
+      }
+
+      case "toggle-lead-form": {
+        const { enabled } = body;
+        const { error: tlErr } = await supabase
+          .from("admin_settings")
+          .upsert({ key: "fym_lead_form_enabled", value: { enabled: !!enabled }, updated_at: new Date().toISOString() }, { onConflict: "key" });
+        if (tlErr) throw tlErr;
+        return jsonResponse({ success: true, enabled: !!enabled });
+      }
+
+      case "get-lead-form-status": {
+        const { data: lfSetting } = await supabase
+          .from("admin_settings")
+          .select("value")
+          .eq("key", "fym_lead_form_enabled")
+          .maybeSingle();
+        return jsonResponse({ enabled: lfSetting?.value?.enabled === true });
+      }
+
+      case "get-lead-submissions": {
+        const { page = 1, pageSize = 50, search, startDate, endDate } = body;
+        let query = supabase
+          .from("lead_submissions")
+          .select("*", { count: "exact" })
+          .order("created_at", { ascending: false });
+
+        if (startDate) query = query.gte("created_at", startDate);
+        if (endDate) query = query.lte("created_at", endDate + "T23:59:59");
+        if (search) {
+          query = query.or(
+            `agent_first_name.ilike.%${search}%,agent_last_name.ilike.%${search}%,client_first_name.ilike.%${search}%,client_last_name.ilike.%${search}%,lead_vendor.ilike.%${search}%`
+          );
+        }
+
+        const from = ((page as number) - 1) * (pageSize as number);
+        const to = from + (pageSize as number) - 1;
+        query = query.range(from, to);
+
+        const { data: submissions, count, error: lsErr } = await query;
+        if (lsErr) throw lsErr;
+        return jsonResponse({ submissions: submissions || [], total: count || 0 });
+      }
+
       default:
         return jsonResponse({ error: "Unknown action" }, 400);
     }

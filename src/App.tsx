@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Header from "./components/layout/Header";
 import Leaderboard from "./pages/Leaderboard";
 import IntakeForm from "./pages/IntakeForm";
+import LeadIntakeForm from "./pages/LeadIntakeForm";
 import ThankYou from "./pages/ThankYou";
 import AdminLogin from "./pages/AdminLogin";
 import AdminDashboard from "./pages/AdminDashboard";
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/" element={<AgentProfile />} />
           <Route path="/leaderboard" element={<Leaderboard />} />
           <Route path="/submit" element={<IntakeForm />} />
+          <Route path="/lead-submit" element={<LeadIntakeForm />} />
           <Route path="/thank-you" element={<ThankYou />} />
           <Route path="/agent" element={<AgentLogin />} />
           <Route path="/agent/profile" element={<Navigate to="/" replace />} />

@@ -11,6 +11,8 @@ import {
   ClipboardCheck,
   FileText,
   KeyRound,
+  Contact,
+  ClipboardList,
 } from "lucide-react";
 import AgentsTable from "../admin/AgentsTable";
 import DataSourcesPanel from "../admin/DataSourcesPanel";
@@ -23,13 +25,15 @@ import FuzzyMatchPanel from "../admin/FuzzyMatchPanel";
 import AuditPanel from "../admin/AuditPanel";
 import IntakeSubmissionsPanel from "../admin/IntakeSubmissionsPanel";
 import AgencyCredentialsPanel from "../admin/AgencyCredentialsPanel";
+import LeadVendorsPanel from "../admin/LeadVendorsPanel";
+import LeadSubmissionsPanel from "../admin/LeadSubmissionsPanel";
 import {
   adminGetRosterStatus,
   adminGetRosterUploads,
 } from "../../lib/api";
 import type { RosterStatus, RosterUpload } from "../../types";
 
-type SettingsSection = "agents" | "sources" | "rosters" | "promotions" | "tokens" | "unassigned" | "fuzzy" | "audit" | "intake" | "credentials";
+type SettingsSection = "agents" | "sources" | "rosters" | "promotions" | "tokens" | "unassigned" | "fuzzy" | "audit" | "intake" | "credentials" | "lead-vendors" | "lead-submissions";
 
 const SECTIONS: { key: SettingsSection; label: string; icon: React.ElementType; description: string }[] = [
   { key: "agents", label: "Agent Directory", icon: Users, description: "Manage agents, fix names, sync rosters" },
@@ -41,6 +45,8 @@ const SECTIONS: { key: SettingsSection; label: string; icon: React.ElementType; 
   { key: "tokens", label: "Agent Tokens", icon: Coins, description: "Manage talk time and token balances" },
   { key: "audit", label: "Data Audit", icon: ClipboardCheck, description: "Review and resolve duplicate agents and data conflicts" },
   { key: "intake", label: "Intake Submissions", icon: FileText, description: "Full history of intake form submissions for auditing" },
+  { key: "lead-vendors", label: "Lead Form Settings", icon: Contact, description: "Toggle lead form visibility and manage vendor options" },
+  { key: "lead-submissions", label: "Lead Submissions", icon: ClipboardList, description: "View submitted client leads from agents" },
   { key: "credentials", label: "Agency Access", icon: KeyRound, description: "View and manage agency portal login credentials" },
 ];
 
@@ -136,6 +142,8 @@ export default function SettingsPanel({ token }: SettingsPanelProps) {
       {activeSection === "fuzzy" && <FuzzyMatchPanel token={token} />}
       {activeSection === "audit" && <AuditPanel token={token} />}
       {activeSection === "intake" && <IntakeSubmissionsPanel token={token} />}
+      {activeSection === "lead-vendors" && <LeadVendorsPanel token={token} />}
+      {activeSection === "lead-submissions" && <LeadSubmissionsPanel token={token} />}
       {activeSection === "credentials" && <AgencyCredentialsPanel token={token} />}
     </div>
   );

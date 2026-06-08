@@ -67,6 +67,42 @@ export async function submitForm(formData: Record<string, unknown>) {
   return callApi("public-api", { action: "submit-form", formData });
 }
 
+export async function getLeadFormConfig() {
+  return callApi("public-api", { action: "get-lead-form-config" });
+}
+
+export async function submitLead(formData: Record<string, unknown>) {
+  return callApi("public-api", { action: "submit-lead", formData });
+}
+
+export async function adminGetLeadVendors(token: string) {
+  return callApi("admin-api", { action: "get-lead-vendors", token });
+}
+
+export async function adminCreateLeadVendor(token: string, name: string) {
+  return callApi("admin-api", { action: "create-lead-vendor", token, name });
+}
+
+export async function adminUpdateLeadVendor(token: string, id: string, updates: { name?: string; is_active?: boolean }) {
+  return callApi("admin-api", { action: "update-lead-vendor", token, id, ...updates });
+}
+
+export async function adminDeleteLeadVendor(token: string, id: string) {
+  return callApi("admin-api", { action: "delete-lead-vendor", token, id });
+}
+
+export async function adminToggleLeadForm(token: string, enabled: boolean) {
+  return callApi("admin-api", { action: "toggle-lead-form", token, enabled });
+}
+
+export async function adminGetLeadFormStatus(token: string) {
+  return callApi("admin-api", { action: "get-lead-form-status", token });
+}
+
+export async function adminGetLeadSubmissions(token: string, opts: { page?: number; pageSize?: number; search?: string; startDate?: string; endDate?: string } = {}) {
+  return callApi("admin-api", { action: "get-lead-submissions", token, ...opts });
+}
+
 export async function adminLogin(email: string, password: string) {
   return callApi("admin-api", { action: "login", email, password });
 }
