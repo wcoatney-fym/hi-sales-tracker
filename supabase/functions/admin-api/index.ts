@@ -1818,7 +1818,7 @@ Deno.serve(async (req: Request) => {
       }
 
       case "trigger-poll": {
-        const { sourceId: pollSourceId } = body;
+        const { sourceId: pollSourceId, date_range: pollDateRange } = body;
         if (!pollSourceId) return jsonResponse({ error: "Source ID required" }, 400);
 
         const { data: pollSource, error: pollSourceErr } = await supabase
@@ -1836,13 +1836,36 @@ Deno.serve(async (req: Request) => {
           ? (isEnvVarName ? (Deno.env.get(rawSecret) || "") : rawSecret)
           : "";
 
-        const apiResponse = await fetch(pollSource.api_url, {
-          method: "GET",
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-        });
+        // Detect EnrollHere source (requires POST with JSON body)
+        const isEnrollHere = pollSource.name === "EnrollHere Dialer";
+
+        let apiResponse: Response;
+        if (isEnrollHere) {
+          const enrollBody = {
+            aggregations: { summary: true },
+            filter: {
+              date: { range: pollDateRange || "today", start: "", end: "", timeframe: 1, timeZone: "" },
+              agency: { id: "", ids: [] as string[] },
+              agent: { id: "", ids: [] as string[] },
+            },
+          };
+          apiResponse = await fetch(pollSource.api_url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": apiKey,
+            },
+            body: JSON.stringify(enrollBody),
+          });
+        } else {
+          apiResponse = await fetch(pollSource.api_url, {
+            method: "GET",
+            headers: {
+              "Authorization": `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+          });
+        }
 
         if (!apiResponse.ok) {
           const errText = await apiResponse.text();
@@ -1850,13 +1873,13 @@ Deno.serve(async (req: Request) => {
         }
 
         const apiData = await apiResponse.json();
-        const records = Array.isArray(apiData) ? apiData : (apiData.data || apiData.results || apiData.calls || [apiData]);
+        const records = Array.isArray(apiData) ? apiData : (apiData.data || apiData.results || apiData.agents || apiData.calls || [apiData]);
 
         const { data: upload, error: uploadErr } = await supabase
           .from("source_uploads")
           .insert({
             data_source_id: pollSourceId,
-            carrier: "EnrollHere",
+            carrier: pollSource.name || "API",
             filename: `api_poll_${new Date().toISOString()}`,
             row_count: records.length,
             status: "complete",
