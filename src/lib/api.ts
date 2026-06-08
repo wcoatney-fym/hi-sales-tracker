@@ -765,6 +765,10 @@ export async function adminResyncPolicies(token: string, uploadId: string, offse
   return callApi("admin-api", { action: "resync-policies", token, uploadId, offset, batchSize });
 }
 
+export async function adminPruneSourceRecords(token: string, dryRun = true, retentionDays = 7) {
+  return callApi("admin-api", { action: "prune-source-records", token, dryRun, retentionDays });
+}
+
 export async function adminGetAtRiskAgentsSummary(token: string, agencyFilter?: string, agencies?: string[]) {
   return callApi("admin-api", { action: "at-risk-agents-summary", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
 }

@@ -4480,6 +4480,126 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      case "prune-source-records": {
+        const { dryRun = true, retentionDays = 7 } = body;
+
+        const cutoff = new Date(Date.now() - (retentionDays as number) * 24 * 60 * 60 * 1000).toISOString();
+
+        // Find the most recent active+complete upload per data_source_id+carrier (always protected)
+        const { data: allUploadsForPrune } = await supabase
+          .from("source_uploads")
+          .select("id, data_source_id, carrier, filename, status, is_active, row_count, created_at")
+          .order("created_at", { ascending: false });
+
+        const protectedIds = new Set<string>();
+        const seenKeys = new Set<string>();
+        for (const u of allUploadsForPrune || []) {
+          const key = `${u.data_source_id}::${u.carrier}`;
+          if (!seenKeys.has(key) && u.is_active && u.status === "complete") {
+            protectedIds.add(u.id);
+            seenKeys.add(key);
+          }
+        }
+
+        // Candidates: older than cutoff, not the protected latest, not currently processing
+        const candidates: Array<{
+          uploadId: string; filename: string; carrier: string;
+          completedAt: string; isActive: boolean; sourceRecordCount: number;
+        }> = [];
+
+        for (const u of allUploadsForPrune || []) {
+          if (protectedIds.has(u.id)) continue;
+          if (u.status === "processing") continue;
+          if (new Date(u.created_at) >= new Date(cutoff)) continue;
+
+          const { count } = await supabase
+            .from("source_records")
+            .select("id", { count: "exact", head: true })
+            .eq("source_upload_id", u.id);
+
+          candidates.push({
+            uploadId: u.id,
+            filename: u.filename,
+            carrier: u.carrier,
+            completedAt: u.created_at,
+            isActive: u.is_active,
+            sourceRecordCount: count || 0,
+          });
+        }
+
+        const totalRowsWouldDelete = candidates.reduce((sum, c) => sum + c.sourceRecordCount, 0);
+        const remainingUploads = (allUploadsForPrune || []).length - candidates.length;
+
+        // Safety guards
+        if (remainingUploads <= 0) {
+          return jsonResponse({
+            aborted: true,
+            reason: "Pruning would leave zero uploads -- aborting",
+            candidates,
+            totalRowsWouldDelete,
+          });
+        }
+
+        const { count: currentTotalRecords } = await supabase
+          .from("source_records")
+          .select("id", { count: "exact", head: true });
+
+        if ((currentTotalRecords || 0) - totalRowsWouldDelete <= 0) {
+          return jsonResponse({
+            aborted: true,
+            reason: "Pruning would leave zero source_records -- aborting",
+            candidates,
+            totalRowsWouldDelete,
+          });
+        }
+
+        if (dryRun) {
+          return jsonResponse({
+            dryRun: true,
+            retentionDays,
+            cutoffDate: cutoff,
+            candidates,
+            totalRowsWouldDelete,
+            remainingUploads,
+            remainingRecords: (currentTotalRecords || 0) - totalRowsWouldDelete,
+          });
+        }
+
+        // Actual deletion (same path as delete-source-upload)
+        let totalDeletedPolicies = 0;
+        let totalDeletedRecords = 0;
+        let uploadsDeleted = 0;
+
+        for (const candidate of candidates) {
+          const { count: delPolicies } = await supabase
+            .from("form_submissions")
+            .delete({ count: "exact" })
+            .eq("source_upload_id", candidate.uploadId);
+
+          const { count: delRecords } = await supabase
+            .from("source_records")
+            .delete({ count: "exact" })
+            .eq("source_upload_id", candidate.uploadId);
+
+          await supabase
+            .from("source_uploads")
+            .delete()
+            .eq("id", candidate.uploadId);
+
+          totalDeletedPolicies += delPolicies || 0;
+          totalDeletedRecords += delRecords || 0;
+          uploadsDeleted++;
+        }
+
+        return jsonResponse({
+          dryRun: false,
+          uploadsDeleted,
+          totalDeletedPolicies,
+          totalDeletedRecords,
+          remainingUploads,
+        });
+      }
+
       default:
         return jsonResponse({ error: "Unknown action" }, 400);
     }
