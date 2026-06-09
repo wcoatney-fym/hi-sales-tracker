@@ -16,6 +16,9 @@ import {
   RotateCcw,
   ServerCrash,
   AlertCircle,
+  Timer,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
 import {
   adminListDataSources,
@@ -28,6 +31,9 @@ import {
   adminDeleteSourceUpload,
   adminResyncPolicies,
   adminTestSqlConnection,
+  adminConfirmAutoImport,
+  adminDisableAutoImport,
+  adminGetColumnMappings,
 } from "../../lib/api";
 import SourceUploadFlow from "./SourceUploadFlow";
 import SqlImportFlow from "./SqlImportFlow";
@@ -81,6 +87,12 @@ interface DataSource {
   db_table: string | null;
   db_user: string | null;
   db_password_secret_name: string | null;
+  default_carrier: string | null;
+  auto_cron_enabled: boolean;
+  auto_cron_confirmed_at: string | null;
+  auto_cron_confirmed_by: string | null;
+  last_auto_pull_at: string | null;
+  auto_cron_mapping_snapshot: Array<{ source_column: string; target_field: string }> | null;
 }
 
 interface SourceUpload {
@@ -138,6 +150,10 @@ export default function DataSourcesPanel({ token }: { token: string }) {
   const [syncingUploadId, setSyncingUploadId] = useState<string | null>(null);
   const [syncProgress, setSyncProgress] = useState<{ offset: number; total: number } | null>(null);
   const syncAbortRef = useRef(false);
+  const [showAutoImportAudit, setShowAutoImportAudit] = useState(false);
+  const [autoImportMappings, setAutoImportMappings] = useState<Array<{ source_column: string; target_field: string }>>([]);
+  const [confirmingAutoImport, setConfirmingAutoImport] = useState(false);
+  const [disablingAutoImport, setDisablingAutoImport] = useState(false);
 
   const fetchSources = useCallback(async () => {
     setLoading(true);
@@ -738,6 +754,154 @@ export default function DataSourcesPanel({ token }: { token: string }) {
                   {savingConfig ? "Saving..." : "Save Configuration"}
                 </button>
               </div>
+            </div>
+          )}
+
+          {selectedSource.type === "sql_import" && (
+            <div className="mb-6 p-5 bg-navy-light/50 rounded-lg border border-slate-700/50">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Timer size={16} className="text-slate-400" />
+                  <h4 className="text-sm font-semibold text-slate-200">Automated Import Schedule</h4>
+                </div>
+                <div className="flex items-center gap-2">
+                  {selectedSource.auto_cron_enabled ? (
+                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-900/40 text-emerald-300 border border-emerald-700/50">
+                      <CheckCircle2 size={12} />
+                      Active
+                    </span>
+                  ) : selectedSource.auto_cron_confirmed_at ? (
+                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-900/40 text-amber-300 border border-amber-700/50">
+                      <AlertCircle size={12} />
+                      Paused
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-600/50">
+                      <XCircle size={12} />
+                      Not Configured
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-400 mb-3 space-y-1">
+                <p>Runs automatically at <span className="text-slate-200 font-medium">7:00 AM</span> and <span className="text-slate-200 font-medium">6:00 PM EST</span> daily.</p>
+                {selectedSource.last_auto_pull_at && (
+                  <p>Last auto pull: <span className="text-slate-200">{new Date(selectedSource.last_auto_pull_at).toLocaleString()}</span></p>
+                )}
+                {selectedSource.auto_cron_confirmed_by && (
+                  <p>Confirmed by: <span className="text-slate-200">{selectedSource.auto_cron_confirmed_by}</span> on {new Date(selectedSource.auto_cron_confirmed_at!).toLocaleDateString()}</p>
+                )}
+                {!selectedSource.auto_cron_enabled && selectedSource.auto_cron_confirmed_at && (
+                  <p className="text-amber-300">Auto-import paused -- column mappings may have changed since confirmation. Re-confirm to resume.</p>
+                )}
+              </div>
+
+              {!showAutoImportAudit ? (
+                <div className="flex items-center gap-2">
+                  {!selectedSource.auto_cron_enabled ? (
+                    <button
+                      onClick={async () => {
+                        const res = await adminGetColumnMappings(token, selectedSource.id);
+                        setAutoImportMappings(res.mappings || []);
+                        setShowAutoImportAudit(true);
+                      }}
+                      className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-navy-dark bg-gold rounded-lg hover:bg-gold-light transition-colors"
+                    >
+                      <CheckCircle2 size={14} />
+                      {selectedSource.auto_cron_confirmed_at ? "Re-confirm & Enable" : "Enable Auto-Import"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        setDisablingAutoImport(true);
+                        try {
+                          await adminDisableAutoImport(token, selectedSource.id);
+                          setSelectedSource({ ...selectedSource, auto_cron_enabled: false });
+                          fetchSources();
+                        } finally {
+                          setDisablingAutoImport(false);
+                        }
+                      }}
+                      disabled={disablingAutoImport}
+                      className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-red-600/80 rounded-lg hover:bg-red-500 disabled:opacity-50 transition-colors"
+                    >
+                      {disablingAutoImport ? <Loader2 size={14} className="animate-spin" /> : <XCircle size={14} />}
+                      Disable Auto-Import
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-3 pt-3 border-t border-slate-700/50">
+                  <h5 className="text-xs font-semibold text-slate-200 uppercase tracking-wider mb-3">Mapping Audit</h5>
+                  {autoImportMappings.length === 0 ? (
+                    <div className="px-3 py-4 rounded-lg bg-red-900/20 border border-red-700/50 text-xs text-red-300 text-center">
+                      No column mappings found. Run a manual import first to configure mappings.
+                    </div>
+                  ) : (
+                    <>
+                      <div className="rounded-lg border border-slate-700/50 overflow-hidden mb-3 max-h-60 overflow-y-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-800/60 sticky top-0">
+                            <tr>
+                              <th className="px-3 py-2 text-left text-slate-400 font-medium">Source Column</th>
+                              <th className="px-3 py-2 text-left text-slate-400 font-medium">Target Field</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-700/30">
+                            {autoImportMappings.map((m, i) => (
+                              <tr key={i} className="hover:bg-slate-800/30">
+                                <td className="px-3 py-1.5 text-slate-300 font-mono">{m.source_column}</td>
+                                <td className="px-3 py-1.5 text-emerald-300 font-mono">{m.target_field}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="px-3 py-2 rounded-lg bg-slate-800/40 border border-slate-700/50 text-xs text-slate-300 mb-3">
+                        <p className="font-medium text-slate-200 mb-1">Before confirming:</p>
+                        <ul className="list-disc list-inside space-y-0.5 text-slate-400">
+                          <li>These mappings will be locked for automated runs</li>
+                          <li>If you edit mappings later, auto-import will pause until re-confirmed</li>
+                          <li>Carrier: <span className="text-slate-200 font-medium">{selectedSource.default_carrier || "UNL"}</span></li>
+                          <li>Schedule: 7:00 AM + 6:00 PM EST daily</li>
+                        </ul>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async () => {
+                            setConfirmingAutoImport(true);
+                            try {
+                              await adminConfirmAutoImport(token, selectedSource.id);
+                              setSelectedSource({
+                                ...selectedSource,
+                                auto_cron_enabled: true,
+                                auto_cron_confirmed_at: new Date().toISOString(),
+                                auto_cron_mapping_snapshot: autoImportMappings,
+                              });
+                              setShowAutoImportAudit(false);
+                              fetchSources();
+                            } finally {
+                              setConfirmingAutoImport(false);
+                            }
+                          }}
+                          disabled={confirmingAutoImport}
+                          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-navy-dark bg-gold rounded-lg hover:bg-gold-light disabled:opacity-50 transition-colors"
+                        >
+                          {confirmingAutoImport ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                          {confirmingAutoImport ? "Confirming..." : "Confirm & Enable"}
+                        </button>
+                        <button
+                          onClick={() => setShowAutoImportAudit(false)}
+                          className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

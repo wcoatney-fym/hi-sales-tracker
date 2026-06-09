@@ -711,6 +711,14 @@ export async function adminSaveColumnMappings(
   return callApi("admin-api", { action: "save-column-mappings", token, sourceId, mappings });
 }
 
+export async function adminConfirmAutoImport(token: string, sourceId: string) {
+  return callApi("admin-api", { action: "confirm-auto-import", token, sourceId });
+}
+
+export async function adminDisableAutoImport(token: string, sourceId: string) {
+  return callApi("admin-api", { action: "disable-auto-import", token, sourceId });
+}
+
 export async function adminAnalyzeSourceUpload(
   token: string,
   sourceId: string,

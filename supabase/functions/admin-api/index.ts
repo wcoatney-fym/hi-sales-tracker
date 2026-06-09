@@ -4352,6 +4352,58 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      case "confirm-auto-import": {
+        const { sourceId: caiSourceId } = body;
+        if (!caiSourceId) return jsonResponse({ error: "Source ID required" }, 400);
+
+        const { data: caiMappings } = await supabase
+          .from("column_mappings")
+          .select("source_column, target_field")
+          .eq("data_source_id", caiSourceId)
+          .order("source_column");
+
+        if (!caiMappings || caiMappings.length === 0) {
+          return jsonResponse({ error: "No column mappings configured for this source" }, 400);
+        }
+
+        const snapshot = caiMappings.map((m: { source_column: string; target_field: string }) => ({
+          source_column: m.source_column,
+          target_field: m.target_field,
+        }));
+
+        const { error: caiErr } = await supabase
+          .from("data_sources")
+          .update({
+            auto_cron_enabled: true,
+            auto_cron_confirmed_at: new Date().toISOString(),
+            auto_cron_confirmed_by: session.email,
+            auto_cron_mapping_snapshot: snapshot,
+          })
+          .eq("id", caiSourceId);
+
+        if (caiErr) throw caiErr;
+
+        await supabase.from("upload_history_log").insert({
+          action: "auto_import_confirmed",
+          details: { source_id: caiSourceId, confirmed_by: session.email, mapping_count: snapshot.length },
+        });
+
+        return jsonResponse({ success: true, mappingCount: snapshot.length });
+      }
+
+      case "disable-auto-import": {
+        const { sourceId: daiSourceId } = body;
+        if (!daiSourceId) return jsonResponse({ error: "Source ID required" }, 400);
+
+        const { error: daiErr } = await supabase
+          .from("data_sources")
+          .update({ auto_cron_enabled: false })
+          .eq("id", daiSourceId);
+
+        if (daiErr) throw daiErr;
+        return jsonResponse({ success: true });
+      }
+
       case "sql-import-count": {
         const { sourceId: sicSourceId } = body;
         if (!sicSourceId) return jsonResponse({ error: "Source ID required" }, 400);
