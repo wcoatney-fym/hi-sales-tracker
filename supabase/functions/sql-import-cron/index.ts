@@ -134,12 +134,13 @@ Deno.serve(async (req: Request) => {
   const sourceId = body.sourceId as string | undefined;
   const uploadId = body.uploadId as string | undefined;
   const offset = parseInt(String(body.offset || "0"), 10);
+  const orderColumnHint = body.orderColumn as string | undefined;
 
   try {
     if (phase === "init") {
       return await handleInit(supabase, supabaseUrl, serviceRoleKey);
     } else if (phase === "fetch") {
-      return await handleFetch(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, offset);
+      return await handleFetch(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, offset, orderColumnHint);
     } else if (phase === "sync") {
       return await handleSync(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, offset);
     }
@@ -264,6 +265,7 @@ async function handleFetch(
   sourceId: string,
   uploadId: string,
   offset: number,
+  orderColumnHint?: string,
 ) {
   const { data: source } = await supabase
     .from("data_sources")
@@ -333,8 +335,32 @@ async function handleFetch(
       }
     }
 
+    // Determine stable sort column for deterministic pagination
+    let orderColumn = orderColumnHint || "";
+    if (!orderColumn) {
+      const colCheck = await sql`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = ${schemaName} AND table_name = ${tableName} AND column_name = '_dlt_id'
+      `;
+      if (colCheck.length > 0) {
+        orderColumn = "_dlt_id";
+      } else {
+        const pkResult = await sql`
+          SELECT a.attname
+          FROM pg_index i
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          JOIN pg_class c ON c.oid = i.indrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = ${schemaName} AND c.relname = ${tableName} AND i.indisprimary
+          ORDER BY array_position(i.indkey, a.attnum)
+          LIMIT 1
+        `;
+        orderColumn = pkResult.length > 0 ? pkResult[0].attname : "_dlt_id";
+      }
+    }
+
     const result = await sql.unsafe(
-      `SELECT * FROM "${schemaName}"."${tableName}" LIMIT $1 OFFSET $2`,
+      `SELECT * FROM "${schemaName}"."${tableName}" ORDER BY "${orderColumn}" LIMIT $1 OFFSET $2`,
       [batchLimit, offset]
     );
 
@@ -355,6 +381,10 @@ async function handleFetch(
         const target = mappingObj[col];
         if (target) mapped[target] = val;
       }
+      // Trim whitespace on code fields that commonly have trailing spaces
+      for (const codeField of ["UNL Writing Number", "Writing Agent Code", "Policy Number", "Downline Code", "FYM Agency Code"]) {
+        if (mapped[codeField]) mapped[codeField] = mapped[codeField].trim();
+      }
       if (mapped["Writing Agent"] && !mapped["Writing Agent First Name"]) {
         const parts = mapped["Writing Agent"].trim().split(/\s+/).filter(Boolean);
         mapped["Writing Agent First Name"] = parts.length > 0 ? parts[0] : "";
@@ -368,9 +398,39 @@ async function handleFetch(
       };
     });
 
+    // Idempotent staging: skip rows whose _dlt_id already exists for this upload
+    const incomingDltIds = rows
+      .map((r: Record<string, string>) => r["_dlt_id"] || r["dlt_id"] || "")
+      .filter((id: string) => id !== "");
+    const existingDltIds = new Set<string>();
+    if (incomingDltIds.length > 0) {
+      for (let i = 0; i < incomingDltIds.length; i += 200) {
+        const chunk = incomingDltIds.slice(i, i + 200);
+        const { data: existing } = await supabase
+          .from("source_records")
+          .select("raw_data")
+          .eq("source_upload_id", uploadId)
+          .in("raw_data->>_dlt_id", chunk);
+        for (const row of existing || []) {
+          const rd = row.raw_data as Record<string, string> | null;
+          if (rd && (rd["_dlt_id"] || rd["dlt_id"])) {
+            existingDltIds.add(rd["_dlt_id"] || rd["dlt_id"]);
+          }
+        }
+      }
+    }
+
+    // Filter out already-staged rows
+    const newRows = existingDltIds.size > 0
+      ? recordRows.filter((_r: unknown, idx: number) => {
+          const dltId = rows[idx]["_dlt_id"] || rows[idx]["dlt_id"] || "";
+          return !dltId || !existingDltIds.has(dltId);
+        })
+      : recordRows;
+
     // Insert in sub-batches of 200
-    for (let i = 0; i < recordRows.length; i += 200) {
-      const batch = recordRows.slice(i, i + 200);
+    for (let i = 0; i < newRows.length; i += 200) {
+      const batch = newRows.slice(i, i + 200);
       await supabase.from("source_records").insert(batch);
     }
 
@@ -390,6 +450,7 @@ async function handleFetch(
         sourceId,
         uploadId,
         offset: nextOffset,
+        orderColumn,
       });
       return jsonResponse({ success: true, phase: "fetch", offset: nextOffset, fetched: rows.length, continuing: true });
     }
