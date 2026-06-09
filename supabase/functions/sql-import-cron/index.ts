@@ -85,6 +85,15 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
+function normalizeKeys(obj: Record<string, string> | null): Record<string, string> {
+  if (!obj) return {};
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    result[key.trim()] = value;
+  }
+  return result;
+}
+
 interface DataSource {
   id: string;
   name: string;
@@ -477,17 +486,16 @@ async function handleSync(
     const agentMap = new Map<string, { name: string; agency: string }>();
     const agentDownlineCounts = new Map<string, { total: number; withDownline: number }>();
     for (const rec of batchRecs) {
-      const md = rec.mapped_data as Record<string, string> | null;
-      if (!md) continue;
+      const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
       const code = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
       if (!code) continue;
-      const downline = (md["Downline Agency"] || "").trim();
+      const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
       const counts = agentDownlineCounts.get(code) || { total: 0, withDownline: 0 };
       counts.total++;
       if (downline) counts.withDownline++;
       agentDownlineCounts.set(code, counts);
       if (agentMap.has(code)) continue;
-      const name = (md["Writing Agent"] || "").trim();
+      const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
       agentMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
     }
     for (const [code, entry] of agentMap) {
@@ -495,11 +503,10 @@ async function handleSync(
         const counts = agentDownlineCounts.get(code);
         if (counts && counts.withDownline > 0) {
           for (const rec of batchRecs) {
-            const md = rec.mapped_data as Record<string, string> | null;
-            if (!md) continue;
+            const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
             const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
             if (rc !== code) continue;
-            const dl = (md["Downline Agency"] || "").trim();
+            const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
             if (dl) { entry.agency = toProperCase(dl); break; }
           }
         }
@@ -612,13 +619,12 @@ async function handleSync(
 
   const policyRows: Array<Record<string, unknown>> = [];
   for (const rec of batchRecs) {
-    const md = rec.mapped_data as Record<string, string> | null;
-    if (!md) continue;
+    const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
     const policyNumber = (md["Policy Number"] || "").trim();
     if (!policyNumber) continue;
 
     const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-    const writingAgent = (md["Writing Agent"] || "").trim();
+    const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
     const agentParts = writingAgent.split(/\s+/).filter(Boolean);
     const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
     const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
@@ -629,7 +635,7 @@ async function handleSync(
     const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
     const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
     const status = CONTRACT_STATUS[contractCode] || "pending";
-    const downlineAgency = (md["Downline Agency"] || "").trim();
+    const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
     const agency = rosterAgencyLookup.get(agentCode)
       || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
 

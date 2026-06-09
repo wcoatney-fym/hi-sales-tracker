@@ -83,6 +83,15 @@ function stripMiddleInitial(lastName: string): string {
   return match ? match[1] : trimmed;
 }
 
+function normalizeKeys(obj: Record<string, string> | null): Record<string, string> {
+  if (!obj) return {};
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    result[key.trim()] = value;
+  }
+  return result;
+}
+
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -2165,13 +2174,13 @@ Deno.serve(async (req: Request) => {
             if (!md) continue;
             const code = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
             if (!code) continue;
-            const downline = (md["Downline Agency"] || "").trim();
+            const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
             const counts = agentDownlineCounts.get(code) || { total: 0, withDownline: 0 };
             counts.total++;
             if (downline) counts.withDownline++;
             agentDownlineCounts.set(code, counts);
             if (agentMap.has(code)) continue;
-            const name = (md["Writing Agent"] || "").trim();
+            const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
             agentMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
           }
           for (const [code, entry] of agentMap) {
@@ -2183,7 +2192,7 @@ Deno.serve(async (req: Request) => {
                   if (!md) continue;
                   const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
                   if (rc !== code) continue;
-                  const dl = (md["Downline Agency"] || "").trim();
+                  const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
                   if (dl) { entry.agency = toProperCase(dl); break; }
                 }
               }
@@ -2349,7 +2358,7 @@ Deno.serve(async (req: Request) => {
             if (!policyNumber) continue;
 
             const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-            const writingAgent = (md["Writing Agent"] || "").trim();
+            const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
             const agentParts = writingAgent.split(/\s+/).filter(Boolean);
             const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
             const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
@@ -2360,7 +2369,7 @@ Deno.serve(async (req: Request) => {
             const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
             const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
             const status = CONTRACT_STATUS[contractCode] || "pending";
-            const downlineAgency = (md["Downline Agency"] || "").trim();
+            const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
             // Roster takes priority > downline agency from data > agent lookup > FYM default
             const agency = rosterAgencyLookup.get(agentCode)
               || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
@@ -2625,17 +2634,17 @@ Deno.serve(async (req: Request) => {
           const agentMap = new Map<string, { name: string; agency: string }>();
           const agentDownlineCounts = new Map<string, { total: number; withDownline: number }>();
           for (const rec of batchRecs) {
-            const md = rec.mapped_data as Record<string, string> | null;
-            if (!md) continue;
+            const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
+
             const code = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
             if (!code) continue;
-            const downline = (md["Downline Agency"] || "").trim();
+            const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
             const counts = agentDownlineCounts.get(code) || { total: 0, withDownline: 0 };
             counts.total++;
             if (downline) counts.withDownline++;
             agentDownlineCounts.set(code, counts);
             if (agentMap.has(code)) continue;
-            const name = (md["Writing Agent"] || "").trim();
+            const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
             agentMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
           }
           for (const [code, entry] of agentMap) {
@@ -2643,11 +2652,10 @@ Deno.serve(async (req: Request) => {
               const counts = agentDownlineCounts.get(code);
               if (counts && counts.withDownline > 0) {
                 for (const rec of batchRecs) {
-                  const md = rec.mapped_data as Record<string, string> | null;
-                  if (!md) continue;
+                  const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
                   const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
                   if (rc !== code) continue;
-                  const dl = (md["Downline Agency"] || "").trim();
+                  const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
                   if (dl) { entry.agency = toProperCase(dl); break; }
                 }
               }
@@ -2762,13 +2770,12 @@ Deno.serve(async (req: Request) => {
 
         const policyRows: Array<Record<string, unknown>> = [];
         for (const rec of batchRecs) {
-          const md = rec.mapped_data as Record<string, string> | null;
-          if (!md) continue;
+          const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
           const policyNumber = (md["Policy Number"] || "").trim();
           if (!policyNumber) continue;
 
           const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-          const writingAgent = (md["Writing Agent"] || "").trim();
+          const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
           const agentParts = writingAgent.split(/\s+/).filter(Boolean);
           const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
           const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
@@ -2779,7 +2786,7 @@ Deno.serve(async (req: Request) => {
           const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
           const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
           const status = CONTRACT_STATUS_RS[contractCode] || "pending";
-          const downlineAgency = (md["Downline Agency"] || "").trim();
+          const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
           const agency = rosterAgencyLookupRS.get(agentCode)
             || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
 
@@ -2956,13 +2963,13 @@ Deno.serve(async (req: Request) => {
 
           const rows: Array<Record<string, unknown>> = [];
           for (const rec of recs || []) {
-            const md = rec.mapped_data as Record<string, string> | null;
-            if (!md) continue;
+            const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
+
             const policyNumber = (md["Policy Number"] || "").trim();
             if (!policyNumber) continue;
 
             const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-            const writingAgent = (md["Writing Agent"] || "").trim();
+            const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
             const agentParts = writingAgent.split(/\s+/).filter(Boolean);
             const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
             const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
@@ -2974,7 +2981,7 @@ Deno.serve(async (req: Request) => {
             const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
             const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
             const status = CONTRACT_STATUS_SYNC[contractCode] || "pending";
-            const downlineAgencySync = (md["Downline Agency"] || "").trim();
+            const downlineAgencySync = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
             const agency = rosterAgencyLookupSync.get(agentCode)
               || (downlineAgencySync ? toProperCase(downlineAgencySync) : (agencyLookupSync.get(agentCode) || "FYM"));
 
@@ -3070,17 +3077,16 @@ Deno.serve(async (req: Request) => {
         const syncMap = new Map<string, { name: string; agency: string }>();
         const syncDownlineCounts = new Map<string, { total: number; withDownline: number }>();
         for (const rec of allRecs || []) {
-          const md = rec.mapped_data as Record<string, string> | null;
-          if (!md) continue;
+          const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
           const code = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
           if (!code) continue;
-          const downline = (md["Downline Agency"] || "").trim();
+          const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
           const counts = syncDownlineCounts.get(code) || { total: 0, withDownline: 0 };
           counts.total++;
           if (downline) counts.withDownline++;
           syncDownlineCounts.set(code, counts);
           if (syncMap.has(code)) continue;
-          const name = (md["Writing Agent"] || "").trim();
+          const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
           syncMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
         }
         for (const [code, entry] of syncMap) {
@@ -3088,11 +3094,10 @@ Deno.serve(async (req: Request) => {
             const counts = syncDownlineCounts.get(code);
             if (counts && counts.withDownline > 0) {
               for (const rec of allRecs || []) {
-                const md = rec.mapped_data as Record<string, string> | null;
-                if (!md) continue;
+                const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
                 const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
                 if (rc !== code) continue;
-                const dl = (md["Downline Agency"] || "").trim();
+                const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
                 if (dl) { entry.agency = toProperCase(dl); break; }
               }
             }
