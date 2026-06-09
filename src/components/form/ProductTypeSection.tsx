@@ -1,4 +1,4 @@
-import { Heart, Building2 } from "lucide-react";
+import { Heart, Building2, Shield, Smile, HeartPulse } from "lucide-react";
 import type { IntakeFormData } from "../../types";
 
 interface ProductTypeSectionProps {
@@ -36,6 +36,45 @@ const productOptions = [
     accentIcon: "text-emerald-400",
     accentBadge: "bg-emerald-500/20 text-emerald-300",
   },
+  {
+    value: "LIFE",
+    label: "Life Insurance",
+    abbr: "Life",
+    description: "Coverage that provides a death benefit to beneficiaries",
+    icon: Shield,
+    accentBorder: "border-amber-500/50",
+    accentBg: "bg-amber-500/10",
+    accentRing: "ring-amber-500/20",
+    accentText: "text-amber-300",
+    accentIcon: "text-amber-400",
+    accentBadge: "bg-amber-500/20 text-amber-300",
+  },
+  {
+    value: "DENTAL",
+    label: "Dental",
+    abbr: "Dental",
+    description: "Coverage for dental procedures, preventive care, and oral health",
+    icon: Smile,
+    accentBorder: "border-teal-500/50",
+    accentBg: "bg-teal-500/10",
+    accentRing: "ring-teal-500/20",
+    accentText: "text-teal-300",
+    accentIcon: "text-teal-400",
+    accentBadge: "bg-teal-500/20 text-teal-300",
+  },
+  {
+    value: "CANCER",
+    label: "Cancer/Stroke Coverage",
+    abbr: "Cancer",
+    description: "Coverage providing benefits upon diagnosis of cancer or stroke",
+    icon: HeartPulse,
+    accentBorder: "border-rose-500/50",
+    accentBg: "bg-rose-500/10",
+    accentRing: "ring-rose-500/20",
+    accentText: "text-rose-300",
+    accentIcon: "text-rose-400",
+    accentBadge: "bg-rose-500/20 text-rose-300",
+  },
 ] as const;
 
 export default function ProductTypeSection({
@@ -56,7 +95,7 @@ export default function ProductTypeSection({
         </p>
       </div>
 
-      <div className="grid sm:grid-cols-2 gap-4">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {productOptions.map((option) => {
           const Icon = option.icon;
           const selected = formData.productType === option.value;

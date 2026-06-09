@@ -1,8 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { FileText, CalendarClock, CalendarDays, Loader2 } from "lucide-react";
 import FormField from "../ui/FormField";
 import type { IntakeFormData } from "../../types";
 import { UNL_PLAN_OPTIONS } from "../../lib/planCodes";
+
+const OTHER_SENTINEL = "__OTHER__";
 
 interface PolicySectionProps {
   formData: IntakeFormData;
@@ -34,6 +36,20 @@ export default function PolicySection({
 }: PolicySectionProps) {
   const todayISO = useMemo(() => getTodayISO(), []);
   const isToday = formData.appSubmitDate === todayISO;
+  const isKnownPlan = UNL_PLAN_OPTIONS.includes(formData.planName);
+  const [isOther, setIsOther] = useState(
+    formData.planName !== "" && !isKnownPlan
+  );
+
+  const handlePlanSelect = (value: string) => {
+    if (value === OTHER_SENTINEL) {
+      setIsOther(true);
+      updateField("planName", "");
+    } else {
+      setIsOther(false);
+      updateField("planName", value);
+    }
+  };
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -55,34 +71,33 @@ export default function PolicySection({
         required
         error={errors.planName}
       >
-        {formData.carrier === "UNL" ? (
-          <select
-            id="planName"
-            className={`input-field ${errors.planName ? "input-error" : ""}`}
-            value={formData.planName}
-            onChange={(e) => updateField("planName", e.target.value)}
-            aria-invalid={!!errors.planName}
-            aria-describedby={errors.planName ? "planName-error" : undefined}
-          >
-            <option value="" disabled>
-              -- Select a Plan --
+        <select
+          id="planNameSelect"
+          className={`input-field ${errors.planName ? "input-error" : ""}`}
+          value={isOther ? OTHER_SENTINEL : formData.planName}
+          onChange={(e) => handlePlanSelect(e.target.value)}
+          aria-invalid={!!errors.planName}
+          aria-describedby={errors.planName ? "planName-error" : undefined}
+        >
+          <option value="" disabled>
+            -- Select a Plan --
+          </option>
+          {UNL_PLAN_OPTIONS.map((plan) => (
+            <option key={plan} value={plan}>
+              {plan}
             </option>
-            {UNL_PLAN_OPTIONS.map((plan) => (
-              <option key={plan} value={plan}>
-                {plan}
-              </option>
-            ))}
-          </select>
-        ) : (
+          ))}
+          <option value={OTHER_SENTINEL}>Other</option>
+        </select>
+        {isOther && (
           <input
             id="planName"
             type="text"
-            className={`input-field ${errors.planName ? "input-error" : ""}`}
+            className={`input-field mt-3 ${errors.planName ? "input-error" : ""}`}
             value={formData.planName}
             onChange={(e) => updateField("planName", e.target.value)}
             placeholder="Enter plan name"
-            aria-invalid={!!errors.planName}
-            aria-describedby={errors.planName ? "planName-error" : undefined}
+            autoFocus
           />
         )}
       </FormField>

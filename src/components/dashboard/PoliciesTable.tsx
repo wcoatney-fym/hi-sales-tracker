@@ -53,6 +53,9 @@ interface AgencyOption {
 const PRODUCT_TYPE_STYLES: Record<string, string> = {
   HI: "bg-sky-900/30 text-sky-300 border border-sky-700/50",
   HHC: "bg-emerald-900/30 text-emerald-300 border border-emerald-700/50",
+  LIFE: "bg-amber-900/30 text-amber-300 border border-amber-700/50",
+  DENTAL: "bg-teal-900/30 text-teal-300 border border-teal-700/50",
+  CANCER: "bg-rose-900/30 text-rose-300 border border-rose-700/50",
 };
 
 const PAGE_SIZES = [10, 20, 50, 100];
@@ -559,7 +562,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
             >
               <option value="">All Types</option>
               {productTypes.map((pt) => (
-                <option key={pt.name} value={pt.name}>{pt.name === "HI" ? "HI - Hospital Indemnity" : pt.name === "HHC" ? "HHC - Home Health Care" : pt.name}</option>
+                <option key={pt.name} value={pt.name}>{pt.name === "HI" ? "HI - Hospital Indemnity" : pt.name === "HHC" ? "HHC - Home Health Care" : pt.name === "LIFE" ? "Life Insurance" : pt.name === "DENTAL" ? "Dental" : pt.name === "CANCER" ? "Cancer/Stroke" : pt.name}</option>
               ))}
             </select>
           </div>

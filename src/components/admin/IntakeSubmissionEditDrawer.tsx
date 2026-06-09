@@ -51,6 +51,9 @@ const DESTRUCTIVE_STATUSES = new Set(["cancelled", "terminated", "superseded"]);
 const PRODUCT_TYPES = [
   { value: "HI", label: "Hospital Indemnity" },
   { value: "HHC", label: "Home Health Care" },
+  { value: "LIFE", label: "Life Insurance" },
+  { value: "DENTAL", label: "Dental" },
+  { value: "CANCER", label: "Cancer/Stroke Coverage" },
 ];
 
 type FormState = {
