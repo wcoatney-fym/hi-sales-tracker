@@ -542,18 +542,123 @@ async function handleSync(
     query = query.gt("id", lastId);
   }
 
-  const { data: batchRecs } = await query;
+  const { data: batchRecs, error: queryErr } = await query;
+
+  if (queryErr) {
+    await supabase
+      .from("source_uploads")
+      .update({ status: "error", resync_progress: { phase: "sync", lastId: lastId || null, error: queryErr.message } })
+      .eq("id", uploadId);
+    return jsonResponse({ error: `Sync query failed: ${queryErr.message}` }, 500);
+  }
 
   if (!batchRecs || batchRecs.length === 0) {
-    // All rows processed - finalize
+    // All rows processed - run sanity gate before finalizing
     const { count: totalSynced } = await supabase
       .from("form_submissions")
       .select("*", { count: "exact", head: true })
       .eq("source_upload_id", uploadId);
 
+    const { count: stagingCount } = await supabase
+      .from("source_records")
+      .select("*", { count: "exact", head: true })
+      .eq("source_upload_id", uploadId)
+      .eq("processing_status", "imported");
+
+    if (stagingCount && stagingCount > 0 && (!totalSynced || totalSynced === 0)) {
+      await supabase
+        .from("source_uploads")
+        .update({ status: "error", resync_progress: { phase: "sync", error: "Sanity check failed: staging has rows but none synced", stagingCount } })
+        .eq("id", uploadId);
+      return jsonResponse({ error: "Sanity check failed" }, 500);
+    }
+
+    // --- Reconciliation: remove stale Data Source policies not in current book ---
+    // Build current-book set from staging BEFORE purging
+    let orphansDeleted = 0;
+    let reconciliationSkipped = false;
+    try {
+      const currentBookPolicies = new Set<string>();
+      let reconCursor: string | undefined;
+      while (true) {
+        let reconQ = supabase
+          .from("source_records")
+          .select("id, mapped_data")
+          .eq("source_upload_id", uploadId)
+          .eq("processing_status", "imported")
+          .order("id", { ascending: true })
+          .limit(2000);
+        if (reconCursor) reconQ = reconQ.gt("id", reconCursor);
+        const { data: reconBatch, error: reconErr } = await reconQ;
+        if (reconErr || !reconBatch || reconBatch.length === 0) break;
+        for (const rec of reconBatch) {
+          const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
+          const pn = (md["Policy Number"] || "").trim();
+          if (pn) currentBookPolicies.add(pn);
+        }
+        reconCursor = reconBatch[reconBatch.length - 1].id;
+        if (reconBatch.length < 2000) break;
+      }
+
+      if (currentBookPolicies.size > 0) {
+        const { count: totalDataSource } = await supabase
+          .from("form_submissions")
+          .select("*", { count: "exact", head: true })
+          .eq("source", "Data Source");
+
+        // Find orphans: Data Source policies NOT in the current book
+        const { data: allDataSourcePolicies } = await supabase
+          .from("form_submissions")
+          .select("id, policy_number")
+          .eq("source", "Data Source");
+
+        const orphanIds: string[] = [];
+        for (const row of allDataSourcePolicies || []) {
+          if (!currentBookPolicies.has(row.policy_number)) {
+            orphanIds.push(row.id);
+          }
+        }
+
+        const safetyThreshold = Math.floor((totalDataSource || 0) * 0.2);
+        if (orphanIds.length > safetyThreshold) {
+          reconciliationSkipped = true;
+          await supabase.from("upload_history_log").insert({
+            action: "reconciliation_aborted",
+            details: {
+              source_id: sourceId,
+              upload_id: uploadId,
+              orphan_count: orphanIds.length,
+              total_data_source: totalDataSource,
+              safety_cap_pct: 20,
+              reason: `Orphan count (${orphanIds.length}) exceeds 20% safety cap (${safetyThreshold})`,
+            },
+          });
+        } else if (orphanIds.length > 0) {
+          for (let i = 0; i < orphanIds.length; i += 500) {
+            const batch = orphanIds.slice(i, i + 500);
+            await supabase.from("form_submissions").delete().in("id", batch);
+          }
+          orphansDeleted = orphanIds.length;
+          await supabase.from("upload_history_log").insert({
+            action: "reconciliation_complete",
+            details: {
+              source_id: sourceId,
+              upload_id: uploadId,
+              orphans_deleted: orphansDeleted,
+              current_book_size: currentBookPolicies.size,
+              total_data_source_before: totalDataSource,
+            },
+          });
+        }
+      }
+    } catch (_) {
+      // Reconciliation is best-effort; don't block completion
+    }
+
+    // Mark complete
     await supabase
       .from("source_uploads")
-      .update({ status: "complete", resync_progress: { phase: "sync", done: true, policies_synced: totalSynced } })
+      .update({ status: "complete", resync_progress: { phase: "sync", done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted, reconciliation_skipped: reconciliationSkipped } })
       .eq("id", uploadId);
 
     await supabase
@@ -563,16 +668,16 @@ async function handleSync(
 
     await supabase.from("upload_history_log").insert({
       action: "auto_import_complete",
-      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced },
+      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted },
     });
 
-    // Purge staging rows now that migration is complete
+    // Purge staging rows now that sync + reconciliation are complete
     await supabase
       .from("source_records")
       .delete()
       .eq("source_upload_id", uploadId);
 
-    return jsonResponse({ success: true, done: true, policies_synced: totalSynced });
+    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted });
   }
 
   const newLastId = batchRecs[batchRecs.length - 1].id;
