@@ -12,7 +12,7 @@ const AKAMAI_CA_CERT = `-----BEGIN CERTIFICATE-----
 MIIERDCCAqygAwIBAgIUXb4vh6x1XAZ4Bm1oN3eqHm27NrAwDQYJKoZIhvcNAQEM
 BQAwOjE4MDYGA1UEAwwvNWY1NzgxYmMtMjc4MC00NTA0LWFhMDctNzM1NTEwZGZj
 NjQ3IFByb2plY3QgQ0EwHhcNMjYwMzAzMjE0OTI1WhcNMzYwMjI5MjE0OTI1WjA6
-MTgwNgYDVQQDDC81ZjU3ODFiYy0yNzgwLTQ1MDQtYWEwNy03MzU1MTBkZmM2NDcg
+MTgwNgYDVQQDDC81ZjU3ODFiYy0yNzgwLTQ1MDQtYWEwNy03MzU1MTBkZmM2MDcg
 UHJvamVjdCBDQTCCAaIwDQYJKoZIhvcNAQEBBQADggGPADCCAYoCggGBALAYtJy6
 HRMQ/o7zwygRQBu/CgjH8VycBC886/LhF2LCVqGFD2eYbKMV3LF6WEWZCUgTgrCv
 9xqAiFVVXn+jNpBG3DRQ49ox9VMzNXQFqfh93ckB+noqMoPmu7ifwTZYGb+bNlhH
@@ -135,6 +135,7 @@ Deno.serve(async (req: Request) => {
   const uploadId = body.uploadId as string | undefined;
   const offset = parseInt(String(body.offset || "0"), 10);
   const orderColumnHint = body.orderColumn as string | undefined;
+  const lastId = body.lastId as string | undefined;
 
   try {
     if (phase === "init") {
@@ -142,7 +143,7 @@ Deno.serve(async (req: Request) => {
     } else if (phase === "fetch") {
       return await handleFetch(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, offset, orderColumnHint);
     } else if (phase === "sync") {
-      return await handleSync(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, offset);
+      return await handleSync(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, lastId);
     }
     return jsonResponse({ error: "Unknown phase" }, 400);
   } catch (err) {
@@ -196,7 +197,6 @@ async function handleInit(
       .join("|");
 
     if (currentSorted !== snapshotSorted) {
-      // Mapping drift detected - pause auto-import
       await supabase
         .from("data_sources")
         .update({ auto_cron_enabled: false })
@@ -244,6 +244,9 @@ async function handleInit(
       continue;
     }
 
+    // Purge staging rows from prior uploads for this data source
+    await purgeOldStagingRows(supabase, source.id, newUpload.id);
+
     // Self-invoke to start fetching
     await selfInvoke(supabaseUrl, serviceRoleKey, {
       phase: "fetch",
@@ -256,6 +259,29 @@ async function handleInit(
   }
 
   return jsonResponse({ success: true, results });
+}
+
+async function purgeOldStagingRows(
+  supabase: ReturnType<typeof createClient>,
+  dataSourceId: string,
+  currentUploadId: string,
+) {
+  const { data: oldUploads } = await supabase
+    .from("source_uploads")
+    .select("id")
+    .eq("data_source_id", dataSourceId)
+    .neq("id", currentUploadId);
+
+  if (!oldUploads || oldUploads.length === 0) return;
+
+  const oldIds = oldUploads.map((u: { id: string }) => u.id);
+  for (let i = 0; i < oldIds.length; i += 50) {
+    const batch = oldIds.slice(i, i + 50);
+    await supabase
+      .from("source_records")
+      .delete()
+      .in("source_upload_id", batch);
+  }
 }
 
 async function handleFetch(
@@ -381,7 +407,6 @@ async function handleFetch(
         const target = mappingObj[col];
         if (target) mapped[target] = val;
       }
-      // Trim whitespace on code fields that commonly have trailing spaces
       for (const codeField of ["UNL Writing Number", "Writing Agent Code", "Policy Number", "Downline Code", "FYM Agency Code"]) {
         if (mapped[codeField]) mapped[codeField] = mapped[codeField].trim();
       }
@@ -444,7 +469,6 @@ async function handleFetch(
       .eq("id", uploadId);
 
     if (hasMore) {
-      // Self-invoke for next batch
       await selfInvoke(supabaseUrl, serviceRoleKey, {
         phase: "fetch",
         sourceId,
@@ -467,12 +491,11 @@ async function handleFetch(
       .update({ row_count: totalImported || nextOffset })
       .eq("id", uploadId);
 
-    // Start sync phase
+    // Start sync phase with keyset pagination (lastId = undefined means start from beginning)
     await selfInvoke(supabaseUrl, serviceRoleKey, {
       phase: "sync",
       sourceId,
       uploadId,
-      offset: 0,
     });
 
     return jsonResponse({ success: true, phase: "fetch_complete", totalRows: totalImported || nextOffset });
@@ -492,10 +515,8 @@ async function handleSync(
   serviceRoleKey: string,
   sourceId: string,
   uploadId: string,
-  offset: number,
+  lastId?: string,
 ) {
-  const batchSize = 500;
-
   const { data: upload } = await supabase
     .from("source_uploads")
     .select("id, carrier, row_count")
@@ -505,24 +526,36 @@ async function handleSync(
   if (!upload) return jsonResponse({ error: "Upload not found" }, 404);
 
   const carrier = upload.carrier;
-  const totalRows = upload.row_count || 0;
 
-  const { data: batchRecs } = await supabase
+  // Use a DB function to get distinct policies with the greatest id per policy_number.
+  // We paginate by source_records.id using keyset pagination to guarantee every row is visited.
+  const batchSize = 1000;
+  let query = supabase
     .from("source_records")
-    .select("mapped_data")
+    .select("id, mapped_data")
     .eq("source_upload_id", uploadId)
     .eq("processing_status", "imported")
-    .order("id")
-    .range(offset, offset + batchSize - 1);
+    .order("id", { ascending: true })
+    .limit(batchSize);
+
+  if (lastId) {
+    query = query.gt("id", lastId);
+  }
+
+  const { data: batchRecs } = await query;
 
   if (!batchRecs || batchRecs.length === 0) {
-    // All done
+    // All rows processed - finalize
+    const { count: totalSynced } = await supabase
+      .from("form_submissions")
+      .select("*", { count: "exact", head: true })
+      .eq("source_upload_id", uploadId);
+
     await supabase
       .from("source_uploads")
-      .update({ status: "complete", resync_progress: { offset, total: totalRows, synced: offset, done: true } })
+      .update({ status: "complete", resync_progress: { phase: "sync", done: true, policies_synced: totalSynced } })
       .eq("id", uploadId);
 
-    // Update last_auto_pull_at
     await supabase
       .from("data_sources")
       .update({ last_auto_pull_at: new Date().toISOString(), last_polled_at: new Date().toISOString() })
@@ -530,15 +563,19 @@ async function handleSync(
 
     await supabase.from("upload_history_log").insert({
       action: "auto_import_complete",
-      details: { source_id: sourceId, upload_id: uploadId, total_rows: totalRows },
+      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced },
     });
 
-    return jsonResponse({ success: true, done: true, totalSynced: offset });
+    // Purge staging rows now that migration is complete
+    await supabase
+      .from("source_records")
+      .delete()
+      .eq("source_upload_id", uploadId);
+
+    return jsonResponse({ success: true, done: true, policies_synced: totalSynced });
   }
 
-  const fetchedCount = batchRecs.length;
-  const done = fetchedCount < batchSize;
-  const nextOffset = offset + fetchedCount;
+  const newLastId = batchRecs[batchRecs.length - 1].id;
 
   // --- Agent Sync ---
   let agentsAdded = 0;
@@ -651,6 +688,7 @@ async function handleSync(
   }
 
   // --- Policy Sync ---
+  // Deduplicate by policy_number within this batch, keeping the row with the greatest id
   const { data: agentsList } = await supabase
     .from("agents")
     .select("unl_writing_number, agency")
@@ -678,7 +716,8 @@ async function handleSync(
     return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
   };
 
-  const policyRows: Array<Record<string, unknown>> = [];
+  // Build policy rows, deduplicating by policy_number (last/greatest id wins)
+  const policyDedup = new Map<string, Record<string, unknown>>();
   for (const rec of batchRecs) {
     const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
     const policyNumber = (md["Policy Number"] || "").trim();
@@ -700,7 +739,9 @@ async function handleSync(
     const agency = rosterAgencyLookup.get(agentCode)
       || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
 
-    policyRows.push({
+    // Because batchRecs is ordered by id ASC, later entries for the same policy_number
+    // will overwrite earlier ones, giving us the greatest-id row per policy.
+    policyDedup.set(policyNumber, {
       policy_number: policyNumber,
       agent_number: agentCode,
       agent_first_name: agentFirst,
@@ -729,12 +770,7 @@ async function handleSync(
       source_upload_id: uploadId,
     });
   }
-
-  const deduped = new Map<string, Record<string, unknown>>();
-  for (const row of policyRows) {
-    deduped.set(row.policy_number as string, row);
-  }
-  const uniquePolicies = Array.from(deduped.values());
+  const uniquePolicies = Array.from(policyDedup.values());
 
   let synced = 0;
   try {
@@ -749,46 +785,26 @@ async function handleSync(
   } catch (syncErr) {
     await supabase
       .from("source_uploads")
-      .update({ status: "error", resync_progress: { offset, total: totalRows, synced: offset, done: false, error: true } })
+      .update({ status: "error", resync_progress: { phase: "sync", lastId: newLastId, synced, done: false, error: true } })
       .eq("id", uploadId);
     return jsonResponse({ error: `Policy sync failed: ${syncErr instanceof Error ? syncErr.message : "Unknown"}` }, 500);
   }
 
   // Update progress
-  const progress = { offset: nextOffset, total: totalRows, synced: nextOffset, done };
-  if (done) {
-    await supabase
-      .from("source_uploads")
-      .update({ status: "complete", resync_progress: progress })
-      .eq("id", uploadId);
-
-    await supabase
-      .from("data_sources")
-      .update({ last_auto_pull_at: new Date().toISOString(), last_polled_at: new Date().toISOString() })
-      .eq("id", sourceId);
-
-    await supabase.from("upload_history_log").insert({
-      action: "auto_import_complete",
-      details: { source_id: sourceId, upload_id: uploadId, total_rows: totalRows, agents_added: agentsAdded, agents_updated: agentsUpdated, policies_synced: synced },
-    });
-
-    return jsonResponse({ success: true, done: true, totalSynced: nextOffset });
-  }
-
   await supabase
     .from("source_uploads")
-    .update({ resync_progress: progress })
+    .update({ resync_progress: { phase: "sync", lastId: newLastId, synced, continuing: true } })
     .eq("id", uploadId);
 
-  // Self-invoke for next sync batch
+  // Self-invoke for next sync batch with keyset cursor
   await selfInvoke(supabaseUrl, serviceRoleKey, {
     phase: "sync",
     sourceId,
     uploadId,
-    offset: nextOffset,
+    lastId: newLastId,
   });
 
-  return jsonResponse({ success: true, phase: "sync", offset: nextOffset, synced, continuing: true });
+  return jsonResponse({ success: true, phase: "sync", lastId: newLastId, synced, agentsAdded, agentsUpdated, continuing: true });
 }
 
 async function selfInvoke(
