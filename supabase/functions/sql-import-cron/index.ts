@@ -117,12 +117,28 @@ Deno.serve(async (req: Request) => {
   }
 
   const authHeader = req.headers.get("Authorization") || "";
+  const cronSecret = req.headers.get("X-Cron-Secret") || "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
-  if (!authHeader.includes(serviceRoleKey)) {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+
+  let authenticated = false;
+  if (serviceRoleKey && authHeader.includes(serviceRoleKey)) {
+    authenticated = true;
+  }
+
+  // Alternate auth: validate X-Cron-Secret against Vault via RPC
+  if (!authenticated && cronSecret) {
+    const tmpClient = createClient(supabaseUrl, serviceRoleKey);
+    const { data: vaultSecret } = await tmpClient.rpc("get_cron_import_secret");
+    if (vaultSecret && vaultSecret === cronSecret) {
+      authenticated = true;
+    }
+  }
+
+  if (!authenticated) {
     return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabase = createClient(supabaseUrl, serviceRoleKey);
 
   let body: Record<string, unknown> = {};
