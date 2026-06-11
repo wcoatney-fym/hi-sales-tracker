@@ -286,6 +286,25 @@ Deno.serve(async (req: Request) => {
         });
       }
 
+      case "resolve-agency-slug": {
+        if (session.role !== "global_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+        const { slug } = body;
+        if (!slug) {
+          return jsonResponse({ error: "slug is required" }, 400);
+        }
+        const { data: agency } = await supabase
+          .from("agencies")
+          .select("id, name, slug")
+          .eq("slug", slug)
+          .maybeSingle();
+        if (!agency) {
+          return jsonResponse({ error: "Agency not found" }, 404);
+        }
+        return jsonResponse({ id: agency.id, name: agency.name, slug: agency.slug });
+      }
+
       case "upload-roster": {
         const { carrier, agents, filename } = body;
 
@@ -3408,8 +3427,9 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-upload-roster": {
-        const { rows: rosterRows, filename: rosterFilename } = body;
-        if (!session.agency_id) {
+        const { rows: rosterRows, filename: rosterFilename, overrideAgencyId: uploadOverrideId } = body;
+        const uploadAgencyId = (session.role === "global_admin" && uploadOverrideId) ? uploadOverrideId : session.agency_id;
+        if (!uploadAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
         if (!Array.isArray(rosterRows) || rosterRows.length === 0) {
@@ -3420,7 +3440,7 @@ Deno.serve(async (req: Request) => {
         const { data: rosterAgency } = await supabase
           .from("agencies")
           .select("name")
-          .eq("id", session.agency_id)
+          .eq("id", uploadAgencyId)
           .maybeSingle();
         const rosterAgencyName = rosterAgency?.name || "FYM";
 
@@ -3428,7 +3448,7 @@ Deno.serve(async (req: Request) => {
         const { data: upload, error: uploadErr } = await supabase
           .from("agency_roster_uploads")
           .insert({
-            agency_id: session.agency_id,
+            agency_id: uploadAgencyId,
             uploaded_by_session_id: session.id,
             filename: rosterFilename || "roster.csv",
             total_rows: rosterRows.length,
@@ -3501,7 +3521,7 @@ Deno.serve(async (req: Request) => {
                   [writingCol]: writingNumber,
                   source: "Roster",
                   agency: rosterAgencyName,
-                  agency_id: session.agency_id,
+                  agency_id: uploadAgencyId,
                   agency_locked: true,
                   status: "active",
                 })
@@ -3515,7 +3535,7 @@ Deno.serve(async (req: Request) => {
           }
 
           entries.push({
-            agency_id: session.agency_id,
+            agency_id: uploadAgencyId,
             agent_first_name: toProperCase(firstName),
             agent_last_name: toProperCase(lastName),
             writing_number: writingNumber,
@@ -3540,7 +3560,7 @@ Deno.serve(async (req: Request) => {
           if (entry.matched_agent_id) {
             await supabase
               .from("agents")
-              .update({ agency: rosterAgencyName, agency_id: session.agency_id, agency_locked: true })
+              .update({ agency: rosterAgencyName, agency_id: uploadAgencyId, agency_locked: true })
               .eq("id", entry.matched_agent_id);
           }
         }
@@ -3562,11 +3582,11 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-get-roster": {
-        const agencyId = session.agency_id;
+        const { statusFilter, search, overrideAgencyId: getRosterOverride } = body;
+        const agencyId = (session.role === "global_admin" && getRosterOverride) ? getRosterOverride : session.agency_id;
         if (!agencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { statusFilter, search } = body;
 
         let query = supabase
           .from("agency_rosters")
@@ -3612,23 +3632,26 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-get-roster-uploads": {
-        if (!session.agency_id) {
+        const { overrideAgencyId: uploadsOverride } = body;
+        const uploadsAgencyId = (session.role === "global_admin" && uploadsOverride) ? uploadsOverride : session.agency_id;
+        if (!uploadsAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
         const { data, error } = await supabase
           .from("agency_roster_uploads")
           .select("*")
-          .eq("agency_id", session.agency_id)
+          .eq("agency_id", uploadsAgencyId)
           .order("created_at", { ascending: false });
         if (error) throw error;
         return jsonResponse({ uploads: data || [] });
       }
 
       case "agency-add-roster-entry": {
-        if (!session.agency_id) {
+        const { firstName: arFirst, lastName: arLast, writingNumber: arNum, npn: arNpn, carrier: arCarrier, overrideAgencyId: addOverride } = body;
+        const addAgencyId = (session.role === "global_admin" && addOverride) ? addOverride : session.agency_id;
+        if (!addAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { firstName: arFirst, lastName: arLast, writingNumber: arNum, npn: arNpn, carrier: arCarrier } = body;
         if (!arFirst || !arLast || !arNum) {
           return jsonResponse({ error: "First name, last name, and writing number are required" }, 400);
         }
@@ -3657,7 +3680,7 @@ Deno.serve(async (req: Request) => {
         const { data: entry, error: entryErr } = await supabase
           .from("agency_rosters")
           .insert({
-            agency_id: session.agency_id,
+            agency_id: addAgencyId,
             agent_first_name: toProperCase(arFirst.trim()),
             agent_last_name: toProperCase(arLast.trim()),
             writing_number: cleanNum,
@@ -3674,7 +3697,7 @@ Deno.serve(async (req: Request) => {
         if (matchStatus === "confirmed" && matchedAgentId) {
           await supabase
             .from("agents")
-            .update({ agency_id: session.agency_id, agency_locked: true })
+            .update({ agency_id: addAgencyId, agency_locked: true })
             .eq("id", matchedAgentId);
         }
 
@@ -3682,17 +3705,18 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-terminate-roster-entry": {
-        if (!session.agency_id) {
+        const { rosterId, overrideAgencyId: termOverride } = body;
+        const termAgencyId = (session.role === "global_admin" && termOverride) ? termOverride : session.agency_id;
+        if (!termAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { rosterId } = body;
         if (!rosterId) return jsonResponse({ error: "rosterId required" }, 400);
 
         const { data, error } = await supabase
           .from("agency_rosters")
           .update({ status: "terminated", terminated_at: new Date().toISOString(), updated_at: new Date().toISOString() })
           .eq("id", rosterId)
-          .eq("agency_id", session.agency_id)
+          .eq("agency_id", termAgencyId)
           .select()
           .maybeSingle();
         if (error) throw error;
@@ -3701,17 +3725,18 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-reactivate-roster-entry": {
-        if (!session.agency_id) {
+        const { rosterId: reRosterId, overrideAgencyId: reactOverride } = body;
+        const reactAgencyId = (session.role === "global_admin" && reactOverride) ? reactOverride : session.agency_id;
+        if (!reactAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { rosterId: reRosterId } = body;
         if (!reRosterId) return jsonResponse({ error: "rosterId required" }, 400);
 
         const { data, error } = await supabase
           .from("agency_rosters")
           .update({ status: "active", terminated_at: null, updated_at: new Date().toISOString() })
           .eq("id", reRosterId)
-          .eq("agency_id", session.agency_id)
+          .eq("agency_id", reactAgencyId)
           .select()
           .maybeSingle();
         if (error) throw error;
@@ -3720,17 +3745,18 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-set-manager": {
-        if (!session.agency_id) {
+        const { rosterId: mgrRosterId, isManager, overrideAgencyId: mgrOverride } = body;
+        const mgrAgencyId = (session.role === "global_admin" && mgrOverride) ? mgrOverride : session.agency_id;
+        if (!mgrAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { rosterId: mgrRosterId, isManager } = body;
         if (!mgrRosterId) return jsonResponse({ error: "rosterId required" }, 400);
 
         const { data, error } = await supabase
           .from("agency_rosters")
           .update({ is_agency_manager: !!isManager, updated_at: new Date().toISOString() })
           .eq("id", mgrRosterId)
-          .eq("agency_id", session.agency_id)
+          .eq("agency_id", mgrAgencyId)
           .select()
           .maybeSingle();
         if (error) throw error;
@@ -3747,10 +3773,11 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-add-writing-number": {
-        if (!session.agency_id) {
+        const { agentId: awnAgentId, carrierName, writingNumber: awnNum, overrideAgencyId: awnOverride } = body;
+        const awnAgencyId = (session.role === "global_admin" && awnOverride) ? awnOverride : session.agency_id;
+        if (!awnAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { agentId: awnAgentId, carrierName, writingNumber: awnNum } = body;
         if (!awnAgentId || !carrierName || !awnNum) {
           return jsonResponse({ error: "agentId, carrierName, and writingNumber required" }, 400);
         }
@@ -3759,7 +3786,7 @@ Deno.serve(async (req: Request) => {
         const { data: rosterEntry } = await supabase
           .from("agency_rosters")
           .select("id")
-          .eq("agency_id", session.agency_id)
+          .eq("agency_id", awnAgencyId)
           .eq("matched_agent_id", awnAgentId)
           .eq("status", "active")
           .maybeSingle();
@@ -3772,7 +3799,7 @@ Deno.serve(async (req: Request) => {
           .from("agent_writing_numbers")
           .insert({
             agent_id: awnAgentId,
-            agency_id: session.agency_id,
+            agency_id: awnAgencyId,
             carrier_name: carrierName.trim(),
             writing_number: awnNum.trim().toUpperCase(),
           })
@@ -3783,17 +3810,18 @@ Deno.serve(async (req: Request) => {
       }
 
       case "agency-remove-writing-number": {
-        if (!session.agency_id) {
+        const { writingNumberId, overrideAgencyId: rwnOverride } = body;
+        const rwnAgencyId = (session.role === "global_admin" && rwnOverride) ? rwnOverride : session.agency_id;
+        if (!rwnAgencyId) {
           return jsonResponse({ error: "Agency context required" }, 403);
         }
-        const { writingNumberId } = body;
         if (!writingNumberId) return jsonResponse({ error: "writingNumberId required" }, 400);
 
         const { error } = await supabase
           .from("agent_writing_numbers")
           .delete()
           .eq("id", writingNumberId)
-          .eq("agency_id", session.agency_id);
+          .eq("agency_id", rwnAgencyId);
         if (error) throw error;
         return jsonResponse({ success: true });
       }

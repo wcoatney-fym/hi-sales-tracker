@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { Eye, EyeOff, Copy, Check, RefreshCw, Pencil, X, Save, Loader2, Search } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Eye, EyeOff, Copy, Check, RefreshCw, Pencil, X, Save, Loader2, Search, LayoutDashboard } from "lucide-react";
 import {
   adminGetAgencyCredentials,
   adminUpdateAgencyCredential,
@@ -21,6 +22,7 @@ interface AgencyCredentialsPanelProps {
 }
 
 function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
+  const navigate = useNavigate();
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -184,9 +186,19 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
             >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-white font-semibold text-sm">{cred.agency_name}</h3>
-                <span className="text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">
-                  /{cred.agency_slug}
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => navigate(`/admin/dashboard/${cred.agency_slug}`, { state: { agencyName: cred.agency_name, agencyId: cred.agency_id } })}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gold bg-gold/10 hover:bg-gold/20 rounded-lg transition-colors"
+                    title="View this agency's dashboard"
+                  >
+                    <LayoutDashboard size={13} />
+                    View as Admin
+                  </button>
+                  <span className="text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded">
+                    /{cred.agency_slug}
+                  </span>
+                </div>
               </div>
 
               <div className="space-y-3">

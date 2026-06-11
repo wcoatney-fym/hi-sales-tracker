@@ -60,9 +60,10 @@ interface WritingNumber {
 
 interface AgencyRosterPanelProps {
   token: string;
+  overrideAgencyId?: string | null;
 }
 
-export default function AgencyRosterPanel({ token }: AgencyRosterPanelProps) {
+export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRosterPanelProps) {
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [writingNumbers, setWritingNumbers] = useState<WritingNumber[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,14 +79,14 @@ export default function AgencyRosterPanel({ token }: AgencyRosterPanelProps) {
   const fetchRoster = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await agencyGetRoster(token, statusFilter, search || undefined);
+      const data = await agencyGetRoster(token, statusFilter, search || undefined, overrideAgencyId || undefined);
       setRoster(data.roster || []);
       setWritingNumbers(data.writing_numbers || []);
     } catch {
       // ignore
     }
     setLoading(false);
-  }, [token, statusFilter, search]);
+  }, [token, statusFilter, search, overrideAgencyId]);
 
   useEffect(() => {
     fetchRoster();
@@ -128,7 +129,7 @@ export default function AgencyRosterPanel({ token }: AgencyRosterPanelProps) {
 
       if (rows.length === 0) throw new Error("No valid rows found in CSV");
 
-      const result = await agencyUploadRoster(token, rows, file.name);
+      const result = await agencyUploadRoster(token, rows, file.name, overrideAgencyId || undefined);
       setUploadResult(result);
       fetchRoster();
     } catch (err) {
@@ -151,7 +152,7 @@ export default function AgencyRosterPanel({ token }: AgencyRosterPanelProps) {
   const handleTerminate = async () => {
     if (!confirmAction || confirmAction.type !== "terminate") return;
     try {
-      await agencyTerminateRosterEntry(token, confirmAction.id);
+      await agencyTerminateRosterEntry(token, confirmAction.id, overrideAgencyId || undefined);
       fetchRoster();
     } catch { /* ignore */ }
     setConfirmAction(null);
@@ -160,7 +161,7 @@ export default function AgencyRosterPanel({ token }: AgencyRosterPanelProps) {
   const handleReactivate = async () => {
     if (!confirmAction || confirmAction.type !== "reactivate") return;
     try {
-      await agencyReactivateRosterEntry(token, confirmAction.id);
+      await agencyReactivateRosterEntry(token, confirmAction.id, overrideAgencyId || undefined);
       fetchRoster();
     } catch { /* ignore */ }
     setConfirmAction(null);
@@ -340,6 +341,7 @@ export default function AgencyRosterPanel({ token }: AgencyRosterPanelProps) {
           token={token}
           onClose={() => setShowAddAgent(false)}
           onSuccess={() => { setShowAddAgent(false); fetchRoster(); }}
+          overrideAgencyId={overrideAgencyId || undefined}
         />
       )}
 
@@ -588,10 +590,12 @@ function AddAgentModal({
   token,
   onClose,
   onSuccess,
+  overrideAgencyId,
 }: {
   token: string;
   onClose: () => void;
   onSuccess: () => void;
+  overrideAgencyId?: string;
 }) {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -610,7 +614,7 @@ function AddAgentModal({
     setSaving(true);
     setError("");
     try {
-      await agencyAddRosterEntry(token, firstName, lastName, writingNumber, npn, carrier);
+      await agencyAddRosterEntry(token, firstName, lastName, writingNumber, npn, carrier, overrideAgencyId);
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add agent");

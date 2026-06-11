@@ -1,5 +1,5 @@
-import { useState, useMemo } from "react";
-import { Navigate, useNavigate, useParams } from "react-router-dom";
+import { useState, useMemo, useEffect } from "react";
+import { Navigate, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   LogOut,
   LayoutDashboard,
@@ -10,6 +10,8 @@ import {
   Loader2,
   Trophy,
   ClipboardList,
+  ArrowLeft,
+  Eye,
 } from "lucide-react";
 import { useAdminAuth } from "../hooks/useAdminAuth";
 import DateRangeSelector from "../components/dashboard/DateRangeSelector";
@@ -22,21 +24,53 @@ import AtRiskTab from "../components/production/AtRiskTab";
 import AgencyRosterPanel from "../components/admin/AgencyRosterPanel";
 import type { DateRange, DatePreset } from "../types/dashboard";
 import { getDateRange } from "../lib/dateUtils";
+import { adminResolveAgencySlug } from "../lib/api";
 
 type Tab = "overview" | "internal" | "at-risk" | "policies" | "leaderboard" | "settings" | "roster";
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { agencySlug } = useParams<{ agencySlug?: string }>();
   const { token, email, isAuthenticated, isGlobalAdmin, agencyId: adminAgencyId, agencySlug: adminAgencySlug, agencyName, verifying, logout } = useAdminAuth();
-  const [activeTab, setActiveTab] = useState<Tab>(isGlobalAdmin ? "internal" : "overview");
 
+  // Resolve agency context from navigation state or API
+  const navState = location.state as { agencyName?: string; agencyId?: string } | null;
+  const [resolvedAgencyName, setResolvedAgencyName] = useState<string | null>(navState?.agencyName || null);
+  const [resolvedAgencyId, setResolvedAgencyId] = useState<string | null>(navState?.agencyId || null);
+
+  const isAgencyView = !!agencySlug;
+  const isImpersonating = isAgencyView && isGlobalAdmin;
+
+  useEffect(() => {
+    if (!agencySlug) {
+      setResolvedAgencyName(null);
+      setResolvedAgencyId(null);
+      return;
+    }
+    if (!isGlobalAdmin) {
+      setResolvedAgencyName(agencyName || null);
+      setResolvedAgencyId(adminAgencyId || null);
+      return;
+    }
+    if (navState?.agencyName && navState?.agencyId) {
+      setResolvedAgencyName(navState.agencyName);
+      setResolvedAgencyId(navState.agencyId);
+      return;
+    }
+    if (token) {
+      adminResolveAgencySlug(token, agencySlug).then((res) => {
+        setResolvedAgencyName(res.name || null);
+        setResolvedAgencyId(res.id || null);
+      }).catch(() => {});
+    }
+  }, [agencySlug, isGlobalAdmin, token, agencyName, adminAgencyId, navState?.agencyName, navState?.agencyId]);
+
+  const [activeTab, setActiveTab] = useState<Tab>(isAgencyView ? "overview" : (isGlobalAdmin ? "internal" : "overview"));
   const [dateRange, setDateRange] = useState<DateRange>(getDateRange("thisMonth"));
   const [datePreset, setDatePreset] = useState<DatePreset>("thisMonth");
 
-  // Build available tabs based on role (must be above conditional returns for hooks rules)
   const tabs: { key: Tab; label: string; icon: React.ElementType }[] = useMemo(() => {
-    const isAgencyView = !!agencySlug;
     const allTabs: { key: Tab; label: string; icon: React.ElementType; globalOnly?: boolean; fymOnly?: boolean; agencyOnly?: boolean }[] = [
       { key: "overview", label: "Overview", icon: LayoutDashboard },
       { key: "internal", label: "Internal", icon: Home, fymOnly: true },
@@ -48,12 +82,12 @@ export default function AdminDashboard() {
     ];
 
     return allTabs.filter((tab) => {
-      if (tab.globalOnly && !isGlobalAdmin) return false;
+      if (tab.globalOnly && (!isGlobalAdmin || isAgencyView)) return false;
       if (tab.fymOnly && isAgencyView) return false;
-      if (tab.agencyOnly && !isAgencyView && !isGlobalAdmin) return false;
+      if (tab.agencyOnly && !isAgencyView) return false;
       return true;
     });
-  }, [agencySlug, isGlobalAdmin]);
+  }, [agencySlug, isGlobalAdmin, isAgencyView]);
 
   if (verifying) {
     return (
@@ -67,7 +101,7 @@ export default function AdminDashboard() {
     return <Navigate to="/admin" replace />;
   }
 
-  // Agency admin trying to access global dashboard
+  // Agency admin trying to access a different agency's dashboard
   if (agencySlug && !isGlobalAdmin) {
     const storedSlug = localStorage.getItem("admin_agency_slug");
     if (storedSlug && storedSlug !== agencySlug) {
@@ -91,15 +125,32 @@ export default function AdminDashboard() {
 
   const showDateRange = activeTab === "overview" || activeTab === "internal";
 
-  // Determine if this admin is locked to a specific agency
-  const lockedAgencyName = agencySlug && !isGlobalAdmin ? (agencyName || null) : null;
+  // Effective agency info for filtering (works for both impersonation and native agency admin)
+  const effectiveAgencyName = isAgencyView ? (resolvedAgencyName || agencyName || null) : null;
+  const effectiveAgencyId = isAgencyView ? (resolvedAgencyId || adminAgencyId || null) : null;
 
   const dashboardTitle = agencySlug
-    ? `${agencyName || agencySlug.charAt(0).toUpperCase() + agencySlug.slice(1)} Dashboard`
+    ? `${resolvedAgencyName || agencyName || agencySlug.charAt(0).toUpperCase() + agencySlug.slice(1)} Dashboard`
     : "Activity Tracker";
 
   return (
     <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white">
+      {isImpersonating && (
+        <div className="mb-4 flex items-center gap-3 bg-gold/10 border border-gold/30 rounded-lg px-4 py-3 animate-fade-in">
+          <Eye size={16} className="text-gold flex-shrink-0" />
+          <p className="text-sm text-gold font-medium flex-1">
+            Viewing as {resolvedAgencyName || agencySlug}
+          </p>
+          <button
+            onClick={() => navigate("/admin/dashboard")}
+            className="flex items-center gap-1.5 text-xs font-medium text-white bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-md transition-colors"
+          >
+            <ArrowLeft size={13} />
+            Back to FYM
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-white">{dashboardTitle}</h1>
@@ -151,7 +202,7 @@ export default function AdminDashboard() {
         <OverviewTab
           token={token}
           dateRange={dateRange}
-          lockedAgency={lockedAgencyName || undefined}
+          lockedAgency={effectiveAgencyName || undefined}
           onNavigatePolicies={handleNavigatePolicies}
         />
       )}
@@ -165,27 +216,26 @@ export default function AdminDashboard() {
       )}
 
       {activeTab === "at-risk" && (
-        <AtRiskTab token={token} lockedAgency={lockedAgencyName || undefined} />
+        <AtRiskTab token={token} lockedAgency={effectiveAgencyName || undefined} />
       )}
 
       {activeTab === "policies" && (
         <div className="animate-fade-in">
-          <PoliciesTable token={token} lockedAgency={lockedAgencyName || undefined} />
+          <PoliciesTable token={token} lockedAgency={effectiveAgencyName || undefined} />
         </div>
       )}
 
-
       {activeTab === "leaderboard" && (
         <AdminLeaderboardTab
-          agencyId={adminAgencyId}
-          agencyName={agencyName}
-          isFymAdmin={isGlobalAdmin || adminAgencySlug === "fym"}
+          agencyId={effectiveAgencyId}
+          agencyName={effectiveAgencyName || agencyName}
+          isFymAdmin={!isAgencyView && (isGlobalAdmin || adminAgencySlug === "fym")}
         />
       )}
 
       {activeTab === "roster" && (
         <div className="animate-fade-in">
-          <AgencyRosterPanel token={token} />
+          <AgencyRosterPanel token={token} overrideAgencyId={isImpersonating ? resolvedAgencyId : undefined} />
         </div>
       )}
 

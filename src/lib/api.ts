@@ -959,28 +959,28 @@ export async function agentGetAttentionStates(sessionToken: string) {
 
 // --- Agency Roster Management ---
 
-export async function agencyUploadRoster(token: string, rows: Array<Record<string, string>>, filename: string) {
-  return callApi("admin-api", { action: "agency-upload-roster", token, rows, filename });
+export async function agencyUploadRoster(token: string, rows: Array<Record<string, string>>, filename: string, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-upload-roster", token, rows, filename, overrideAgencyId });
 }
 
-export async function agencyGetRoster(token: string, statusFilter?: string, search?: string) {
-  return callApi("admin-api", { action: "agency-get-roster", token, statusFilter, search });
+export async function agencyGetRoster(token: string, statusFilter?: string, search?: string, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-get-roster", token, statusFilter, search, overrideAgencyId });
 }
 
-export async function agencyGetRosterUploads(token: string) {
-  return callApi("admin-api", { action: "agency-get-roster-uploads", token });
+export async function agencyGetRosterUploads(token: string, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-get-roster-uploads", token, overrideAgencyId });
 }
 
-export async function agencyAddRosterEntry(token: string, firstName: string, lastName: string, writingNumber: string, npn: string, carrier?: string) {
-  return callApi("admin-api", { action: "agency-add-roster-entry", token, firstName, lastName, writingNumber, npn, carrier });
+export async function agencyAddRosterEntry(token: string, firstName: string, lastName: string, writingNumber: string, npn: string, carrier?: string, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-add-roster-entry", token, firstName, lastName, writingNumber, npn, carrier, overrideAgencyId });
 }
 
-export async function agencyTerminateRosterEntry(token: string, rosterId: string) {
-  return callApi("admin-api", { action: "agency-terminate-roster-entry", token, rosterId });
+export async function agencyTerminateRosterEntry(token: string, rosterId: string, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-terminate-roster-entry", token, rosterId, overrideAgencyId });
 }
 
-export async function agencyReactivateRosterEntry(token: string, rosterId: string) {
-  return callApi("admin-api", { action: "agency-reactivate-roster-entry", token, rosterId });
+export async function agencyReactivateRosterEntry(token: string, rosterId: string, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-reactivate-roster-entry", token, rosterId, overrideAgencyId });
 }
 
 export async function agencySetManager(token: string, rosterId: string, isManager: boolean) {
@@ -1053,6 +1053,11 @@ export async function adminUpdateAgencyCredential(token: string, credentialId: s
 
 export async function adminResetAgencyCredential(token: string, credentialId: string) {
   return callApi("admin-api", { action: "reset-agency-credential", token, credentialId });
+}
+
+export async function adminResolveAgencySlug(token: string, slug: string): Promise<{ id: string; name: string; slug: string }> {
+  const result = await callApi("admin-api", { action: "resolve-agency-slug", token, slug });
+  return result as unknown as { id: string; name: string; slug: string };
 }
 
 export async function agentGetOnboardingStatus(sessionToken: string) {
