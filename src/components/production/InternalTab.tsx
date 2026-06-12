@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
+import MetricSection, { formatRangeLabel } from "./MetricSection";
+import { CalendarRange, BookOpen } from "lucide-react";
 import {
   DollarSign,
   FileText,
@@ -207,8 +209,20 @@ export default function InternalTab({
         />
       ) : (
         <>
-          <KpiRow metrics={kpiMetrics} loading={loading} />
-          <PolicyStatusKpiRow data={statusKpis} loading={loading} />
+          <MetricSection
+            icon={<CalendarRange size={14} className="text-gold" />}
+            title="Production for Selected Dates"
+            subtitle={formatRangeLabel(dateRange)}
+          >
+            <KpiRow metrics={kpiMetrics} loading={loading} />
+          </MetricSection>
+          <MetricSection
+            icon={<BookOpen size={14} className="text-sky-400" />}
+            title="Book of Business"
+            subtitle="entire current book, as of today \u2014 not affected by the date picker"
+          >
+            <PolicyStatusKpiRow data={statusKpis} loading={loading} />
+          </MetricSection>
 
           <TrendChart
             data={chartData}

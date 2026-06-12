@@ -860,7 +860,17 @@ Deno.serve(async (req: Request) => {
       // Placement & persistency. agency_id scopes to one agency (admin scoped
       // to it, global admin, or agent in it); omitted = whole book, global
       // admins only.
-      const qmAgencyId = url.searchParams.get("agency_id");
+      let qmAgencyId = url.searchParams.get("agency_id");
+      const qmAgencyName = url.searchParams.get("agency_name");
+      if (!qmAgencyId && qmAgencyName) {
+        const { data: namedAgency } = await supabase
+          .from("agencies")
+          .select("id")
+          .eq("name", qmAgencyName)
+          .maybeSingle();
+        if (!namedAgency) return errorResponse("Agency not found", 404);
+        qmAgencyId = namedAgency.id;
+      }
       const qmToken = url.searchParams.get("token") || req.headers.get("X-Agent-Token") || "";
       if (!qmToken) return errorResponse("Authentication required", 401);
       if (!(await authorizeAgencyAccess(supabase, qmToken, qmAgencyId))) {

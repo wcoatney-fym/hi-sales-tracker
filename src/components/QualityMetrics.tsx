@@ -19,7 +19,13 @@ interface PersistencyRow {
 // Placement = submitted apps whose first premium drafted (paid-to moved past
 // effective). Persistency = of policies that went active in the cohort month,
 // the share still active today.
-export default function QualityMetrics({ agencyId }: { agencyId: string | null }) {
+export default function QualityMetrics({
+  agencyId = null,
+  agencyName = null,
+}: {
+  agencyId?: string | null;
+  agencyName?: string | null;
+}) {
   const [placement, setPlacement] = useState<PlacementRow[]>([]);
   const [persistency, setPersistency] = useState<PersistencyRow[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -28,7 +34,7 @@ export default function QualityMetrics({ agencyId }: { agencyId: string | null }
     let cancelled = false;
     (async () => {
       try {
-        const data = await getQualityMetrics(agencyId);
+        const data = await getQualityMetrics(agencyId, agencyName);
         if (cancelled) return;
         setPlacement((data.placement as PlacementRow[]) || []);
         setPersistency((data.persistency as PersistencyRow[]) || []);
@@ -40,7 +46,7 @@ export default function QualityMetrics({ agencyId }: { agencyId: string | null }
     return () => {
       cancelled = true;
     };
-  }, [agencyId]);
+  }, [agencyId, agencyName]);
 
   if (!loaded || (placement.length === 0 && persistency.every((p) => !p.went_active))) return null;
 

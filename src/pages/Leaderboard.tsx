@@ -3,7 +3,6 @@ import { Link, useNavigate } from "react-router-dom";
 import { Trophy, FileText, Loader2, Clock, Zap, Gamepad2, Swords, Target, Gift, Filter, Globe } from "lucide-react";
 import { getLeaderboard, getAgencyLeaderboard, getChallenges, getBadges, getAgentChallenges, getActivePromotions, getActiveIncentives } from "../lib/api";
 import { useAgentAuth } from "../hooks/useAgentAuth";
-import QualityMetrics from "../components/QualityMetrics";
 import { useAdminAuth } from "../hooks/useAdminAuth";
 import type {
   LeaderboardData,
@@ -544,7 +543,6 @@ export default function Leaderboard() {
             </>
           )}
         </div>
-        {boardMode === "agency" && agencyId && <QualityMetrics agencyId={agencyId} />}
       </section>
     </main>
   );

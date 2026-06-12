@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
+import MetricSection, { formatRangeLabel } from "./MetricSection";
+import { CalendarRange } from "lucide-react";
 import {
   DollarSign,
   FileText,
@@ -111,7 +113,13 @@ export default function AgentProductionPanel({
         </div>
       </div>
 
-      <KpiRow metrics={kpiMetrics} loading={loading} />
+      <MetricSection
+        icon={<CalendarRange size={14} className="text-gold" />}
+        title="Production for Selected Dates"
+        subtitle={formatRangeLabel(dateRange)}
+      >
+        <KpiRow metrics={kpiMetrics} loading={loading} />
+      </MetricSection>
 
       <div className="mt-6">
         <TrendChart data={chartData} loading={loading} title={`${agentName} Production`} height={220} />
