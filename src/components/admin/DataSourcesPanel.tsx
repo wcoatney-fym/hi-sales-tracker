@@ -30,6 +30,7 @@ import {
   adminRevertSourceUpload,
   adminDeleteSourceUpload,
   adminResyncPolicies,
+  adminGetImportProgress,
   adminTestSqlConnection,
   adminConfirmAutoImport,
   adminDisableAutoImport,
@@ -325,24 +326,21 @@ export default function DataSourcesPanel({ token }: { token: string }) {
     setSyncingUploadId(uploadId);
     setSyncProgress({ offset: 0, total: 0 });
 
-    const BATCH_SIZE = 500;
-    const DELAY_MS = 120_000; // 2 minutes between batches
-    let offset = 0;
-
     try {
+      // Kicks off the server-side keyset sync; we only poll for progress here.
+      // Note: Re-sync reprocesses the staged snapshot — it does not pull fresh
+      // data from the source database (use Import Data for that).
+      const res = await adminResyncPolicies(token, uploadId, 0, 500);
+      if (res.error) throw new Error(res.error);
+
       while (!syncAbortRef.current) {
-        const res = await adminResyncPolicies(token, uploadId, offset, BATCH_SIZE);
-        if (res.error && !res.done) throw new Error(res.error);
-
-        const total = res.total || 0;
-        const nextOffset = res.nextOffset || offset;
-        setSyncProgress({ offset: nextOffset, total });
-
-        if (res.done) break;
-
-        offset = nextOffset;
-        // Wait between batches
-        await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        const prog = await adminGetImportProgress(token, uploadId);
+        if (prog.error) throw new Error(prog.error);
+        const u = prog.upload || {};
+        const rp = (u.resync_progress || {}) as Record<string, unknown>;
+        setSyncProgress({ offset: (rp.synced as number) || 0, total: u.row_count || 0 });
+        if (u.status === "complete" || u.status === "error") break;
       }
 
       const uploadsRes = await adminGetSourceUploads(token, selectedSource.id);

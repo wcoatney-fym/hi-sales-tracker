@@ -8,11 +8,13 @@ const corsHeaders = {
     "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+// Genuine project CA for the Akamai-hosted source DB (the previously pinned
+// copy had a corrupted character in the subject, breaking chain verification).
 const AKAMAI_CA_CERT = `-----BEGIN CERTIFICATE-----
 MIIERDCCAqygAwIBAgIUXb4vh6x1XAZ4Bm1oN3eqHm27NrAwDQYJKoZIhvcNAQEM
 BQAwOjE4MDYGA1UEAwwvNWY1NzgxYmMtMjc4MC00NTA0LWFhMDctNzM1NTEwZGZj
 NjQ3IFByb2plY3QgQ0EwHhcNMjYwMzAzMjE0OTI1WhcNMzYwMjI5MjE0OTI1WjA6
-MTgwNgYDVQQDDC81ZjU3ODFiYy0yNzgwLTQ1MDQtYWEwNy03MzU1MTBkZmM2MDcg
+MTgwNgYDVQQDDC81ZjU3ODFiYy0yNzgwLTQ1MDQtYWEwNy03MzU1MTBkZmM2NDcg
 UHJvamVjdCBDQTCCAaIwDQYJKoZIhvcNAQEBBQADggGPADCCAYoCggGBALAYtJy6
 HRMQ/o7zwygRQBu/CgjH8VycBC886/LhF2LCVqGFD2eYbKMV3LF6WEWZCUgTgrCv
 9xqAiFVVXn+jNpBG3DRQ49ox9VMzNXQFqfh93ckB+noqMoPmu7ifwTZYGb+bNlhH
@@ -149,17 +151,20 @@ Deno.serve(async (req: Request) => {
   const phase = (body.phase as string) || "init";
   const sourceId = body.sourceId as string | undefined;
   const uploadId = body.uploadId as string | undefined;
-  const offset = parseInt(String(body.offset || "0"), 10);
-  const orderColumnHint = body.orderColumn as string | undefined;
+  const ids = Array.isArray(body.ids) ? (body.ids as string[]) : undefined;
+  const fetchedSoFar = parseInt(String(body.fetched || "0"), 10);
   const lastId = body.lastId as string | undefined;
+  const syncedSoFar = parseInt(String(body.synced || "0"), 10);
 
   try {
     if (phase === "init") {
       return await handleInit(supabase, supabaseUrl, serviceRoleKey);
     } else if (phase === "fetch") {
-      return await handleFetch(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, offset, orderColumnHint);
+      return await handleFetch(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!);
+    } else if (phase === "fetch-rows") {
+      return await handleFetchRows(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, ids || [], fetchedSoFar);
     } else if (phase === "sync") {
-      return await handleSync(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, lastId);
+      return await handleSync(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!, lastId, syncedSoFar);
     }
     return jsonResponse({ error: "Unknown phase" }, 400);
   } catch (err) {
@@ -264,15 +269,21 @@ async function handleInit(
     await purgeOldStagingRows(supabase, source.id, newUpload.id);
 
     // Self-invoke to start fetching
-    await selfInvoke(supabaseUrl, serviceRoleKey, {
+    selfInvoke(supabaseUrl, serviceRoleKey, {
       phase: "fetch",
       sourceId: source.id,
       uploadId: newUpload.id,
-      offset: 0,
     });
 
     results.push({ sourceId: source.id, status: "started", message: `Upload ${newUpload.id} created` });
   }
+
+  // Record the init outcome so silent skips/errors are visible after the fact
+  await supabase.from("upload_history_log").insert({
+    action: "auto_import_init",
+    uploaded_by: "system/cron",
+    details: { results },
+  });
 
   return jsonResponse({ success: true, results });
 }
@@ -300,14 +311,35 @@ async function purgeOldStagingRows(
   }
 }
 
+// Opens a connection to the external source DB for the given data source
+async function connectSource(source: Record<string, unknown>) {
+  const password = source.db_password_secret_name
+    ? resolveSecret(source.db_password_secret_name as string)
+    : "";
+  const { default: postgres } = await import("npm:postgres@3.4.5");
+  return postgres({
+    host: source.db_host as string,
+    port: (source.db_port as number) || 5432,
+    database: (source.db_name as string) || "postgres",
+    username: (source.db_user as string) || "postgres",
+    password,
+    ssl: { ca: AKAMAI_CA_CERT },
+    connect_timeout: 30,
+    max: 1,
+    idle_timeout: 20,
+  });
+}
+
+// Phase 1 of the fetch: read the id manifest in ONE statement. A single query is
+// a consistent MVCC snapshot, so the manifest can't contain duplicates or miss
+// rows. Row contents are then pulled by exact id in small chained invocations
+// (handleFetchRows) to stay inside the edge worker's CPU budget.
 async function handleFetch(
   supabase: ReturnType<typeof createClient>,
   supabaseUrl: string,
   serviceRoleKey: string,
   sourceId: string,
   uploadId: string,
-  offset: number,
-  orderColumnHint?: string,
 ) {
   const { data: source } = await supabase
     .from("data_sources")
@@ -329,84 +361,143 @@ async function handleFetch(
     mappingObj[m.source_column] = m.target_field;
   }
 
-  const password = source.db_password_secret_name
-    ? resolveSecret(source.db_password_secret_name)
-    : "";
-
-  const { default: postgres } = await import("npm:postgres@3.4.5");
-  const sql = postgres({
-    host: source.db_host,
-    port: source.db_port || 5432,
-    database: source.db_name || "postgres",
-    username: source.db_user || "postgres",
-    password,
-    ssl: { ca: AKAMAI_CA_CERT, rejectUnauthorized: false },
-    connect_timeout: 30,
-    max: 1,
-    idle_timeout: 5,
-  });
-
+  const sql = await connectSource(source);
   const schemaName = source.db_schema || "public";
   const tableName = source.db_table;
-  const batchLimit = 1000;
 
   try {
-    // Schema drift check on first batch
-    if (offset === 0) {
-      const colResult = await sql`
-        SELECT column_name FROM information_schema.columns
-        WHERE table_schema = ${schemaName} AND table_name = ${tableName}
-        ORDER BY ordinal_position
-      `;
-      const dbColumns = new Set(colResult.map((r: { column_name: string }) => r.column_name));
-      const missingColumns = Object.keys(mappingObj).filter(c => !dbColumns.has(c));
+    await supabase
+      .from("source_uploads")
+      .update({ status: "processing", resync_progress: { phase: "fetch", fetched: 0 } })
+      .eq("id", uploadId);
 
-      if (missingColumns.length > 0) {
-        await sql.end();
-        await supabase
-          .from("source_uploads")
-          .update({ status: "error" })
-          .eq("id", uploadId);
+    // The manifest query scans the whole source view once; give it room.
+    await sql.unsafe(`SET statement_timeout = '300s'`);
 
-        await supabase.from("upload_history_log").insert({
-          action: "auto_import_error",
-          details: { reason: "Schema drift - missing columns", missing: missingColumns, source_id: sourceId, upload_id: uploadId },
-        });
+    // Schema drift check
+    const colResult = await sql`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = ${schemaName} AND table_name = ${tableName}
+      ORDER BY ordinal_position
+    `;
+    const dbColumns = new Set(colResult.map((r: { column_name: string }) => r.column_name));
+    const missingColumns = Object.keys(mappingObj).filter(c => !dbColumns.has(c));
 
-        return jsonResponse({ error: "Schema drift detected", missingColumns }, 500);
+    if (missingColumns.length > 0) {
+      await sql.end();
+      await supabase
+        .from("source_uploads")
+        .update({ status: "error" })
+        .eq("id", uploadId);
+
+      await supabase.from("upload_history_log").insert({
+        action: "auto_import_error",
+        details: { reason: "Schema drift - missing columns", missing: missingColumns, source_id: sourceId, upload_id: uploadId },
+      });
+
+      return jsonResponse({ error: "Schema drift detected", missingColumns }, 500);
+    }
+
+    if (!dbColumns.has("_dlt_id")) {
+      throw new Error("Source table has no _dlt_id column; manifest fetch requires it");
+    }
+
+    const manifest = await sql.unsafe(
+      `SELECT "_dlt_id" AS id FROM "${schemaName}"."${tableName}"`
+    ) as unknown as { id: unknown }[];
+    await sql.end();
+
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const r of manifest) {
+      const id = String(r.id ?? "");
+      if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+    }
+
+    await supabase
+      .from("source_uploads")
+      .update({ resync_progress: { phase: "fetch", fetched: 0, manifest: ids.length } })
+      .eq("id", uploadId);
+
+    selfInvoke(supabaseUrl, serviceRoleKey, {
+      phase: "fetch-rows",
+      sourceId,
+      uploadId,
+      ids,
+      fetched: 0,
+    });
+
+    return jsonResponse({ success: true, phase: "fetch_manifest", manifest: ids.length });
+  } catch (err) {
+    try { await sql.end(); } catch { /* ignore */ }
+    const errMsg = err instanceof Error ? err.message : String(err);
+    await supabase
+      .from("source_uploads")
+      .update({ status: "error", resync_progress: { phase: "fetch", error: errMsg } })
+      .eq("id", uploadId);
+    throw err;
+  }
+}
+
+// Phase 2 of the fetch: pull one chunk of rows by exact _dlt_id (unique-index
+// lookups — cheap regardless of how large the underlying historical table is),
+// stage them, then chain to the next chunk.
+async function handleFetchRows(
+  supabase: ReturnType<typeof createClient>,
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  sourceId: string,
+  uploadId: string,
+  ids: string[],
+  fetchedSoFar: number,
+) {
+  const { data: source } = await supabase
+    .from("data_sources")
+    .select("*")
+    .eq("id", sourceId)
+    .maybeSingle();
+
+  if (!source || !source.db_host || !source.db_table) {
+    return jsonResponse({ error: "Source not found or not configured" }, 400);
+  }
+
+  const { data: mappings } = await supabase
+    .from("column_mappings")
+    .select("source_column, target_field")
+    .eq("data_source_id", sourceId);
+
+  const mappingObj: Record<string, string> = {};
+  for (const m of mappings || []) {
+    mappingObj[m.source_column] = m.target_field;
+  }
+
+  const chunk = ids.slice(0, 1000);
+  const rest = ids.slice(1000);
+
+  const sql = await connectSource(source);
+  const schemaName = source.db_schema || "public";
+  const tableName = source.db_table;
+
+  try {
+    await sql.unsafe(`SET statement_timeout = '60s'`);
+
+    // Retry transient timeouts; fetching by exact ids is idempotent.
+    let result;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        result = await sql.unsafe(
+          `SELECT * FROM "${schemaName}"."${tableName}" WHERE "_dlt_id" = ANY($1)`,
+          [chunk]
+        );
+        break;
+      } catch (qErr) {
+        const msg = qErr instanceof Error ? qErr.message : String(qErr);
+        if (attempt >= 3 || !msg.includes("statement timeout")) throw qErr;
+        await new Promise((r) => setTimeout(r, 3000));
       }
     }
 
-    // Determine stable sort column for deterministic pagination
-    let orderColumn = orderColumnHint || "";
-    if (!orderColumn) {
-      const colCheck = await sql`
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = ${schemaName} AND table_name = ${tableName} AND column_name = '_dlt_id'
-      `;
-      if (colCheck.length > 0) {
-        orderColumn = "_dlt_id";
-      } else {
-        const pkResult = await sql`
-          SELECT a.attname
-          FROM pg_index i
-          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-          JOIN pg_class c ON c.oid = i.indrelid
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = ${schemaName} AND c.relname = ${tableName} AND i.indisprimary
-          ORDER BY array_position(i.indkey, a.attnum)
-          LIMIT 1
-        `;
-        orderColumn = pkResult.length > 0 ? pkResult[0].attname : "_dlt_id";
-      }
-    }
-
-    const result = await sql.unsafe(
-      `SELECT * FROM "${schemaName}"."${tableName}" ORDER BY "${orderColumn}" LIMIT $1 OFFSET $2`,
-      [batchLimit, offset]
-    );
-
-    const rows = result.map((row: Record<string, unknown>) => {
+    const rows = (result as Record<string, unknown>[]).map((row) => {
       const strRow: Record<string, string> = {};
       for (const [k, v] of Object.entries(row)) {
         strRow[k] = v == null ? "" : String(v);
@@ -416,7 +507,7 @@ async function handleFetch(
 
     await sql.end();
 
-    // Apply mappings and insert into source_records
+    // Apply mappings and stage
     const recordRows = rows.map((row: Record<string, string>) => {
       const mapped: Record<string, string> = {};
       for (const [col, val] of Object.entries(row)) {
@@ -439,60 +530,31 @@ async function handleFetch(
       };
     });
 
-    // Idempotent staging: skip rows whose _dlt_id already exists for this upload
-    const incomingDltIds = rows
-      .map((r: Record<string, string>) => r["_dlt_id"] || r["dlt_id"] || "")
-      .filter((id: string) => id !== "");
-    const existingDltIds = new Set<string>();
-    if (incomingDltIds.length > 0) {
-      for (let i = 0; i < incomingDltIds.length; i += 200) {
-        const chunk = incomingDltIds.slice(i, i + 200);
-        const { data: existing } = await supabase
-          .from("source_records")
-          .select("raw_data")
-          .eq("source_upload_id", uploadId)
-          .in("raw_data->>_dlt_id", chunk);
-        for (const row of existing || []) {
-          const rd = row.raw_data as Record<string, string> | null;
-          if (rd && (rd["_dlt_id"] || rd["dlt_id"])) {
-            existingDltIds.add(rd["_dlt_id"] || rd["dlt_id"]);
-          }
-        }
-      }
+    // Staging is hard-deduplicated by the unique index on (source_upload_id, dlt_id);
+    // ignoreDuplicates makes a re-run of a failed import a clean no-op.
+    for (let i = 0; i < recordRows.length; i += 200) {
+      const batch = recordRows.slice(i, i + 200);
+      const { error: insErr } = await supabase
+        .from("source_records")
+        .upsert(batch, { onConflict: "source_upload_id,dlt_id", ignoreDuplicates: true });
+      if (insErr) throw new Error(`Staging insert failed: ${insErr.message}`);
     }
 
-    // Filter out already-staged rows
-    const newRows = existingDltIds.size > 0
-      ? recordRows.filter((_r: unknown, idx: number) => {
-          const dltId = rows[idx]["_dlt_id"] || rows[idx]["dlt_id"] || "";
-          return !dltId || !existingDltIds.has(dltId);
-        })
-      : recordRows;
-
-    // Insert in sub-batches of 200
-    for (let i = 0; i < newRows.length; i += 200) {
-      const batch = newRows.slice(i, i + 200);
-      await supabase.from("source_records").insert(batch);
-    }
-
-    const hasMore = rows.length === batchLimit;
-    const nextOffset = offset + rows.length;
-
-    // Update progress
+    const totalFetched = fetchedSoFar + rows.length;
     await supabase
       .from("source_uploads")
-      .update({ resync_progress: { phase: "fetch", offset: nextOffset, hasMore } })
+      .update({ resync_progress: { phase: "fetch", fetched: totalFetched, remaining: rest.length } })
       .eq("id", uploadId);
 
-    if (hasMore) {
-      await selfInvoke(supabaseUrl, serviceRoleKey, {
-        phase: "fetch",
+    if (rest.length > 0) {
+      selfInvoke(supabaseUrl, serviceRoleKey, {
+        phase: "fetch-rows",
         sourceId,
         uploadId,
-        offset: nextOffset,
-        orderColumn,
+        ids: rest,
+        fetched: totalFetched,
       });
-      return jsonResponse({ success: true, phase: "fetch", offset: nextOffset, fetched: rows.length, continuing: true });
+      return jsonResponse({ success: true, phase: "fetch-rows", fetched: totalFetched, remaining: rest.length, continuing: true });
     }
 
     // All rows fetched - update row_count and start sync phase
@@ -504,22 +566,22 @@ async function handleFetch(
 
     await supabase
       .from("source_uploads")
-      .update({ row_count: totalImported || nextOffset })
+      .update({ row_count: totalImported || totalFetched })
       .eq("id", uploadId);
 
-    // Start sync phase with keyset pagination (lastId = undefined means start from beginning)
-    await selfInvoke(supabaseUrl, serviceRoleKey, {
+    selfInvoke(supabaseUrl, serviceRoleKey, {
       phase: "sync",
       sourceId,
       uploadId,
     });
 
-    return jsonResponse({ success: true, phase: "fetch_complete", totalRows: totalImported || nextOffset });
+    return jsonResponse({ success: true, phase: "fetch_complete", totalRows: totalImported || totalFetched });
   } catch (err) {
     try { await sql.end(); } catch { /* ignore */ }
+    const errMsg = err instanceof Error ? err.message : String(err);
     await supabase
       .from("source_uploads")
-      .update({ status: "error" })
+      .update({ status: "error", resync_progress: { phase: "fetch", fetched: fetchedSoFar, error: errMsg } })
       .eq("id", uploadId);
     throw err;
   }
@@ -532,6 +594,7 @@ async function handleSync(
   sourceId: string,
   uploadId: string,
   lastId?: string,
+  syncedSoFar = 0,
 ) {
   const { data: upload } = await supabase
     .from("source_uploads")
@@ -589,33 +652,57 @@ async function handleSync(
       return jsonResponse({ error: "Sanity check failed" }, 500);
     }
 
+    // Build the current-book policy set from staging (needed for both the
+    // completeness gate and reconciliation)
+    const currentBookPolicies = new Set<string>();
+    let reconCursor: string | undefined;
+    while (true) {
+      let reconQ = supabase
+        .from("source_records")
+        .select("id, mapped_data")
+        .eq("source_upload_id", uploadId)
+        .eq("processing_status", "imported")
+        .order("id", { ascending: true })
+        .limit(2000);
+      if (reconCursor) reconQ = reconQ.gt("id", reconCursor);
+      const { data: reconBatch, error: reconErr } = await reconQ;
+      if (reconErr || !reconBatch || reconBatch.length === 0) break;
+      for (const rec of reconBatch) {
+        const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
+        const pn = (md["Policy Number"] || "").trim();
+        if (pn) currentBookPolicies.add(pn);
+      }
+      reconCursor = reconBatch[reconBatch.length - 1].id;
+      if (reconBatch.length < 2000) break;
+    }
+
+    // Completeness gate: refuse to finalize (and especially to reconcile/delete)
+    // unless nearly every staged policy actually landed in form_submissions
+    if (currentBookPolicies.size > 0 && (totalSynced || 0) < Math.floor(currentBookPolicies.size * 0.98)) {
+      await supabase
+        .from("source_uploads")
+        .update({
+          status: "error",
+          resync_progress: {
+            phase: "sync",
+            error: `Completeness gate failed: ${totalSynced || 0} synced vs ${currentBookPolicies.size} staged policies`,
+            synced: totalSynced || 0,
+            staged_policies: currentBookPolicies.size,
+          },
+        })
+        .eq("id", uploadId);
+      await supabase.from("upload_history_log").insert({
+        action: "auto_import_error",
+        uploaded_by: "system/cron",
+        details: { reason: "Completeness gate failed", synced: totalSynced || 0, staged_policies: currentBookPolicies.size, upload_id: uploadId },
+      });
+      return jsonResponse({ error: "Completeness gate failed" }, 500);
+    }
+
     // --- Reconciliation: remove stale Data Source policies not in current book ---
-    // Build current-book set from staging BEFORE purging
     let orphansDeleted = 0;
     let reconciliationSkipped = false;
     try {
-      const currentBookPolicies = new Set<string>();
-      let reconCursor: string | undefined;
-      while (true) {
-        let reconQ = supabase
-          .from("source_records")
-          .select("id, mapped_data")
-          .eq("source_upload_id", uploadId)
-          .eq("processing_status", "imported")
-          .order("id", { ascending: true })
-          .limit(2000);
-        if (reconCursor) reconQ = reconQ.gt("id", reconCursor);
-        const { data: reconBatch, error: reconErr } = await reconQ;
-        if (reconErr || !reconBatch || reconBatch.length === 0) break;
-        for (const rec of reconBatch) {
-          const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
-          const pn = (md["Policy Number"] || "").trim();
-          if (pn) currentBookPolicies.add(pn);
-        }
-        reconCursor = reconBatch[reconBatch.length - 1].id;
-        if (reconBatch.length < 2000) break;
-      }
-
       if (currentBookPolicies.size > 0) {
         const { count: totalDataSource } = await supabase
           .from("form_submissions")
@@ -687,12 +774,8 @@ async function handleSync(
       details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted },
     });
 
-    // Purge staging rows now that sync + reconciliation are complete
-    await supabase
-      .from("source_records")
-      .delete()
-      .eq("source_upload_id", uploadId);
-
+    // Staging is intentionally retained: the admin "View" screen reads it, and the
+    // next import purges prior uploads' rows at init (see purgeOldStagingRows).
     return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted });
   }
 
@@ -911,35 +994,43 @@ async function handleSync(
     return jsonResponse({ error: `Policy sync failed: ${syncErr instanceof Error ? syncErr.message : "Unknown"}` }, 500);
   }
 
-  // Update progress
+  // Update progress (cumulative across batches)
+  const totalSyncedSoFar = syncedSoFar + synced;
   await supabase
     .from("source_uploads")
-    .update({ resync_progress: { phase: "sync", lastId: newLastId, synced, continuing: true } })
+    .update({ resync_progress: { phase: "sync", lastId: newLastId, synced: totalSyncedSoFar, continuing: true } })
     .eq("id", uploadId);
 
   // Self-invoke for next sync batch with keyset cursor
-  await selfInvoke(supabaseUrl, serviceRoleKey, {
+  selfInvoke(supabaseUrl, serviceRoleKey, {
     phase: "sync",
     sourceId,
     uploadId,
     lastId: newLastId,
+    synced: totalSyncedSoFar,
   });
 
-  return jsonResponse({ success: true, phase: "sync", lastId: newLastId, synced, agentsAdded, agentsUpdated, continuing: true });
+  return jsonResponse({ success: true, phase: "sync", lastId: newLastId, synced: totalSyncedSoFar, agentsAdded, agentsUpdated, continuing: true });
 }
 
-async function selfInvoke(
+// Fire-and-forget: the next batch starts as soon as its request is received, so we
+// never await the downstream response. Awaiting it would nest every invocation inside
+// the first one's request, which blows past edge wall-clock limits and dies when the
+// original caller (pg_net gives up after ~5s) hangs up.
+function selfInvoke(
   supabaseUrl: string,
   serviceRoleKey: string,
   body: Record<string, unknown>,
 ) {
   const url = `${supabaseUrl}/functions/v1/sql-import-cron`;
-  await fetch(url, {
+  const p = fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${serviceRoleKey}`,
     },
     body: JSON.stringify(body),
-  });
+  }).catch(() => {});
+  const runtime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+  if (runtime?.waitUntil) runtime.waitUntil(p);
 }
