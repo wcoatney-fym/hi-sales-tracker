@@ -157,6 +157,7 @@ export default function AgentProductionPanel({
                 <thead>
                   <tr className="border-b border-slate-700/30">
                     <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Client</th>
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Policy #</th>
                     <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Carrier</th>
                     <th className="px-3 py-2 text-left text-xs font-semibold text-slate-400 uppercase">Plan</th>
                     <th className="px-3 py-2 text-right text-xs font-semibold text-slate-400 uppercase">Premium</th>
@@ -168,6 +169,7 @@ export default function AgentProductionPanel({
                   {policies.slice(0, 15).map((p) => (
                     <tr key={p.id} className="hover:bg-navy-light/30 transition-colors">
                       <td className="px-3 py-2 text-white">{p.client_first_name} {p.client_last_name}</td>
+                      <td className="px-3 py-2 text-slate-300 font-mono text-xs">{p.policy_number || "\u2014"}</td>
                       <td className="px-3 py-2 text-slate-300">{p.carrier}</td>
                       <td className="px-3 py-2 text-slate-300 max-w-[140px] truncate">{resolvePlanName(p.plan_name)}</td>
                       <td className="px-3 py-2 text-right text-white font-medium">${p.plan_premium?.toFixed(2)}</td>

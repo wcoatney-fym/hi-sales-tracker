@@ -199,6 +199,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
       "Product Type",
       "Client First Name",
       "Client Last Name",
+      "Policy Number",
       "Phone",
       "Email",
       "Address",
@@ -221,6 +222,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
       p.product_type,
       p.client_first_name,
       p.client_last_name,
+      p.policy_number || "",
       p.phone,
       p.email,
       p.address,
@@ -275,6 +277,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
         "Product Type",
         "Client First Name",
         "Client Last Name",
+        "Policy Number",
         "Phone",
         "Email",
         "Address",
@@ -297,6 +300,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
         p.product_type,
         p.client_first_name,
         p.client_last_name,
+        p.policy_number || "",
         p.phone,
         p.email,
         p.address,
@@ -694,6 +698,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
                   <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Agency</th>
                   <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Type</th>
                   <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Client Name</th>
+                  <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Policy #</th>
                   <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Phone</th>
                   <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Email</th>
                   <th className="px-4 py-3 font-medium text-gold/80 whitespace-nowrap text-xs uppercase tracking-wider">Address</th>
@@ -735,6 +740,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
                       </span>
                     </td>
                     <td className="px-4 py-3 text-white whitespace-nowrap">{p.client_first_name} {p.client_last_name}</td>
+                    <td className="px-4 py-3 text-slate-300 font-mono text-xs whitespace-nowrap">{p.policy_number || "\u2014"}</td>
                     <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{p.phone}</td>
                     <td className="px-4 py-3 text-slate-300 whitespace-nowrap">{p.email}</td>
                     <td className="px-4 py-3 text-slate-300 whitespace-nowrap max-w-[200px] truncate" title={p.address}>{p.address}</td>
