@@ -699,14 +699,6 @@ export async function adminSqlImportBatch(token: string, sourceId: string, offse
   return callApi("admin-api", { action: "sql-import-batch", token, sourceId, offset, batchSize });
 }
 
-export async function adminStartSqlImport(token: string, sourceId: string, carrier: string) {
-  return callApi("admin-api", { action: "start-sql-import", token, sourceId, carrier });
-}
-
-export async function adminGetImportProgress(token: string, uploadId: string) {
-  return callApi("admin-api", { action: "get-import-progress", token, uploadId });
-}
-
 export async function adminGetColumnMappings(token: string, sourceId: string) {
   return callApi("admin-api", { action: "get-column-mappings", token, sourceId });
 }
