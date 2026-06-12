@@ -6,6 +6,8 @@ import {
   Users,
   BarChart3,
   Building2,
+  CalendarRange,
+  BookOpen,
 } from "lucide-react";
 import KpiRow, { type KpiMetric } from "./KpiRow";
 import PolicyStatusKpiRow, { type PolicyStatusKpiData } from "./PolicyStatusKpiRow";
@@ -49,6 +51,41 @@ interface AgentData {
   revenue: number;
   avg_premium: number;
   prev_revenue: number;
+}
+
+// Groups KPI cards under an explicit label so it's unambiguous which metrics
+// follow the date picker and which describe the whole current book.
+function MetricSection({
+  icon,
+  title,
+  subtitle,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  subtitle: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-700/60 bg-slate-800/20 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        {icon}
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-200">{title}</span>
+        <span className="text-xs text-slate-500">\u00b7 {subtitle}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function formatRangeLabel(range: DateRange): string {
+  const fmt = (d: string, withYear: boolean) =>
+    new Date(d + "T00:00:00").toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      ...(withYear ? { year: "numeric" } : {}),
+    });
+  return `${fmt(range.startDate, false)} \u2013 ${fmt(range.endDate, true)}`;
 }
 
 interface OverviewTabProps {
@@ -264,9 +301,21 @@ export default function OverviewTab({
       ) : (
         <>
           <div data-tour="admin-kpi-cards">
-            <KpiRow metrics={kpiMetrics} loading={loading} />
+            <MetricSection
+              icon={<CalendarRange size={14} className="text-gold" />}
+              title="Production for Selected Dates"
+              subtitle={formatRangeLabel(dateRange)}
+            >
+              <KpiRow metrics={kpiMetrics} loading={loading} />
+            </MetricSection>
           </div>
-          <PolicyStatusKpiRow data={statusKpis} loading={loading} />
+          <MetricSection
+            icon={<BookOpen size={14} className="text-sky-400" />}
+            title="Book of Business"
+            subtitle="entire current book, as of today \u2014 not affected by the date picker"
+          >
+            <PolicyStatusKpiRow data={statusKpis} loading={loading} />
+          </MetricSection>
 
           <TrendChart
             data={chartData}
