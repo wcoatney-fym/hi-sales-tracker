@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import QualityMetrics from "../QualityMetrics";
 import { Trophy, Loader2, Clock, Gamepad2, Swords, Target, Gift, Filter, Globe } from "lucide-react";
 import { getLeaderboard, getAgencyLeaderboard, getChallenges, getBadges, getActivePromotions, getActiveIncentives } from "../../lib/api";
 import type {
@@ -450,6 +451,7 @@ export default function AdminLeaderboardTab({ agencyId: rawAgencyId, agencyName:
           </>
         )}
       </div>
+      {boardMode === "agency" && agencyId && <QualityMetrics agencyId={agencyId} />}
     </div>
   );
 }

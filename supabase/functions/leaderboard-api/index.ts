@@ -209,6 +209,46 @@ function computeTalkTimeStreak(dailyMinutes: Record<string, number>): number {
   return streak;
 }
 
+
+// True when the token belongs to a session allowed to view this agency's data:
+// an admin session scoped to the agency (global admins, with no agency_id, may
+// view any — and are the only ones allowed when agencyId is null/overall), or
+// an agent session whose agent belongs to the agency.
+// deno-lint-ignore no-explicit-any
+async function authorizeAgencyAccess(
+  supabase: any,
+  accessToken: string,
+  agencyId: string | null,
+): Promise<boolean> {
+  if (!accessToken) return false;
+  const nowIso = new Date().toISOString();
+  const { data: adminSession } = await supabase
+    .from("admin_sessions")
+    .select("agency_id")
+    .eq("token", accessToken)
+    .gt("expires_at", nowIso)
+    .maybeSingle();
+  if (adminSession) {
+    return !adminSession.agency_id || (agencyId !== null && adminSession.agency_id === agencyId);
+  }
+  if (!agencyId) return false;
+  const { data: agentSession } = await supabase
+    .from("agent_sessions")
+    .select("agent_id")
+    .eq("token", accessToken)
+    .gt("expires_at", nowIso)
+    .maybeSingle();
+  if (agentSession) {
+    const { data: sessionAgent } = await supabase
+      .from("agents")
+      .select("agency_id")
+      .eq("id", agentSession.agent_id)
+      .maybeSingle();
+    return !!sessionAgent && sessionAgent.agency_id === agencyId;
+  }
+  return false;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -545,38 +585,13 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
       if (!agencyRow) return errorResponse("Agency not found", 404);
 
-      // Agency data requires an authorized session: an admin session scoped to
-      // this agency (or a global admin), or an agent session whose agent
-      // belongs to this agency. The agency UUID alone is not a credential.
+      // Agency data requires an authorized session; the agency UUID alone is
+      // not a credential.
       const accessToken = url.searchParams.get("token") || req.headers.get("X-Agent-Token") || "";
       if (!accessToken) return errorResponse("Authentication required", 401);
-      const nowIso = new Date().toISOString();
-      let agencyAuthorized = false;
-      const { data: adminSession } = await supabase
-        .from("admin_sessions")
-        .select("agency_id")
-        .eq("token", accessToken)
-        .gt("expires_at", nowIso)
-        .maybeSingle();
-      if (adminSession) {
-        agencyAuthorized = !adminSession.agency_id || adminSession.agency_id === agencyId;
-      } else {
-        const { data: agentSession } = await supabase
-          .from("agent_sessions")
-          .select("agent_id")
-          .eq("token", accessToken)
-          .gt("expires_at", nowIso)
-          .maybeSingle();
-        if (agentSession) {
-          const { data: sessionAgent } = await supabase
-            .from("agents")
-            .select("agency_id")
-            .eq("id", agentSession.agent_id)
-            .maybeSingle();
-          agencyAuthorized = !!sessionAgent && sessionAgent.agency_id === agencyId;
-        }
+      if (!(await authorizeAgencyAccess(supabase, accessToken, agencyId))) {
+        return errorResponse("Not authorized for this agency", 403);
       }
-      if (!agencyAuthorized) return errorResponse("Not authorized for this agency", 403);
 
       // Build alias resolution map
       const { data: aliasRows2 } = await supabase
@@ -839,6 +854,23 @@ Deno.serve(async (req: Request) => {
         periodKey,
         agency: { id: agencyRow.id, name: agencyRow.name, slug: agencyRow.slug },
       });
+    }
+
+    if (action === "get-quality-metrics") {
+      // Placement & persistency. agency_id scopes to one agency (admin scoped
+      // to it, global admin, or agent in it); omitted = whole book, global
+      // admins only.
+      const qmAgencyId = url.searchParams.get("agency_id");
+      const qmToken = url.searchParams.get("token") || req.headers.get("X-Agent-Token") || "";
+      if (!qmToken) return errorResponse("Authentication required", 401);
+      if (!(await authorizeAgencyAccess(supabase, qmToken, qmAgencyId))) {
+        return errorResponse("Not authorized", 403);
+      }
+      const { data: qmData, error: qmError } = await supabase.rpc("get_quality_metrics", {
+        p_agency_id: qmAgencyId || null,
+      });
+      if (qmError) return errorResponse(qmError.message, 500);
+      return jsonResponse(qmData || { placement: [], persistency: [] });
     }
 
     if (action === "get-challenges") {

@@ -570,6 +570,12 @@ export async function getAgencyLeaderboard(agencyId: string, period: string) {
   return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token });
 }
 
+export async function getQualityMetrics(agencyId?: string | null) {
+  // Quality data requires an authorized session (admin or agent)
+  const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || "";
+  return callLeaderboardApi({ action: "get-quality-metrics", ...(agencyId ? { agency_id: agencyId } : {}), token });
+}
+
 export async function getChallenges() {
   return callLeaderboardApi({ action: "get-challenges" });
 }
