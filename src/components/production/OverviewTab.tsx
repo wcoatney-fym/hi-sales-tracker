@@ -279,7 +279,7 @@ export default function OverviewTab({
           <MetricSection
             icon={<BookOpen size={14} className="text-sky-400" />}
             title="Book of Business"
-            subtitle="entire current book, as of today \u2014 not affected by the date picker"
+            subtitle="entire current book, as of today — not affected by the date picker"
           >
             <PolicyStatusKpiRow data={statusKpis} loading={loading} />
           </MetricSection>

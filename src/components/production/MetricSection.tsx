@@ -27,7 +27,7 @@ export default function MetricSection({
 
 export function formatRangeLabel(range: DateRange): string {
   const fmt = (d: string, withYear: boolean) =>
-    new Date(d + "T00:00:00").toLocaleDateString("en-US", {
+    new Date(d.includes("T") ? d : d + "T00:00:00").toLocaleDateString("en-US", {
       month: "short",
       day: "numeric",
       ...(withYear ? { year: "numeric" } : {}),
