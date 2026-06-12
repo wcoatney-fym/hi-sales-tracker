@@ -225,6 +225,7 @@ async function handleInit(
 
       await supabase.from("upload_history_log").insert({
         action: "auto_import_paused",
+        source: "sql_import",
         details: { reason: "Column mappings changed since confirmation", source_id: source.id },
       });
 
@@ -281,6 +282,7 @@ async function handleInit(
   // Record the init outcome so silent skips/errors are visible after the fact
   await supabase.from("upload_history_log").insert({
     action: "auto_import_init",
+    source: "sql_import",
     uploaded_by: "system/cron",
     details: { results },
   });
@@ -392,6 +394,7 @@ async function handleFetch(
 
       await supabase.from("upload_history_log").insert({
         action: "auto_import_error",
+        source: "sql_import",
         details: { reason: "Schema drift - missing columns", missing: missingColumns, source_id: sourceId, upload_id: uploadId },
       });
 
@@ -693,66 +696,65 @@ async function handleSync(
         .eq("id", uploadId);
       await supabase.from("upload_history_log").insert({
         action: "auto_import_error",
+        source: "sql_import",
         uploaded_by: "system/cron",
         details: { reason: "Completeness gate failed", synced: totalSynced || 0, staged_policies: currentBookPolicies.size, upload_id: uploadId },
       });
       return jsonResponse({ error: "Completeness gate failed" }, 500);
     }
 
-    // --- Reconciliation: remove stale Data Source policies not in current book ---
+    // --- Reconciliation: remove stale Data Source policies ---
+    // After a complete sync every in-book row carries this upload's id (set by
+    // the upsert), so stale rows are exactly the Data Source rows NOT tagged.
+    // No client-side set comparison: the previous implementation silently
+    // truncated and misclassified in-book rows as orphans.
     let orphansDeleted = 0;
     let reconciliationSkipped = false;
     try {
-      if (currentBookPolicies.size > 0) {
-        const { count: totalDataSource } = await supabase
+      const { count: totalDataSource } = await supabase
+        .from("form_submissions")
+        .select("*", { count: "exact", head: true })
+        .eq("source", "Data Source");
+
+      const staleFilter = `source_upload_id.is.null,source_upload_id.neq.${uploadId}`;
+      const { count: staleCount } = await supabase
+        .from("form_submissions")
+        .select("*", { count: "exact", head: true })
+        .eq("source", "Data Source")
+        .or(staleFilter);
+
+      const safetyThreshold = Math.floor((totalDataSource || 0) * 0.2);
+      if ((staleCount || 0) > safetyThreshold) {
+        reconciliationSkipped = true;
+        await supabase.from("upload_history_log").insert({
+          action: "reconciliation_aborted",
+          source: "sql_import",
+          details: {
+            source_id: sourceId,
+            upload_id: uploadId,
+            orphan_count: staleCount,
+            total_data_source: totalDataSource,
+            safety_cap_pct: 20,
+            reason: `Stale count (${staleCount}) exceeds 20% safety cap (${safetyThreshold})`,
+          },
+        });
+      } else if ((staleCount || 0) > 0) {
+        const { error: delErr, count: deleted } = await supabase
           .from("form_submissions")
-          .select("*", { count: "exact", head: true })
-          .eq("source", "Data Source");
-
-        // Find orphans: Data Source policies NOT in the current book
-        const { data: allDataSourcePolicies } = await supabase
-          .from("form_submissions")
-          .select("id, policy_number")
-          .eq("source", "Data Source");
-
-        const orphanIds: string[] = [];
-        for (const row of allDataSourcePolicies || []) {
-          if (!currentBookPolicies.has(row.policy_number)) {
-            orphanIds.push(row.id);
-          }
-        }
-
-        const safetyThreshold = Math.floor((totalDataSource || 0) * 0.2);
-        if (orphanIds.length > safetyThreshold) {
-          reconciliationSkipped = true;
-          await supabase.from("upload_history_log").insert({
-            action: "reconciliation_aborted",
-            details: {
-              source_id: sourceId,
-              upload_id: uploadId,
-              orphan_count: orphanIds.length,
-              total_data_source: totalDataSource,
-              safety_cap_pct: 20,
-              reason: `Orphan count (${orphanIds.length}) exceeds 20% safety cap (${safetyThreshold})`,
-            },
-          });
-        } else if (orphanIds.length > 0) {
-          for (let i = 0; i < orphanIds.length; i += 500) {
-            const batch = orphanIds.slice(i, i + 500);
-            await supabase.from("form_submissions").delete().in("id", batch);
-          }
-          orphansDeleted = orphanIds.length;
-          await supabase.from("upload_history_log").insert({
-            action: "reconciliation_complete",
-            details: {
-              source_id: sourceId,
-              upload_id: uploadId,
-              orphans_deleted: orphansDeleted,
-              current_book_size: currentBookPolicies.size,
-              total_data_source_before: totalDataSource,
-            },
-          });
-        }
+          .delete({ count: "exact" })
+          .eq("source", "Data Source")
+          .or(staleFilter);
+        if (!delErr) orphansDeleted = deleted || 0;
+        await supabase.from("upload_history_log").insert({
+          action: "reconciliation_complete",
+          source: "sql_import",
+          details: {
+            source_id: sourceId,
+            upload_id: uploadId,
+            orphans_deleted: orphansDeleted,
+            total_data_source_before: totalDataSource,
+          },
+        });
       }
     } catch (_) {
       // Reconciliation is best-effort; don't block completion
@@ -771,6 +773,7 @@ async function handleSync(
 
     await supabase.from("upload_history_log").insert({
       action: "auto_import_complete",
+      source: "sql_import",
       details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted },
     });
 
