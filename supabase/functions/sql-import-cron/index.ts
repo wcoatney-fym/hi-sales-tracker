@@ -111,6 +111,7 @@ interface DataSource {
   db_table: string | null;
   db_user: string | null;
   db_password_secret_name: string | null;
+  last_seen_load_id: string | null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -159,6 +160,8 @@ Deno.serve(async (req: Request) => {
   try {
     if (phase === "init") {
       return await handleInit(supabase, supabaseUrl, serviceRoleKey);
+    } else if (phase === "check") {
+      return await handleCheck(supabase, supabaseUrl, serviceRoleKey);
     } else if (phase === "fetch") {
       return await handleFetch(supabase, supabaseUrl, serviceRoleKey, sourceId!, uploadId!);
     } else if (phase === "fetch-rows") {
@@ -172,6 +175,91 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: msg }, 500);
   }
 });
+
+// Validates mappings (pausing auto-import on drift), creates the upload record,
+// purges prior staging, and kicks the fetch chain for one source.
+// deno-lint-ignore no-explicit-any
+async function startImportForSource(
+  supabase: any,
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  source: DataSource,
+): Promise<{ sourceId: string; status: string; message: string }> {
+  // Check mapping drift
+  const { data: currentMappings } = await supabase
+    .from("column_mappings")
+    .select("source_column, target_field")
+    .eq("data_source_id", source.id)
+    .order("source_column");
+
+  const snapshot = source.auto_cron_mapping_snapshot || [];
+  const currentSorted = (currentMappings || [])
+    .map((m: { source_column: string; target_field: string }) => `${m.source_column}::${m.target_field}`)
+    .sort()
+    .join("|");
+  const snapshotSorted = snapshot
+    .map((m: { source_column: string; target_field: string }) => `${m.source_column}::${m.target_field}`)
+    .sort()
+    .join("|");
+
+  if (currentSorted !== snapshotSorted) {
+    await supabase
+      .from("data_sources")
+      .update({ auto_cron_enabled: false })
+      .eq("id", source.id);
+
+    await supabase.from("upload_history_log").insert({
+      action: "auto_import_paused",
+      source: "sql_import",
+      details: { reason: "Column mappings changed since confirmation", source_id: source.id },
+    });
+
+    return { sourceId: source.id, status: "paused", message: "Mapping drift detected" };
+  }
+
+  if (!currentMappings || currentMappings.length === 0) {
+    return { sourceId: source.id, status: "skipped", message: "No mappings configured" };
+  }
+
+  // Create upload record
+  const carrier = source.default_carrier || "UNL";
+  await supabase
+    .from("source_uploads")
+    .update({ is_active: false })
+    .eq("data_source_id", source.id)
+    .eq("carrier", carrier)
+    .eq("is_active", true);
+
+  const { data: newUpload, error: upErr } = await supabase
+    .from("source_uploads")
+    .insert({
+      data_source_id: source.id,
+      carrier,
+      filename: `auto-import-${new Date().toISOString().slice(0, 10)}`,
+      row_count: 0,
+      status: "processing",
+      uploaded_by: "system/cron",
+      is_active: true,
+    })
+    .select()
+    .single();
+
+  if (upErr || !newUpload) {
+    return { sourceId: source.id, status: "error", message: upErr?.message || "Failed to create upload" };
+  }
+
+  // Purge staging rows from prior uploads for this data source
+  await purgeOldStagingRows(supabase, source.id, newUpload.id);
+
+  // Self-invoke to start fetching
+  selfInvoke(supabaseUrl, serviceRoleKey, {
+    phase: "fetch",
+    sourceId: source.id,
+    uploadId: newUpload.id,
+  });
+
+  return { sourceId: source.id, status: "started", message: `Upload ${newUpload.id} created` };
+}
 
 async function handleInit(
   supabase: ReturnType<typeof createClient>,
@@ -199,84 +287,7 @@ async function handleInit(
       results.push({ sourceId: source.id, status: "skipped", message: "DB not configured" });
       continue;
     }
-
-    // Check mapping drift
-    const { data: currentMappings } = await supabase
-      .from("column_mappings")
-      .select("source_column, target_field")
-      .eq("data_source_id", source.id)
-      .order("source_column");
-
-    const snapshot = source.auto_cron_mapping_snapshot || [];
-    const currentSorted = (currentMappings || [])
-      .map((m: { source_column: string; target_field: string }) => `${m.source_column}::${m.target_field}`)
-      .sort()
-      .join("|");
-    const snapshotSorted = snapshot
-      .map((m: { source_column: string; target_field: string }) => `${m.source_column}::${m.target_field}`)
-      .sort()
-      .join("|");
-
-    if (currentSorted !== snapshotSorted) {
-      await supabase
-        .from("data_sources")
-        .update({ auto_cron_enabled: false })
-        .eq("id", source.id);
-
-      await supabase.from("upload_history_log").insert({
-        action: "auto_import_paused",
-        source: "sql_import",
-        details: { reason: "Column mappings changed since confirmation", source_id: source.id },
-      });
-
-      results.push({ sourceId: source.id, status: "paused", message: "Mapping drift detected" });
-      continue;
-    }
-
-    if (!currentMappings || currentMappings.length === 0) {
-      results.push({ sourceId: source.id, status: "skipped", message: "No mappings configured" });
-      continue;
-    }
-
-    // Create upload record
-    const carrier = source.default_carrier || "UNL";
-    await supabase
-      .from("source_uploads")
-      .update({ is_active: false })
-      .eq("data_source_id", source.id)
-      .eq("carrier", carrier)
-      .eq("is_active", true);
-
-    const { data: newUpload, error: upErr } = await supabase
-      .from("source_uploads")
-      .insert({
-        data_source_id: source.id,
-        carrier,
-        filename: `auto-import-${new Date().toISOString().slice(0, 10)}`,
-        row_count: 0,
-        status: "processing",
-        uploaded_by: "system/cron",
-        is_active: true,
-      })
-      .select()
-      .single();
-
-    if (upErr || !newUpload) {
-      results.push({ sourceId: source.id, status: "error", message: upErr?.message || "Failed to create upload" });
-      continue;
-    }
-
-    // Purge staging rows from prior uploads for this data source
-    await purgeOldStagingRows(supabase, source.id, newUpload.id);
-
-    // Self-invoke to start fetching
-    selfInvoke(supabaseUrl, serviceRoleKey, {
-      phase: "fetch",
-      sourceId: source.id,
-      uploadId: newUpload.id,
-    });
-
-    results.push({ sourceId: source.id, status: "started", message: `Upload ${newUpload.id} created` });
+    results.push(await startImportForSource(supabase, supabaseUrl, serviceRoleKey, source));
   }
 
   // Record the init outcome so silent skips/errors are visible after the fact
@@ -286,6 +297,100 @@ async function handleInit(
     uploaded_by: "system/cron",
     details: { results },
   });
+
+  return jsonResponse({ success: true, results });
+}
+
+// Load-aware polling: ask the source for its current dlt load id (a single-row
+// read) and import only when a new load has landed since the last import, or
+// when the previous import errored. UNL's delivery time is unpredictable, so
+// this runs every 15 minutes instead of betting on a clock.
+async function handleCheck(
+  supabase: ReturnType<typeof createClient>,
+  supabaseUrl: string,
+  serviceRoleKey: string,
+) {
+  const { data: sources } = await supabase
+    .from("data_sources")
+    .select("*")
+    .eq("type", "sql_import")
+    .eq("auto_cron_enabled", true);
+
+  if (!sources || sources.length === 0) {
+    return jsonResponse({ success: true, message: "No auto-cron sources enabled" });
+  }
+
+  const results: Array<{ sourceId: string; status: string; message: string }> = [];
+
+  for (const source of sources as DataSource[]) {
+    if (!source.auto_cron_confirmed_at || !source.db_host || !source.db_table) {
+      results.push({ sourceId: source.id, status: "skipped", message: "Not confirmed or not configured" });
+      continue;
+    }
+
+    let loadId = "";
+    try {
+      const sql = await connectSource(source as unknown as Record<string, unknown>);
+      try {
+        await sql.unsafe(`SET statement_timeout = '20s'`);
+        const r = await sql.unsafe(
+          `SELECT "_dlt_load_id" AS lid FROM "${source.db_schema || "public"}"."${source.db_table}" LIMIT 1`
+        );
+        loadId = String((r as unknown as { lid: unknown }[])[0]?.lid ?? "");
+      } finally {
+        try { await sql.end(); } catch { /* ignore */ }
+      }
+    } catch (err) {
+      results.push({ sourceId: source.id, status: "error", message: `Load check failed: ${err instanceof Error ? err.message : String(err)}` });
+      continue;
+    }
+
+    if (!loadId) {
+      results.push({ sourceId: source.id, status: "skipped", message: "No load id readable" });
+      continue;
+    }
+
+    const { data: lastUpload } = await supabase
+      .from("source_uploads")
+      .select("id, status, created_at")
+      .eq("data_source_id", source.id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const importInFlight = lastUpload
+      && lastUpload.status === "processing"
+      && Date.now() - new Date(lastUpload.created_at).getTime() < 60 * 60 * 1000;
+    if (importInFlight) {
+      results.push({ sourceId: source.id, status: "skipped", message: "Import already in progress" });
+      continue;
+    }
+
+    const newLoad = loadId !== (source.last_seen_load_id || "");
+    const lastErrored = !!lastUpload && lastUpload.status === "error";
+    if (!newLoad && !lastErrored) {
+      results.push({ sourceId: source.id, status: "skipped", message: "No new load" });
+      continue;
+    }
+
+    await supabase
+      .from("data_sources")
+      .update({ last_seen_load_id: loadId })
+      .eq("id", source.id);
+
+    const started = await startImportForSource(supabase, supabaseUrl, serviceRoleKey, source);
+    results.push({ ...started, message: `${started.message} (load ${loadId}${lastErrored && !newLoad ? ", retry after error" : ""})` });
+  }
+
+  // Only log polls that did something; a quiet no-op every 15 minutes is noise
+  if (results.some((r) => r.status === "started" || r.status === "error" || r.status === "paused")) {
+    await supabase.from("upload_history_log").insert({
+      action: "auto_import_init",
+      source: "sql_import",
+      uploaded_by: "system/poll",
+      details: { trigger: "load-poll", results },
+    });
+  }
 
   return jsonResponse({ success: true, results });
 }
