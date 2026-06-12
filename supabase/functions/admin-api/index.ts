@@ -2606,292 +2606,48 @@ Deno.serve(async (req: Request) => {
       }
 
       case "resync-policies": {
-        const { uploadId: rsUploadId, offset: rsOffset = 0, batchSize: rsBatchSize = 500 } = body;
+        // Delegates to the sql-import-cron keyset sync (error-safe, resumable,
+        // with completeness gate + reconciliation). The old offset loop here
+        // treated a failed staging query as end-of-data and marked uploads
+        // complete early.
+        const { uploadId: rsUploadId } = body;
         if (!rsUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
 
         const { data: rsUpload } = await supabase
           .from("source_uploads")
-          .select("id, carrier, row_count")
+          .select("id, data_source_id")
           .eq("id", rsUploadId)
           .maybeSingle();
         if (!rsUpload) return jsonResponse({ error: "Upload not found" }, 404);
 
+        const { count: rsStaged } = await supabase
+          .from("source_records")
+          .select("*", { count: "exact", head: true })
+          .eq("source_upload_id", rsUploadId);
+        if (!rsStaged) {
+          return jsonResponse({ error: "No staged records remain for this upload. Run a fresh Import Data instead \u2014 Re-sync only reprocesses the staged snapshot; it does not pull from the source database." }, 400);
+        }
+
         await supabase
           .from("source_uploads")
-          .update({ status: "processing" })
+          .update({ status: "processing", resync_progress: { phase: "sync", synced: 0 } })
           .eq("id", rsUploadId);
 
-        const rsCarrier = rsUpload.carrier;
-        const totalRows = rsUpload.row_count || 0;
+        const rsFnUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/sql-import-cron`;
+        const rsP = fetch(rsFnUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          },
+          body: JSON.stringify({ phase: "sync", sourceId: rsUpload.data_source_id, uploadId: rsUploadId }),
+        }).catch(() => {});
+        const rsRuntime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+        if (rsRuntime?.waitUntil) rsRuntime.waitUntil(rsP);
 
-        // Fetch only this batch of source_records (ordered by id for deterministic pagination)
-        const { data: batchRecs } = await supabase
-          .from("source_records")
-          .select("mapped_data")
-          .eq("source_upload_id", rsUploadId)
-          .eq("processing_status", "imported")
-          .order("id")
-          .range(rsOffset, rsOffset + rsBatchSize - 1);
-
-        if (!batchRecs || batchRecs.length === 0) {
-          // No more records -- mark complete
-          await supabase
-            .from("source_uploads")
-            .update({ status: "complete", resync_progress: { offset: rsOffset, total: totalRows, synced: rsOffset, done: true } })
-            .eq("id", rsUploadId);
-          return jsonResponse({ success: true, done: true, policiesSynced: 0, nextOffset: rsOffset, total: totalRows });
-        }
-
-        const fetchedCount = batchRecs.length;
-        const done = fetchedCount < rsBatchSize;
-        const nextOffset = rsOffset + fetchedCount;
-
-        // --- Agent Sync for this batch ---
-        let agentsAdded = 0;
-        let agentsUpdated = 0;
-        try {
-          const agentMap = new Map<string, { name: string; agency: string }>();
-          const agentDownlineCounts = new Map<string, { total: number; withDownline: number }>();
-          for (const rec of batchRecs) {
-            const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
-
-            const code = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-            if (!code) continue;
-            const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-            const counts = agentDownlineCounts.get(code) || { total: 0, withDownline: 0 };
-            counts.total++;
-            if (downline) counts.withDownline++;
-            agentDownlineCounts.set(code, counts);
-            if (agentMap.has(code)) continue;
-            const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-            agentMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
-          }
-          for (const [code, entry] of agentMap) {
-            if (!entry.agency) {
-              const counts = agentDownlineCounts.get(code);
-              if (counts && counts.withDownline > 0) {
-                for (const rec of batchRecs) {
-                  const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
-                  const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-                  if (rc !== code) continue;
-                  const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-                  if (dl) { entry.agency = toProperCase(dl); break; }
-                }
-              }
-              if (!entry.agency) entry.agency = "FYM";
-            }
-          }
-
-          const allCodes = Array.from(agentMap.keys());
-          const existingAgentsMap = new Map<string, { id: string; agency: string; agency_locked: boolean; source: string }>();
-          for (let i = 0; i < allCodes.length; i += 200) {
-            const batch = allCodes.slice(i, i + 200);
-            const { data: existing } = await supabase
-              .from("agents")
-              .select("id, unl_writing_number, agency, agency_locked, source")
-              .in("unl_writing_number", batch);
-            for (const a of existing || []) {
-              existingAgentsMap.set(a.unl_writing_number.toUpperCase(), a);
-            }
-          }
-
-          // Check aliases for codes not found directly
-          const missingCodes2 = allCodes.filter(c => !existingAgentsMap.has(c));
-          if (missingCodes2.length > 0) {
-            for (let i = 0; i < missingCodes2.length; i += 200) {
-              const batch = missingCodes2.slice(i, i + 200);
-              const { data: aliasHits } = await supabase
-                .from("agent_writing_numbers")
-                .select("writing_number, agent_id")
-                .in("writing_number", batch);
-              if (aliasHits && aliasHits.length > 0) {
-                const agentIds = [...new Set(aliasHits.map(h => h.agent_id))];
-                const { data: aliasedAgents } = await supabase
-                  .from("agents")
-                  .select("id, unl_writing_number, agency, agency_locked, source")
-                  .in("id", agentIds);
-                for (const hit of aliasHits) {
-                  const agent = (aliasedAgents || []).find(a => a.id === hit.agent_id);
-                  if (agent) {
-                    existingAgentsMap.set(hit.writing_number.toUpperCase(), agent);
-                  }
-                }
-              }
-            }
-          }
-
-          const agentsToInsert: Array<Record<string, unknown>> = [];
-          for (const [code, { name, agency }] of agentMap) {
-            const nameParts = name.split(/\s+/).filter(Boolean);
-            if (nameParts.length === 0) continue;
-            const firstName = toProperCase(nameParts[0]);
-            const lastName = toProperCase(nameParts[nameParts.length - 1]);
-            if (!firstName || !lastName) continue;
-
-            const existing = existingAgentsMap.get(code);
-            if (existing) {
-              if (existing.source === "Contracting Portal") continue;
-              if (existing.agency_locked) continue;
-              if (agency && existing.agency !== agency) {
-                await supabase
-                  .from("agents")
-                  .update({ agency, updated_at: new Date().toISOString() })
-                  .eq("id", existing.id);
-                agentsUpdated++;
-              }
-            } else {
-              agentsToInsert.push({
-                first_name: firstName,
-                last_name: lastName,
-                unl_writing_number: code,
-                agency: agency || "FYM",
-                source: "Data Source",
-              });
-            }
-          }
-          for (let i = 0; i < agentsToInsert.length; i += 200) {
-            const batch = agentsToInsert.slice(i, i + 200);
-            const { error: batchErr } = await supabase.from("agents").insert(batch);
-            if (!batchErr) agentsAdded += batch.length;
-          }
-        } catch (_) {
-          // best-effort agent sync
-        }
-
-        // --- Policy Sync for this batch ---
-        const { data: agentsList } = await supabase
-          .from("agents")
-          .select("unl_writing_number, agency")
-          .range(0, 9999);
-        const agencyLookup = new Map<string, string>();
-        for (const a of agentsList || []) {
-          if (a.unl_writing_number) agencyLookup.set(a.unl_writing_number.toUpperCase(), a.agency || "");
-        }
-
-        // Roster-based agency lookup (takes priority)
-        const { data: rosterEntriesRS } = await supabase
-          .from("agency_rosters")
-          .select("writing_number, agency_id, agencies:agency_id(name)")
-          .eq("match_status", "confirmed")
-          .eq("status", "active");
-        const rosterAgencyLookupRS = new Map<string, string>();
-        for (const r of rosterEntriesRS || []) {
-          if (r.writing_number && r.agencies) {
-            rosterAgencyLookupRS.set(r.writing_number.toUpperCase(), (r.agencies as { name: string }).name);
-          }
-        }
-
-        const CONTRACT_STATUS_RS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
-        const parseDateRS = (d: string): string | null => {
-          if (!d || d.length < 8) return null;
-          return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
-        };
-
-        const policyRows: Array<Record<string, unknown>> = [];
-        for (const rec of batchRecs) {
-          const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
-          const policyNumber = (md["Policy Number"] || "").trim();
-          if (!policyNumber) continue;
-
-          const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-          const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-          const agentParts = writingAgent.split(/\s+/).filter(Boolean);
-          const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
-          const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
-
-          const annualPremium = parseFloat(md["Annual Premium"] || "0");
-          const monthlyPremium = isNaN(annualPremium) ? 0 : Math.round((annualPremium / 12) * 100) / 100;
-          const planCode = (md["Plan Code"] || "").trim();
-          const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
-          const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
-          const status = CONTRACT_STATUS_RS[contractCode] || "pending";
-          const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-          const agency = rosterAgencyLookupRS.get(agentCode)
-            || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
-
-          policyRows.push({
-            policy_number: policyNumber,
-            agent_number: agentCode,
-            agent_first_name: agentFirst,
-            agent_last_name: agentLast,
-            client_first_name: toProperCase(md["First Name"] || ""),
-            client_last_name: toProperCase(md["Last Name"] || ""),
-            phone: (md["Phone"] || "").trim(),
-            email: "",
-            address: "",
-            city: "",
-            state: (md["State"] || "").trim(),
-            zip: (md["Zip"] || "").trim(),
-            plan_name: planCode,
-            plan_premium: monthlyPremium,
-            policy_effective_date: parseDateRS(md["Effective Date"] || ""),
-            app_submit_date: parseDateRS(md["Submit Date"] || ""),
-            paid_to_date: parseDateRS(md["Paid To Date"] || ""),
-            status,
-            carrier: rsCarrier,
-            product_type: productType,
-            agency,
-            billing_form: (md["Billing Form"] || "").trim() || null,
-            billing_mode: (md["Billing Mode"] || "").trim() || null,
-            contract_code: (md["Contract Code"] || "").trim() || null,
-            source: "Data Source",
-            source_upload_id: rsUploadId,
-          });
-        }
-
-        const deduped = new Map<string, Record<string, unknown>>();
-        for (const row of policyRows) {
-          deduped.set(row.policy_number as string, row);
-        }
-        const uniquePolicies = Array.from(deduped.values());
-
-        let rsSynced = 0;
-        try {
-          const upsertBatchSize = 500;
-          for (let i = 0; i < uniquePolicies.length; i += upsertBatchSize) {
-            const batch = uniquePolicies.slice(i, i + upsertBatchSize);
-            const { error: upsertErr, count } = await supabase
-              .from("form_submissions")
-              .upsert(batch, { onConflict: "policy_number", count: "exact" });
-            if (upsertErr) throw upsertErr;
-            rsSynced += (count || batch.length);
-          }
-        } catch (rsErr) {
-          await supabase
-            .from("source_uploads")
-            .update({ status: "error", resync_progress: { offset: rsOffset, total: totalRows, synced: rsOffset, done: false, error: true } })
-            .eq("id", rsUploadId);
-          return jsonResponse({
-            error: `Policy sync failed: ${rsErr instanceof Error ? rsErr.message : "Unknown error"}`,
-            policiesSynced: rsSynced,
-            done: false,
-          }, 500);
-        }
-
-        // Update progress
-        const progress = { offset: nextOffset, total: totalRows, synced: nextOffset, done };
-        if (done) {
-          await supabase
-            .from("source_uploads")
-            .update({ status: "complete", resync_progress: progress })
-            .eq("id", rsUploadId);
-        } else {
-          await supabase
-            .from("source_uploads")
-            .update({ resync_progress: progress })
-            .eq("id", rsUploadId);
-        }
-
-        return jsonResponse({
-          success: true,
-          done,
-          nextOffset,
-          total: totalRows,
-          policiesSynced: rsSynced,
-          agentsAdded,
-          agentsUpdated,
-          batchProcessed: fetchedCount,
-        });
+        // done:true keeps any stale cached frontend's polling loop from spinning;
+        // the new UI polls get-import-progress instead.
+        return jsonResponse({ success: true, started: true, done: true, total: rsStaged, policiesSynced: 0, nextOffset: 0 });
       }
 
       case "delete-source-upload": {
@@ -4350,7 +4106,7 @@ Deno.serve(async (req: Request) => {
             database: tcSource.db_name || "postgres",
             username: tcSource.db_user || "postgres",
             password: tcPassword,
-            ssl: { ca: AKAMAI_CA_CERT, rejectUnauthorized: false },
+            ssl: { ca: AKAMAI_CA_CERT },
             connect_timeout: 10,
             max: 1,
             idle_timeout: 5,
@@ -4437,6 +4193,89 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ success: true });
       }
 
+      case "start-sql-import": {
+        // Server-side import: creates the upload and hands off to the sql-import-cron
+        // pipeline (keyset fetch + keyset sync) — the same path the scheduled imports use.
+        const { sourceId: ssiSourceId, carrier: ssiCarrier } = body;
+        if (!ssiSourceId) return jsonResponse({ error: "Source ID required" }, 400);
+
+        const { data: ssiSource } = await supabase
+          .from("data_sources")
+          .select("*")
+          .eq("id", ssiSourceId)
+          .maybeSingle();
+        if (!ssiSource) return jsonResponse({ error: "Data source not found" }, 404);
+        if (!ssiSource.db_host || !ssiSource.db_table) {
+          return jsonResponse({ error: "Database connection not configured" }, 400);
+        }
+
+        const ssiCarrierFinal = (ssiCarrier as string) || ssiSource.default_carrier || "UNL";
+
+        await supabase
+          .from("source_uploads")
+          .update({ is_active: false })
+          .eq("data_source_id", ssiSourceId)
+          .eq("carrier", ssiCarrierFinal)
+          .eq("is_active", true);
+
+        const { data: ssiUpload, error: ssiErr } = await supabase
+          .from("source_uploads")
+          .insert({
+            data_source_id: ssiSourceId,
+            carrier: ssiCarrierFinal,
+            filename: `db-import-${new Date().toISOString().slice(0, 10)}`,
+            row_count: 0,
+            status: "processing",
+            uploaded_by: "admin-ui",
+            is_active: true,
+          })
+          .select()
+          .single();
+        if (ssiErr || !ssiUpload) {
+          return jsonResponse({ error: ssiErr?.message || "Failed to create upload" }, 500);
+        }
+
+        // Purge staging rows from prior uploads for this data source
+        const { data: ssiOld } = await supabase
+          .from("source_uploads")
+          .select("id")
+          .eq("data_source_id", ssiSourceId)
+          .neq("id", ssiUpload.id);
+        const ssiOldIds = (ssiOld || []).map((u: { id: string }) => u.id);
+        for (let i = 0; i < ssiOldIds.length; i += 50) {
+          await supabase
+            .from("source_records")
+            .delete()
+            .in("source_upload_id", ssiOldIds.slice(i, i + 50));
+        }
+
+        const ssiFnUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/sql-import-cron`;
+        const ssiP = fetch(ssiFnUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+          },
+          body: JSON.stringify({ phase: "fetch", sourceId: ssiSourceId, uploadId: ssiUpload.id }),
+        }).catch(() => {});
+        const ssiRuntime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+        if (ssiRuntime?.waitUntil) ssiRuntime.waitUntil(ssiP);
+
+        return jsonResponse({ success: true, uploadId: ssiUpload.id });
+      }
+
+      case "get-import-progress": {
+        const { uploadId: gipUploadId } = body;
+        if (!gipUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
+        const { data: gipUpload } = await supabase
+          .from("source_uploads")
+          .select("id, status, row_count, resync_progress")
+          .eq("id", gipUploadId)
+          .maybeSingle();
+        if (!gipUpload) return jsonResponse({ error: "Upload not found" }, 404);
+        return jsonResponse({ success: true, upload: gipUpload });
+      }
+
       case "sql-import-count": {
         const { sourceId: sicSourceId } = body;
         if (!sicSourceId) return jsonResponse({ error: "Source ID required" }, 400);
@@ -4464,7 +4303,7 @@ Deno.serve(async (req: Request) => {
             database: sicSource.db_name || "postgres",
             username: sicSource.db_user || "postgres",
             password: sicPassword,
-            ssl: { ca: AKAMAI_CA_CERT, rejectUnauthorized: false },
+            ssl: { ca: AKAMAI_CA_CERT },
             connect_timeout: 10,
             max: 1,
             idle_timeout: 5,
@@ -4552,7 +4391,7 @@ Deno.serve(async (req: Request) => {
             database: sibSource.db_name || "postgres",
             username: sibSource.db_user || "postgres",
             password: sibPassword,
-            ssl: { ca: AKAMAI_CA_CERT, rejectUnauthorized: false },
+            ssl: { ca: AKAMAI_CA_CERT },
             connect_timeout: 30,
             max: 1,
             idle_timeout: 5,
@@ -4561,8 +4400,17 @@ Deno.serve(async (req: Request) => {
           const schemaName = sibSource.db_schema || "public";
           const tableName = sibSource.db_table;
 
+          // Legacy path kept for stale cached frontends. Without ORDER BY,
+          // LIMIT/OFFSET returns arbitrary rows per query — guaranteeing
+          // duplicates and skips across batches.
+          const sibColCheck = await sql`
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = ${schemaName} AND table_name = ${tableName} AND column_name = '_dlt_id'
+          `;
+          const sibOrderClause = sibColCheck.length > 0 ? `ORDER BY "_dlt_id"` : "";
+
           const result = await sql.unsafe(
-            `SELECT * FROM "${schemaName}"."${tableName}" LIMIT $1 OFFSET $2`,
+            `SELECT * FROM "${schemaName}"."${tableName}" ${sibOrderClause} LIMIT $1 OFFSET $2`,
             [batchLimit, batchOffset]
           );
 

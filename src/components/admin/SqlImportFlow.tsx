@@ -9,7 +9,8 @@ import {
 } from "lucide-react";
 import {
   adminSqlImportCount,
-  adminSqlImportBatch,
+  adminStartSqlImport,
+  adminGetImportProgress,
   adminResyncPolicies,
   adminSaveColumnMappings,
   adminAnalyzeSourceUpload,
@@ -150,131 +151,74 @@ export default function SqlImportFlow({ token, source, onBack, onComplete }: Sql
         await adminSaveColumnMappings(token, source.id, mappingRows);
       }
 
-      const DB_BATCH_SIZE = 1000;
-      const totalBatches = totalRows > 0 ? Math.ceil(totalRows / DB_BATCH_SIZE) : 10000;
-      let offset = 0;
-      let uploadId: string | null = null;
-      let totalImported = 0;
-      let totalErrors = 0;
-
-      for (let batchIdx = 0; batchIdx < totalBatches && !syncAbortRef.current; batchIdx++) {
-        setFetchProgress({ fetched: offset, total: totalRows > 0 ? totalRows : offset + DB_BATCH_SIZE });
-
-        const batchRes = await adminSqlImportBatch(token, source.id, offset, DB_BATCH_SIZE);
-        if (batchRes.error) throw new Error(batchRes.error);
-
-        const rows: Record<string, string>[] = batchRes.rows || [];
-        if (rows.length === 0) break;
-
-        const CHUNK_SIZE = 500;
-        const totalChunks = Math.ceil(rows.length / CHUNK_SIZE);
-
-        for (let chunkIdx = 0; chunkIdx < totalChunks && !syncAbortRef.current; chunkIdx++) {
-          const chunk = rows.slice(chunkIdx * CHUNK_SIZE, (chunkIdx + 1) * CHUNK_SIZE);
-          const isFinalChunk = batchIdx === totalBatches - 1 && chunkIdx === totalChunks - 1;
-
-          setChunkProgress({
-            current: batchIdx * totalChunks + chunkIdx + 1,
-            total: totalBatches * totalChunks,
-          });
-
-          const payload: Record<string, unknown> = {
-            action: "process-source-upload",
-            token,
-            records: chunk,
-            carrier,
-            mappings,
-            isFinalChunk: isFinalChunk || !batchRes.hasMore,
-            totalRows,
-          };
-
-          if (uploadId) {
-            payload.uploadId = uploadId;
-          } else {
-            payload.sourceId = source.id;
-            payload.filename = `sql_import_${new Date().toISOString().slice(0, 10)}`;
-          }
-
-          const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-          const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-          const response = await fetch(`${SUPABASE_URL}/functions/v1/admin-api`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(payload),
-          });
-          let res: Record<string, unknown>;
-          try {
-            res = await response.json();
-          } catch {
-            throw new Error(response.status === 504 || response.status === 502
-              ? "Server timed out processing this chunk. Please retry."
-              : `Server error (${response.status}) during upload.`);
-          }
-          if (!res.success) throw new Error((res.error as string) || "Upload chunk failed");
-          if (!uploadId) uploadId = res.uploadId;
-          totalImported += res.imported || 0;
-          totalErrors += res.errors || 0;
-        }
-
-        offset += rows.length;
-        if (!batchRes.hasMore) break;
-      }
-
-      if (syncAbortRef.current) {
-        setError("Import cancelled by user");
-        setFetchProgress(null);
-        setChunkProgress(null);
-        return;
-      }
-
+      // The import runs entirely server-side (same pipeline as the scheduled
+      // auto-imports): keyset fetch from the source DB into staging, then keyset
+      // sync into form_submissions. We only poll for progress here, so closing
+      // this tab does not interrupt the import.
+      const startRes = await adminStartSqlImport(token, source.id, carrier);
+      if (startRes.error) throw new Error(startRes.error);
+      const uploadId = startRes.uploadId as string;
       setPendingUploadId(uploadId);
-      setFetchProgress(null);
-      setChunkProgress(null);
-      setFinalizing(true);
-      setSyncProgress({ offset: 0, total: 0 });
+      setFetchProgress({ fetched: 0, total: totalRows > 0 ? totalRows : 0 });
 
-      const SYNC_BATCH = 200;
-      const SYNC_DELAY = 1_500;
-      let syncOffset = 0;
-      let totalAgentsAdded = 0;
-      let totalAgentsUpdated = 0;
-      let totalPoliciesSynced = 0;
-
-      while (!syncAbortRef.current) {
-        const syncRes = await adminResyncPolicies(token, uploadId!, syncOffset, SYNC_BATCH);
-        if (syncRes.error && !syncRes.done) throw new Error(syncRes.error);
-
-        totalAgentsAdded += syncRes.agentsAdded || 0;
-        totalAgentsUpdated += syncRes.agentsUpdated || 0;
-        totalPoliciesSynced += syncRes.policiesSynced || 0;
-        setSyncProgress({ offset: syncRes.nextOffset || syncOffset, total: syncRes.total || 0 });
-
-        if (syncRes.done) break;
-        syncOffset = syncRes.nextOffset || syncOffset;
-        await new Promise((resolve) => setTimeout(resolve, SYNC_DELAY));
-      }
-
-      setFinalizing(false);
-      setSyncProgress(null);
-      setPendingUploadId(null);
-
-      setResult({
-        imported: totalImported,
-        skipped: 0,
-        errors: totalErrors,
-        agentsAdded: totalAgentsAdded,
-        agentsUpdated: totalAgentsUpdated,
-        policiesSynced: totalPoliciesSynced,
-      });
-      setStep("done");
+      await pollImportProgress(uploadId);
     } catch (err) {
       setFinalizing(false);
       setFetchProgress(null);
       setChunkProgress(null);
       setError(err instanceof Error ? err.message : "Processing failed");
+    }
+  };
+
+  const pollImportProgress = async (uploadId: string) => {
+    while (!syncAbortRef.current) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const prog = await adminGetImportProgress(token, uploadId);
+      if (prog.error) throw new Error(prog.error);
+      const upload = prog.upload || {};
+      const rp = (upload.resync_progress || {}) as Record<string, unknown>;
+
+      if (rp.phase === "fetch") {
+        setFetchProgress({
+          fetched: (rp.fetched as number) || 0,
+          total: totalRows > 0 ? totalRows : (rp.fetched as number) || 0,
+        });
+      } else if (rp.phase === "sync") {
+        setFetchProgress(null);
+        setFinalizing(true);
+        setSyncProgress({
+          offset: (rp.synced as number) || 0,
+          total: (upload.row_count as number) || totalRows || 0,
+        });
+      }
+
+      if (upload.status === "complete") {
+        setFinalizing(false);
+        setFetchProgress(null);
+        setSyncProgress(null);
+        setPendingUploadId(null);
+        setResult({
+          imported: (upload.row_count as number) || 0,
+          skipped: 0,
+          errors: 0,
+          agentsAdded: 0,
+          agentsUpdated: 0,
+          policiesSynced: (rp.policies_synced as number) || 0,
+        });
+        setStep("done");
+        return;
+      }
+      if (upload.status === "error") {
+        throw new Error((rp.error as string) || "Import failed on the server. See the uploads list for details.");
+      }
+    }
+
+    if (syncAbortRef.current) {
+      setError("Stopped watching progress — the import continues on the server. Check the uploads list for its status.");
+      setFetchProgress(null);
+      setChunkProgress(null);
+      setSyncProgress(null);
+      setFinalizing(false);
     }
   };
 
@@ -286,40 +230,11 @@ export default function SqlImportFlow({ token, source, onBack, onComplete }: Sql
     syncAbortRef.current = false;
     setSyncProgress({ offset: 0, total: 0 });
 
-    const SYNC_BATCH = 200;
-    const SYNC_DELAY = 1_500;
-    let offset = 0;
-    let totalAgentsAdded = 0;
-    let totalAgentsUpdated = 0;
-    let totalPoliciesSynced = 0;
-
     try {
-      while (!syncAbortRef.current) {
-        const syncRes = await adminResyncPolicies(token, pendingUploadId, offset, SYNC_BATCH);
-        if (syncRes.error && !syncRes.done) throw new Error(syncRes.error);
-
-        totalAgentsAdded += syncRes.agentsAdded || 0;
-        totalAgentsUpdated += syncRes.agentsUpdated || 0;
-        totalPoliciesSynced += syncRes.policiesSynced || 0;
-        setSyncProgress({ offset: syncRes.nextOffset || offset, total: syncRes.total || 0 });
-
-        if (syncRes.done) break;
-        offset = syncRes.nextOffset || offset;
-        await new Promise((resolve) => setTimeout(resolve, SYNC_DELAY));
-      }
-
-      setFinalizing(false);
-      setSyncProgress(null);
-      setPendingUploadId(null);
-      setResult({
-        imported: totalRows,
-        skipped: 0,
-        errors: 0,
-        agentsAdded: totalAgentsAdded,
-        agentsUpdated: totalAgentsUpdated,
-        policiesSynced: totalPoliciesSynced,
-      });
-      setStep("done");
+      // Kick the server-side keyset sync for the staged upload, then poll
+      const res = await adminResyncPolicies(token, pendingUploadId, 0, 500);
+      if (res.error) throw new Error(res.error);
+      await pollImportProgress(pendingUploadId);
     } catch (err) {
       setFinalizing(false);
       setSyncProgress(null);
