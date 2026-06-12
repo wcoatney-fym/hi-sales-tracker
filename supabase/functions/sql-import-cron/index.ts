@@ -917,6 +917,14 @@ async function handleSync(
     }
   }
 
+  // The agency-scoped leaderboard filters on agency_id, so resolve the
+  // attributed agency name to its id at sync time.
+  const { data: agencyRows } = await supabase.from("agencies").select("id, name");
+  const agencyNameToId = new Map<string, string>();
+  for (const a of agencyRows || []) {
+    if (a.name) agencyNameToId.set(a.name, a.id);
+  }
+
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
   const parseDate = (d: string): string | null => {
     if (!d || d.length < 8) return null;
@@ -970,6 +978,7 @@ async function handleSync(
       carrier,
       product_type: productType,
       agency,
+      agency_id: agencyNameToId.get(agency) || null,
       billing_form: (md["Billing Form"] || "").trim() || null,
       billing_mode: (md["Billing Mode"] || "").trim() || null,
       contract_code: (md["Contract Code"] || "").trim() || null,

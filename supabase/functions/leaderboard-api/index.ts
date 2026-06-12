@@ -265,7 +265,7 @@ Deno.serve(async (req: Request) => {
       const { data: agencySubmissions } = await supabase
         .from("form_submissions")
         .select(
-          "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, agency"
+          "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, agency, policy_number"
         )
         .not("agency", "is", null)
         .gte("app_submit_date", start)
@@ -274,7 +274,7 @@ Deno.serve(async (req: Request) => {
       const { data: intakeSubmissions } = await supabase
         .from("form_submissions")
         .select(
-          "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, agency"
+          "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, agency, policy_number"
         )
         .eq("source", "Intake Form")
         .is("agency", null)
@@ -285,7 +285,10 @@ Deno.serve(async (req: Request) => {
       const submissions = [
         ...(agencySubmissions || []),
         ...(intakeSubmissions || []).filter((s) => agencyAgentNumbers.has(resolveNumber(s.agent_number))),
-      ].filter((s) => s.status !== "duplicate");
+      ].filter((s) => s.status !== "duplicate")
+        // Policy-numbered rows first: a UNL row claims its client before the
+        // intake-form twin of the same app is considered
+        .sort((a, b) => (a.policy_number ? 0 : 1) - (b.policy_number ? 0 : 1));
 
       // Aggregate by agent, deduplicating by client name
       const agentMap: Record<string, {
@@ -297,6 +300,7 @@ Deno.serve(async (req: Request) => {
         commission: number;
         agencyName: string;
         clients: Set<string>;
+        policyNumbers: Set<string>;
       }> = {};
 
       for (const s of submissions) {
@@ -312,11 +316,22 @@ Deno.serve(async (req: Request) => {
             commission: 0,
             agencyName: (s as any).agency || agentAgencyMap[resolved] || "",
             clients: new Set(),
+            policyNumbers: new Set(),
           };
         }
-        // Deduplicate by client name (same client = same policy, count once)
+        // Dedup: rows with a policy number are distinct policies (a client can
+        // legitimately hold several); intake rows (no policy number yet) count
+        // only if no other row already covered that client.
         const clientKey = `${(s.client_first_name || "").toLowerCase().trim()}-${(s.client_last_name || "").toLowerCase().trim()}`;
-        if (!agentMap[key].clients.has(clientKey)) {
+        const pn = ((s as { policy_number?: string }).policy_number || "").trim();
+        if (pn) {
+          if (!agentMap[key].policyNumbers.has(pn)) {
+            agentMap[key].policyNumbers.add(pn);
+            agentMap[key].clients.add(clientKey);
+            agentMap[key].policies += 1;
+            agentMap[key].commission += Number(s.plan_premium) || 0;
+          }
+        } else if (!agentMap[key].clients.has(clientKey)) {
           agentMap[key].clients.add(clientKey);
           agentMap[key].policies += 1;
           agentMap[key].commission += Number(s.plan_premium) || 0;
@@ -325,7 +340,7 @@ Deno.serve(async (req: Request) => {
 
       // Sort by policies desc (strip internal clients set)
       const ranked = Object.values(agentMap)
-        .map(({ clients: _clients, ...rest }) => rest)
+        .map(({ clients: _clients, policyNumbers: _pns, ...rest }) => rest)
         .sort((a, b) => b.policies - a.policies);
 
       // Get profiles and badges for these agents
@@ -556,13 +571,15 @@ Deno.serve(async (req: Request) => {
       const { data: agencySubs } = await supabase
         .from("form_submissions")
         .select(
-          "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status"
+          "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, policy_number"
         )
         .eq("agency_id", agencyId)
         .gte("app_submit_date", start)
         .lte("app_submit_date", end);
 
-      const submissions = (agencySubs || []).filter((s) => s.status !== "duplicate");
+      const submissions = (agencySubs || [])
+        .filter((s) => s.status !== "duplicate")
+        .sort((a, b) => (a.policy_number ? 0 : 1) - (b.policy_number ? 0 : 1));
 
       // Aggregate by agent, deduplicating by client name
       const agentMap: Record<string, {
@@ -573,6 +590,7 @@ Deno.serve(async (req: Request) => {
         policies: number;
         commission: number;
         clients: Set<string>;
+        policyNumbers: Set<string>;
       }> = {};
 
       for (const s of submissions) {
@@ -587,10 +605,22 @@ Deno.serve(async (req: Request) => {
             policies: 0,
             commission: 0,
             clients: new Set(),
+            policyNumbers: new Set(),
           };
         }
+        // Dedup: rows with a policy number are distinct policies (a client can
+        // legitimately hold several); intake rows (no policy number yet) count
+        // only if no other row already covered that client.
         const clientKey = `${(s.client_first_name || "").toLowerCase().trim()}-${(s.client_last_name || "").toLowerCase().trim()}`;
-        if (!agentMap[key].clients.has(clientKey)) {
+        const pn = ((s as { policy_number?: string }).policy_number || "").trim();
+        if (pn) {
+          if (!agentMap[key].policyNumbers.has(pn)) {
+            agentMap[key].policyNumbers.add(pn);
+            agentMap[key].clients.add(clientKey);
+            agentMap[key].policies += 1;
+            agentMap[key].commission += Number(s.plan_premium) || 0;
+          }
+        } else if (!agentMap[key].clients.has(clientKey)) {
           agentMap[key].clients.add(clientKey);
           agentMap[key].policies += 1;
           agentMap[key].commission += Number(s.plan_premium) || 0;
@@ -598,7 +628,7 @@ Deno.serve(async (req: Request) => {
       }
 
       const ranked = Object.values(agentMap)
-        .map(({ clients: _clients, ...rest }) => rest)
+        .map(({ clients: _clients, policyNumbers: _pns, ...rest }) => rest)
         .sort((a, b) => b.policies - a.policies);
 
       // Get profiles and badges
@@ -877,20 +907,31 @@ Deno.serve(async (req: Request) => {
         const agentYearStart = `${new Date().getFullYear()}-01-01`;
         const { data: agentYearSubs } = await supabase
           .from("form_submissions")
-          .select("client_first_name, client_last_name, plan_premium, app_submit_date")
+          .select("client_first_name, client_last_name, plan_premium, app_submit_date, policy_number")
           .ilike("agent_first_name", agent.first_name)
           .ilike("agent_last_name", agent.last_name)
           .in("agency", ["FYM", "Wisechoice Senior Advisors Llc"])
           .gte("app_submit_date", agentYearStart);
 
         const clients = new Set<string>();
+        const seenPolicyNumbers = new Set<string>();
         const saleDates = new Set<string>();
         let ap = 0;
         let policies = 0;
-        for (const s of agentYearSubs || []) {
+        const orderedSubs = (agentYearSubs || []).slice()
+          .sort((a, b) => ((a as { policy_number?: string }).policy_number ? 0 : 1) - ((b as { policy_number?: string }).policy_number ? 0 : 1));
+        for (const s of orderedSubs) {
           if (s.app_submit_date) saleDates.add(s.app_submit_date);
           const ck = `${(s.client_first_name || "").toLowerCase().trim()}-${(s.client_last_name || "").toLowerCase().trim()}`;
-          if (!clients.has(ck)) {
+          const pn = ((s as { policy_number?: string }).policy_number || "").trim();
+          if (pn) {
+            if (!seenPolicyNumbers.has(pn)) {
+              seenPolicyNumbers.add(pn);
+              clients.add(ck);
+              ap += (Number(s.plan_premium) || 0) * 12;
+              policies += 1;
+            }
+          } else if (!clients.has(ck)) {
             clients.add(ck);
             ap += (Number(s.plan_premium) || 0) * 12;
             policies += 1;
