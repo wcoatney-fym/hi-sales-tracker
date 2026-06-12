@@ -783,7 +783,7 @@ export default function DataSourcesPanel({ token }: { token: string }) {
               </div>
 
               <div className="text-xs text-slate-400 mb-3 space-y-1">
-                <p>Runs automatically once daily at <span className="text-slate-200 font-medium">1:00 PM CDT / 12:00 PM CST</span>, after UNL\u2019s daily file reaches the source database.</p>
+                <p>Runs automatically at <span className="text-slate-200 font-medium">7:00 AM</span> and <span className="text-slate-200 font-medium">6:00 PM EST</span> daily.</p>
                 {selectedSource.last_auto_pull_at && (
                   <p>Last auto pull: <span className="text-slate-200">{new Date(selectedSource.last_auto_pull_at).toLocaleString()}</span></p>
                 )}
@@ -862,7 +862,7 @@ export default function DataSourcesPanel({ token }: { token: string }) {
                           <li>These mappings will be locked for automated runs</li>
                           <li>If you edit mappings later, auto-import will pause until re-confirmed</li>
                           <li>Carrier: <span className="text-slate-200 font-medium">{selectedSource.default_carrier || "UNL"}</span></li>
-                          <li>Schedule: once daily at 1:00 PM CDT / 12:00 PM CST (18:00 UTC)</li>
+                          <li>Schedule: 7:00 AM + 6:00 PM EST daily</li>
                         </ul>
                       </div>
                       <div className="flex items-center gap-2">
