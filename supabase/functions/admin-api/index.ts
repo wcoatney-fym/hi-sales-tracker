@@ -3831,7 +3831,7 @@ Deno.serve(async (req: Request) => {
       case "get-upload-history": {
         const { data: logs, error: logErr } = await supabase
           .from("upload_history_log")
-          .select("id, source_upload_id, source, action, carrier, filename, records_inserted, records_replaced, records_superseded, uploaded_by, created_at")
+          .select("id, source_upload_id, source, action, carrier, filename, records_inserted, records_replaced, records_superseded, uploaded_by, created_at, details")
           .order("created_at", { ascending: false })
           .limit(50);
         if (logErr) throw logErr;

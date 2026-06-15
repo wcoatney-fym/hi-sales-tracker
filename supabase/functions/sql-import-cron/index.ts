@@ -328,20 +328,32 @@ async function handleCheck(
       continue;
     }
 
+    // Max's box is intermittently unreachable (transient CONNECT_TIMEOUTs), so
+    // retry the probe a few times before giving up — a single flaky connect
+    // shouldn't make us miss a freshly-landed load until the next poll.
     let loadId = "";
-    try {
-      const sql = await connectSource(source as unknown as Record<string, unknown>);
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await sql.unsafe(`SET statement_timeout = '20s'`);
-        const r = await sql.unsafe(
-          `SELECT "_dlt_load_id" AS lid FROM "${source.db_schema || "public"}"."${source.db_table}" LIMIT 1`
-        );
-        loadId = String((r as unknown as { lid: unknown }[])[0]?.lid ?? "");
-      } finally {
-        try { await sql.end(); } catch { /* ignore */ }
+        const sql = await connectSource(source as unknown as Record<string, unknown>);
+        try {
+          await sql.unsafe(`SET statement_timeout = '20s'`);
+          const r = await sql.unsafe(
+            `SELECT "_dlt_load_id" AS lid FROM "${source.db_schema || "public"}"."${source.db_table}" LIMIT 1`
+          );
+          loadId = String((r as unknown as { lid: unknown }[])[0]?.lid ?? "");
+          lastErr = null;
+          break;
+        } finally {
+          try { await sql.end(); } catch { /* ignore */ }
+        }
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 4000));
       }
-    } catch (err) {
-      results.push({ sourceId: source.id, status: "error", message: `Load check failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+    if (lastErr) {
+      results.push({ sourceId: source.id, status: "error", message: `Load check failed after 3 attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}` });
       continue;
     }
 
