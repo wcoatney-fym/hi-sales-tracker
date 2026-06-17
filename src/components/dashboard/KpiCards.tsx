@@ -26,7 +26,7 @@ interface CardConfig {
 
 const CARDS: CardConfig[] = [
   {
-    label: "Total Revenue",
+    label: "Total Annual Premium",
     icon: DollarSign,
     valueKey: "totalRevenue",
     prevKey: "prevTotalRevenue",
@@ -61,7 +61,7 @@ const CARDS: CardConfig[] = [
     format: "number",
   },
   {
-    label: "Revenue / Agent",
+    label: "Annual Premium / Agent",
     icon: BarChart3,
     valueKey: "revenuePerAgent",
     prevKey: "prevRevenuePerAgent",

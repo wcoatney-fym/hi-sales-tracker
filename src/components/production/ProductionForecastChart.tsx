@@ -306,7 +306,7 @@ export default function ProductionForecastChart({
   const lastPolicyPoint = policySim[policySim.length - 1];
   const sellingDays = useMemo(() => daily.filter((d) => d.policy_count > 0).length, [daily]);
 
-  const displayTitle = title || (agentNumber ? "Agent Forecast" : agencyFilter ? `${agencyFilter} Forecast` : "Revenue Forecast");
+  const displayTitle = title || (agentNumber ? "Agent Forecast" : agencyFilter ? `${agencyFilter} Forecast` : "Annual Premium Forecast");
   const chartHeight = compact ? "h-48 sm:h-56" : "h-52 sm:h-72";
 
   if (loading) {

@@ -117,10 +117,10 @@ export default function InternalTab({
 
       setKpiMetrics([
         { label: "Policies Sold", value: kpiResult.policiesSold || 0, previousValue: kpiResult.prevPoliciesSold || 0, format: "number", icon: FileText },
-        { label: "Total Revenue", value: kpiResult.totalRevenue || 0, previousValue: kpiResult.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
+        { label: "Total Annual Premium", value: kpiResult.totalRevenue || 0, previousValue: kpiResult.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
         { label: "Active Agents", value: kpiResult.activeAgents || 0, previousValue: kpiResult.prevActiveAgents || 0, format: "number", icon: Users },
         { label: "Avg Premium", value: kpiResult.avgPolicyValue || 0, previousValue: kpiResult.prevAvgPolicyValue || 0, format: "currency", icon: TrendingUp },
-        { label: "Revenue/Agent", value: kpiResult.revenuePerAgent || 0, previousValue: kpiResult.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
+        { label: "Annual Premium/Agent", value: kpiResult.revenuePerAgent || 0, previousValue: kpiResult.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
       ]);
 
       const planSlices: PieSlice[] = (planBreakdown.plans || []).map((p: { plan_name: string; policies: number; revenue: number }) => ({
@@ -300,7 +300,7 @@ export default function InternalTab({
                     <th className="px-4 py-2.5 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Sub-Agency</th>
                   )}
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Policies</th>
-                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Revenue</th>
+                  <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Annual Premium</th>
                   <th className="px-4 py-2.5 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Avg Premium</th>
                   <th className="px-4 py-2.5 text-center text-xs font-semibold text-slate-400 uppercase tracking-wider">Growth</th>
                 </tr>

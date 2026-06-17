@@ -67,10 +67,10 @@ export default function AgentProductionPanel({
       if (kpis) {
         setKpiMetrics([
           { label: "Policies Sold", value: kpis.policiesSold || 0, previousValue: kpis.prevPoliciesSold || 0, format: "number", icon: FileText },
-          { label: "Total Revenue", value: kpis.totalRevenue || 0, previousValue: kpis.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
+          { label: "Total Annual Premium", value: kpis.totalRevenue || 0, previousValue: kpis.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
           { label: "Avg Premium", value: kpis.avgPolicyValue || 0, previousValue: kpis.prevAvgPolicyValue || 0, format: "currency", icon: TrendingUp },
           { label: "New Clients", value: kpis.newClients || 0, previousValue: kpis.prevNewClients || 0, format: "number", icon: Users },
-          { label: "Revenue/Agent", value: kpis.revenuePerAgent || 0, previousValue: kpis.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
+          { label: "Annual Premium/Agent", value: kpis.revenuePerAgent || 0, previousValue: kpis.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
         ]);
       }
 

@@ -81,7 +81,7 @@ export default function ProductionPieChart({ data, loading, title }: ProductionP
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            Revenue
+            Annual Premium
           </button>
         </div>
       </div>
@@ -122,7 +122,7 @@ export default function ProductionPieChart({ data, loading, title }: ProductionP
                 {viewMode === "revenue" ? formatCurrency(total) : total.toLocaleString()}
               </span>
               <span className="text-[10px] text-slate-400 uppercase tracking-wider">
-                {viewMode === "revenue" ? "Revenue" : "Policies"}
+                {viewMode === "revenue" ? "Annual Premium" : "Policies"}
               </span>
             </div>
           </div>

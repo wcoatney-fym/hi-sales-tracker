@@ -54,7 +54,7 @@ function CustomTooltip({
             style={{ backgroundColor: entry.color }}
           />
           <span className="text-slate-400">
-            {entry.dataKey === "revenue" ? "Revenue" : "Policies"}:
+            {entry.dataKey === "revenue" ? "Annual Premium" : "Policies"}:
           </span>
           <span className="font-semibold text-white">
             {entry.dataKey === "revenue"
@@ -73,7 +73,7 @@ export default function SalesChart({ data, loading }: SalesChartProps) {
       <div className="flex items-center gap-3 mb-4 sm:mb-6">
         <BarChart3 size={20} className="text-gold" />
         <h3 className="text-sm sm:text-base font-semibold text-white">
-          Revenue & Policy Trends
+          Annual Premium & Policy Trends
         </h3>
       </div>
 

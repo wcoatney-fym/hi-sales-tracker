@@ -117,8 +117,8 @@ export default function AverageCards({
       accentIcon: CalendarDays,
     },
     {
-      label: "Avg Revenue / Day",
-      tooltip: `$${data.totalRevenue.toLocaleString()} revenue over ${days} day${days !== 1 ? "s" : ""}`,
+      label: "Avg Annual Premium / Day",
+      tooltip: `$${data.totalRevenue.toLocaleString()} annual premium over ${days} day${days !== 1 ? "s" : ""}`,
       value: revenuePerDay,
       format: "currency",
       icon: DollarSign,
@@ -140,8 +140,8 @@ export default function AverageCards({
         accentIcon: CalendarRange,
       },
       {
-        label: "Avg Revenue / Month",
-        tooltip: `$${data.totalRevenue.toLocaleString()} revenue over ${months} month${months !== 1 ? "s" : ""}`,
+        label: "Avg Annual Premium / Month",
+        tooltip: `$${data.totalRevenue.toLocaleString()} annual premium over ${months} month${months !== 1 ? "s" : ""}`,
         value: revenuePerMonth,
         format: "currency",
         icon: DollarSign,

@@ -85,7 +85,7 @@ export default function BreakdownTable({
                 </div>
                 <div className="flex items-center gap-4 mt-2 text-xs">
                   <span className="text-slate-400"><span className="text-white font-semibold">{row.policies}</span> policies</span>
-                  <span className="text-slate-400"><span className="text-gold font-semibold">{formatCurrency(row.revenue)}</span> rev</span>
+                  <span className="text-slate-400"><span className="text-gold font-semibold">{formatCurrency(row.revenue)}</span> AP</span>
                   {showAgentCount && row.agentCount !== undefined && (
                     <span className="text-slate-400"><span className="text-slate-200">{row.agentCount}</span> agents</span>
                   )}
@@ -106,7 +106,7 @@ export default function BreakdownTable({
                 <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Agents</th>
               )}
               <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Policies</th>
-              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Revenue</th>
+              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider">Annual Premium</th>
               <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase tracking-wider hidden md:table-cell">Avg Premium</th>
               <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase tracking-wider hidden lg:table-cell">Trend</th>
               <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase tracking-wider">Growth</th>

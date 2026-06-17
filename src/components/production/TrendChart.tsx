@@ -53,7 +53,7 @@ function CustomTooltip({
         <div key={entry.dataKey} className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: entry.color }} />
           <span className="text-slate-400">
-            {entry.dataKey === "revenue" ? "Revenue" : "Policies"}:
+            {entry.dataKey === "revenue" ? "Annual Premium" : "Policies"}:
           </span>
           <span className="font-semibold text-white">
             {entry.dataKey === "revenue" ? `$${entry.value.toLocaleString()}` : entry.value}
@@ -64,7 +64,7 @@ function CustomTooltip({
   );
 }
 
-export default function TrendChart({ data, loading, title = "Revenue & Policy Trends", height = 280 }: TrendChartProps) {
+export default function TrendChart({ data, loading, title = "Annual Premium & Policy Trends", height = 280 }: TrendChartProps) {
   return (
     <div className="bg-navy rounded-xl border border-slate-700/50 p-6">
       <div className="flex items-center gap-3 mb-6">

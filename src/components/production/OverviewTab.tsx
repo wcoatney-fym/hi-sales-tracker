@@ -101,10 +101,10 @@ export default function OverviewTab({
 
       setKpiMetrics([
         { label: "Policies Sold", value: kpis.policiesSold || 0, previousValue: kpis.prevPoliciesSold || 0, format: "number", icon: FileText },
-        { label: "Total Revenue", value: kpis.totalRevenue || 0, previousValue: kpis.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
+        { label: "Total Annual Premium", value: kpis.totalRevenue || 0, previousValue: kpis.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
         { label: "Active Agents", value: kpis.activeAgents || 0, previousValue: kpis.prevActiveAgents || 0, format: "number", icon: Users },
         { label: "Avg Premium", value: kpis.avgPolicyValue || 0, previousValue: kpis.prevAvgPolicyValue || 0, format: "currency", icon: TrendingUp },
-        { label: "Revenue/Agent", value: kpis.revenuePerAgent || 0, previousValue: kpis.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
+        { label: "Annual Premium/Agent", value: kpis.revenuePerAgent || 0, previousValue: kpis.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
       ]);
       setChartData(chart.chartData || []);
 
@@ -169,10 +169,10 @@ export default function OverviewTab({
 
       setKpiMetrics([
         { label: "Policies Sold", value: kpis.policiesSold || 0, previousValue: kpis.prevPoliciesSold || 0, format: "number", icon: FileText },
-        { label: "Total Revenue", value: kpis.totalRevenue || 0, previousValue: kpis.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
+        { label: "Total Annual Premium", value: kpis.totalRevenue || 0, previousValue: kpis.prevTotalRevenue || 0, format: "currency", icon: DollarSign },
         { label: "Active Agents", value: kpis.activeAgents || 0, previousValue: kpis.prevActiveAgents || 0, format: "number", icon: Users },
         { label: "Avg Premium", value: kpis.avgPolicyValue || 0, previousValue: kpis.prevAvgPolicyValue || 0, format: "currency", icon: TrendingUp },
-        { label: "Revenue/Agent", value: kpis.revenuePerAgent || 0, previousValue: kpis.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
+        { label: "Annual Premium/Agent", value: kpis.revenuePerAgent || 0, previousValue: kpis.prevRevenuePerAgent || 0, format: "currency", icon: BarChart3 },
       ]);
       setChartData(chart.chartData || []);
 
@@ -299,7 +299,7 @@ export default function OverviewTab({
           <ProductionForecastChart
             token={token}
             agencyFilter={currentAgencyFilter}
-            title={level === "org" ? "Revenue Forecast (All)" : `${selectedAgency} Forecast`}
+            title={level === "org" ? "Annual Premium Forecast (All)" : `${selectedAgency} Forecast`}
           />
 
           <div className={`grid gap-6 ${level === "org" ? "lg:grid-cols-2" : ""}`}>

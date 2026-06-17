@@ -56,7 +56,7 @@ function CustomTooltip({
       {payload.map((entry) => (
         <div key={entry.dataKey} className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: entry.color }} />
-          <span className="text-slate-400">{entry.dataKey === "revenue" ? "Revenue" : "Policies"}:</span>
+          <span className="text-slate-400">{entry.dataKey === "revenue" ? "Annual Premium" : "Policies"}:</span>
           <span className="font-semibold text-white">
             {entry.dataKey === "revenue" ? `$${entry.value.toLocaleString()}` : entry.value}
           </span>
@@ -182,7 +182,7 @@ export default function MonthlyProductionChart({
       {!compact && (
         <div className="grid grid-cols-3 gap-4 pt-3 mt-3 border-t border-slate-700/30">
           <div>
-            <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Avg Monthly Revenue</p>
+            <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Avg Monthly Annual Premium</p>
             <p className="text-sm font-bold text-white">{formatAxisCurrency(avgRevenue)}</p>
           </div>
           <div>

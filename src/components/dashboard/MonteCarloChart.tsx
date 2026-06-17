@@ -419,7 +419,7 @@ export default function MonteCarloChart({ token, agencyFilter, dateRange }: Mont
       <div className="bg-navy rounded-xl border border-slate-700/50 p-6">
         <div className="flex items-center gap-3 mb-6">
           <TrendingUp size={20} className="text-gold" />
-          <h3 className="text-base font-semibold text-white">Revenue Forecast</h3>
+          <h3 className="text-base font-semibold text-white">Annual Premium Forecast</h3>
         </div>
         <div className="h-52 sm:h-80 flex items-center justify-center">
           <Loader2 className="animate-spin text-slate-500" size={32} />
@@ -433,7 +433,7 @@ export default function MonteCarloChart({ token, agencyFilter, dateRange }: Mont
       <div className="bg-navy rounded-xl border border-slate-700/50 p-6">
         <div className="flex items-center gap-3 mb-6">
           <TrendingUp size={20} className="text-gold" />
-          <h3 className="text-base font-semibold text-white">Revenue Forecast</h3>
+          <h3 className="text-base font-semibold text-white">Annual Premium Forecast</h3>
         </div>
         <div className="h-80 flex flex-col items-center justify-center text-slate-500">
           <TrendingUp size={40} className="mb-3 opacity-40" />
@@ -547,7 +547,7 @@ export default function MonteCarloChart({ token, agencyFilter, dateRange }: Mont
         <div className="flex items-center gap-3">
           <TrendingUp size={20} className="text-gold" />
           <div>
-            <h3 className="text-base font-semibold text-white">FYM Direct + Wisechoice Revenue Forecast</h3>
+            <h3 className="text-base font-semibold text-white">FYM Direct + Wisechoice Annual Premium Forecast</h3>
             <p className="text-xs text-slate-500 mt-0.5">
               Monte Carlo simulation (5,000 iterations) | DOW-weighted | {growthRate >= 0 ? "+" : ""}{(growthRate * 100).toFixed(1)}%/mo trend
             </p>
@@ -562,7 +562,7 @@ export default function MonteCarloChart({ token, agencyFilter, dateRange }: Mont
               className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
                 viewMode === "income" ? "bg-gold/20 text-gold" : "text-slate-400 hover:text-white"
               }`}
-              title="Annualized Premium Revenue"
+              title="Annualized Premium"
             >
               <DollarSign size={12} />
               Income
@@ -662,7 +662,7 @@ export default function MonteCarloChart({ token, agencyFilter, dateRange }: Mont
       {/* Target input */}
       {showTargetInput && (
         <div className="flex items-center gap-2 mb-4 animate-fade-in">
-          <span className="text-xs text-slate-400">Revenue Target $</span>
+          <span className="text-xs text-slate-400">Annual Premium Target $</span>
           <input
             type="number"
             placeholder="e.g. 500000"
