@@ -1,13 +1,8 @@
 name: Reconcile migration history from prod
-# One-shot, manually triggered. Pulls the live Supabase schema into a
-# migration file and pushes a branch for review. Read-only against prod
-# (db pull does not mutate the database). Does NOT touch main.
 on:
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   reconcile:
     runs-on: ubuntu-latest
@@ -24,7 +19,7 @@ jobs:
       - name: Show migration drift
         run: supabase migration list || true
       - name: Pull remote schema into a migration
-        run: supabase db pull --password "$SUPABASE_DB_PASSWORD"
+        run: supabase db pull --password "$SUPAB…WORD"
       - name: Commit and push reconciliation branch
         run: |
           git config user.name "Diamond (FYM Bot)"
