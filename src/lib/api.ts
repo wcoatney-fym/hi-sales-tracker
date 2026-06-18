@@ -1076,6 +1076,10 @@ export async function adminResetAgencyCredential(token: string, credentialId: st
   return callApi("admin-api", { action: "reset-agency-credential", token, credentialId });
 }
 
+export async function adminSetAgencyZapsEnabled(token: string, agencyId: string, enabled: boolean) {
+  return callApi("admin-api", { action: "set-agency-zaps-enabled", token, agencyId, enabled });
+}
+
 export async function adminResolveAgencySlug(token: string, slug: string): Promise<{ id: string; name: string; slug: string }> {
   const result = await callApi("admin-api", { action: "resolve-agency-slug", token, slug });
   return result as unknown as { id: string; name: string; slug: string };

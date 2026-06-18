@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Copy, Check, RefreshCw, Pencil, X, Save, Loader2, Search, LayoutDashboard } from "lucide-react";
+import { Eye, EyeOff, Copy, Check, RefreshCw, Pencil, X, Save, Loader2, Search, LayoutDashboard, Zap } from "lucide-react";
 import {
   adminGetAgencyCredentials,
   adminUpdateAgencyCredential,
   adminResetAgencyCredential,
+  adminSetAgencyZapsEnabled,
 } from "../../lib/api";
 
 interface Credential {
@@ -14,6 +15,7 @@ interface Credential {
   agency_id: string;
   agency_name: string;
   agency_slug: string;
+  zaps_enabled: boolean;
   session_duration_days: number;
 }
 
@@ -33,6 +35,7 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
   const [resettingId, setResettingId] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [togglingZapId, setTogglingZapId] = useState<string | null>(null);
 
   const fetchCredentials = useCallback(async () => {
     try {
@@ -79,6 +82,22 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
       alert(err instanceof Error ? err.message : "Failed to reset");
     } finally {
       setResettingId(null);
+    }
+  };
+
+  const handleToggleZaps = async (cred: Credential) => {
+    const next = !cred.zaps_enabled;
+    if (next && !confirm(`Enable retention/at-risk/cancellation Zap automations for ${cred.agency_name}? Webhooks will fire for this agency's policies.`)) return;
+    setTogglingZapId(cred.id);
+    try {
+      await adminSetAgencyZapsEnabled(token, cred.agency_id, next);
+      setCredentials((prev) =>
+        prev.map((c) => (c.id === cred.id ? { ...c, zaps_enabled: next } : c))
+      );
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to update Zap toggle");
+    } finally {
+      setTogglingZapId(null);
     }
   };
 
@@ -187,6 +206,15 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-white font-semibold text-sm">{cred.agency_name}</h3>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleToggleZaps(cred)}
+                    disabled={togglingZapId === cred.id}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 ${cred.zaps_enabled ? "text-green-400 bg-green-400/10 hover:bg-green-400/20" : "text-slate-400 bg-slate-800 hover:bg-slate-700"}`}
+                    title={cred.zaps_enabled ? "Zap automations ON \u2014 click to disable" : "Zap automations OFF \u2014 click to enable"}
+                  >
+                    {togglingZapId === cred.id ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} className={cred.zaps_enabled ? "fill-green-400" : ""} />}
+                    Zaps {cred.zaps_enabled ? "On" : "Off"}
+                  </button>
                   <button
                     onClick={() => navigate(`/admin/dashboard/${cred.agency_slug}`, { state: { agencyName: cred.agency_name, agencyId: cred.agency_id } })}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gold bg-gold/10 hover:bg-gold/20 rounded-lg transition-colors"

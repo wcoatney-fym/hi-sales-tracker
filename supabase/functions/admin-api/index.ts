@@ -3936,11 +3936,11 @@ Deno.serve(async (req: Request) => {
         const agencyIds = (creds || []).map((c: { agency_id: string }) => c.agency_id).filter(Boolean);
         const { data: agencyRows } = await supabase
           .from("agencies")
-          .select("id, name, slug")
+          .select("id, name, slug, zaps_enabled")
           .in("id", agencyIds);
 
         const agencyMap = Object.fromEntries(
-          (agencyRows || []).map((a: { id: string; name: string; slug: string }) => [a.id, a])
+          (agencyRows || []).map((a: { id: string; name: string; slug: string; zaps_enabled: boolean }) => [a.id, a])
         );
 
         const credentials = (creds || []).map((c: { id: string; email_domain: string; password: string; agency_id: string; session_duration_days: number }) => ({
@@ -3950,12 +3950,31 @@ Deno.serve(async (req: Request) => {
           agency_id: c.agency_id,
           agency_name: agencyMap[c.agency_id]?.name || "Unknown",
           agency_slug: agencyMap[c.agency_id]?.slug || "",
+          zaps_enabled: agencyMap[c.agency_id]?.zaps_enabled ?? false,
           session_duration_days: c.session_duration_days,
         }));
 
         credentials.sort((a: { agency_name: string }, b: { agency_name: string }) => a.agency_name.localeCompare(b.agency_name));
 
         return jsonResponse({ credentials });
+      }
+
+      case "set-agency-zaps-enabled": {
+        if (session.role !== "global_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+
+        const { agencyId, enabled } = body;
+        if (!agencyId) return jsonResponse({ error: "Agency ID required" }, 400);
+        if (typeof enabled !== "boolean") return jsonResponse({ error: "enabled (boolean) required" }, 400);
+
+        const { error: zapErr } = await supabase
+          .from("agencies")
+          .update({ zaps_enabled: enabled })
+          .eq("id", agencyId);
+
+        if (zapErr) throw zapErr;
+        return jsonResponse({ success: true, agencyId, zaps_enabled: enabled });
       }
 
       case "update-agency-credential": {
