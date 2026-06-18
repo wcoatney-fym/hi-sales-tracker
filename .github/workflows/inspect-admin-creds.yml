@@ -1,0 +1,22 @@
+name: Inspect admin credentials (diagnostic)
+on:
+  push:
+    branches: [run/inspect-admin-creds]
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Inspect admin_credentials (values masked)
+        run: |
+          # Supabase pooler connection (IPv4-friendly). User format: postgres.<ref>
+          HOST="aws-0-us-west-2.pooler.supabase.com"
+          psql "host=$HOST port=5432 dbname=postgres user=postgres.$PROJECT_REF sslmode=require" \
+            -c "select email_domain, role, agency_id, session_duration_days, length(password) as pw_len, left(password,3) as pw_first from admin_credentials order by role, email_domain;" \
+          || psql "host=$HOST port=6543 dbname=postgres user=postgres.$PROJECT_REF sslmode=require" \
+            -c "select email_domain, role, agency_id, session_duration_days, length(password) as pw_len, left(password,3) as pw_first from admin_credentials order by role, email_domain;"
