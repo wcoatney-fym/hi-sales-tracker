@@ -1,0 +1,41 @@
+name: Reconcile migration history from prod
+# One-shot, manually triggered. Pulls the live Supabase schema into a
+# migration file and pushes a branch for review. Read-only against prod
+# (db pull does not mutate the database). Does NOT touch main.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: *** secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: *** secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Link project
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+      - name: Show migration drift
+        run: supabase migration list || true
+      - name: Pull remote schema into a migration
+        run: supabase db pull --password "$SUPABASE_DB_PASSWORD"
+      - name: Commit and push reconciliation branch
+        run: |
+          git config user.name "Diamond (FYM Bot)"
+          git config user.email "diamond@teamfym.com"
+          BRANCH="chore/reconcile-prod-migrations-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+          git add supabase/migrations
+          if git diff --cached --quiet; then
+            echo "No migration drift to commit."
+            exit 0
+          fi
+          git commit -m "chore: reconcile prod migration history into repo (db pull)"
+          git push -u origin "$BRANCH"
+          echo "Pushed $BRANCH - open a PR to review the reconciled migrations."
