@@ -1,0 +1,8 @@
+# Default: no required owner (safe/frontend changes can be approved by anyone
+# on the team, or auto-merged once CI is green).
+
+# Risky paths that touch production schema / edge functions REQUIRE review.
+# These map to the AGENTS.md rule: no prod schema/data change without a human yes.
+/supabase/migrations/   @wcoatney-fym
+/supabase/functions/    @wcoatney-fym
+/.github/workflows/     @wcoatney-fym

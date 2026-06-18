@@ -1,0 +1,43 @@
+name: CI checks
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Scan for hardcoded secrets in source
+        run: |
+          # Fail the PR if obvious secrets are committed (defense in depth on
+          # top of Netlify's scanner). Extend patterns as needed.
+          if grep -rnEI "sb_secret_|service_role|-----BEGIN [A-Z ]*PRIVATE KEY-----" \
+               --include=*.ts --include=*.tsx --include=*.js --include=*.sql \
+               src supabase 2>/dev/null; then
+            echo "::error::Possible hardcoded secret found in source. Move it to an env var / secret."
+            exit 1
+          fi
+          echo "No obvious hardcoded secrets found."
+  risky-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Flag prod-schema / edge-function changes for human review
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "Changed files:"; echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE "^supabase/migrations/|^supabase/functions/"; then
+            echo "::warning::This PR changes prod schema or edge functions. A human approval is required before merge (see CODEOWNERS / branch protection)."
+          else
+            echo "Frontend / safe-path change."
+          fi
