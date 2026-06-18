@@ -33,12 +33,12 @@ jCyoYUzCAX/IcjgVlT9qBSijaF2Ej13P5dBP2TYZc75DwyCnR7oKU0A1qyCWRn6K
 P0UBeWDb0uy/qk0qlpQov19T0VA/sVT567PUPF5B82v4Xxg+yqvLRg==
 -----END CERTIFICATE-----`;
 
-const SECRET_FALLBACKS: Record<string, string> = {
-  DB_PASSWORD: "VUqeVnQw*d!UWrdbx!8pvE.maFTnTxzp",
-};
-
+// Secrets are read from the function environment only. Never hardcode
+// credentials here — set DB_PASSWORD (and any others) as Supabase function
+// secrets. A committed fallback was removed because it leaked the prod DB
+// password into the repo and tripped Netlify secret scanning.
 function resolveSecret(name: string): string {
-  return Deno.env.get(name) || SECRET_FALLBACKS[name] || "";
+  return Deno.env.get(name) || "";
 }
 
 const LOWERCASE_PARTICLES = new Set([
