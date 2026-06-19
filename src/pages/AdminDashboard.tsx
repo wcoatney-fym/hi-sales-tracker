@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Navigate, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   LogOut,
@@ -41,6 +41,7 @@ export default function AdminDashboard() {
 
   const isAgencyView = !!agencySlug;
   const isImpersonating = isAgencyView && isGlobalAdmin;
+  const tabStripRef = useRef<HTMLDivElement>(null);
 
   // Scroll to top whenever the impersonation context changes so the
   // "Viewing as" banner is actually in view after tapping View As on mobile.
@@ -53,10 +54,12 @@ export default function AdminDashboard() {
   // Entering an agency view should land on Overview so the admin immediately
   // sees the agency's data, not whatever tab (e.g. Settings) they came from.
   // The component doesn't remount on FYM -> agency (same route, param change),
-  // so reset the active tab explicitly.
+  // so reset the active tab explicitly and scroll the (horizontally scrollable)
+  // tab strip fully left so the highlighted Overview tab is in view on mobile.
   useEffect(() => {
     if (isAgencyView) {
       setActiveTab("overview");
+      tabStripRef.current?.scrollTo({ left: 0, behavior: "smooth" });
     }
   }, [isAgencyView, agencySlug]);
 
@@ -193,7 +196,7 @@ export default function AdminDashboard() {
       </div>
 
       <div className="relative mb-4 sm:mb-6">
-        <div className="flex gap-1 bg-navy p-1 rounded-lg w-full sm:w-fit border border-slate-700/50 overflow-x-auto scrollbar-hide snap-x snap-mandatory">
+        <div ref={tabStripRef} className="flex gap-1 bg-navy p-1 rounded-lg w-full sm:w-fit border border-slate-700/50 overflow-x-auto scrollbar-hide snap-x snap-mandatory">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             return (
