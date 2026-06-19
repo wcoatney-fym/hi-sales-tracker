@@ -20,6 +20,7 @@ import GrowthBadge from "./GrowthBadge";
 import AgentProductionPanel from "./AgentProductionPanel";
 import BillingModeSection from "./BillingModeSection";
 import ProductionPieChart, { type PieSlice } from "./ProductionPieChart";
+import QualityMetrics from "../QualityMetrics";
 import {
   adminGetDashboardKpis,
   adminGetSalesChart,
@@ -223,6 +224,14 @@ export default function InternalTab({
           >
             <PolicyStatusKpiRow data={statusKpis} loading={loading} />
           </MetricSection>
+
+          {scope === "all" ? (
+            <QualityMetrics agencyNames={INTERNAL_AGENCIES} />
+          ) : scope === "fym" ? (
+            <QualityMetrics agencyName="FYM" />
+          ) : (
+            <QualityMetrics agencyName="Wisechoice Senior Advisors Llc" />
+          )}
 
           <TrendChart
             data={chartData}
