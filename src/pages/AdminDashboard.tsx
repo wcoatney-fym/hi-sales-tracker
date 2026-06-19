@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Navigate, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   LogOut,
@@ -41,6 +41,27 @@ export default function AdminDashboard() {
 
   const isAgencyView = !!agencySlug;
   const isImpersonating = isAgencyView && isGlobalAdmin;
+  const tabStripRef = useRef<HTMLDivElement>(null);
+
+  // Scroll to top whenever the impersonation context changes so the
+  // "Viewing as" banner is actually in view after tapping View As on mobile.
+  useEffect(() => {
+    if (isImpersonating) {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, [isImpersonating, agencySlug]);
+
+  // Entering an agency view should land on Overview so the admin immediately
+  // sees the agency's data, not whatever tab (e.g. Settings) they came from.
+  // The component doesn't remount on FYM -> agency (same route, param change),
+  // so reset the active tab explicitly and scroll the (horizontally scrollable)
+  // tab strip fully left so the highlighted Overview tab is in view on mobile.
+  useEffect(() => {
+    if (isAgencyView) {
+      setActiveTab("overview");
+      tabStripRef.current?.scrollTo({ left: 0, behavior: "smooth" });
+    }
+  }, [isAgencyView, agencySlug]);
 
   useEffect(() => {
     if (!agencySlug) {
@@ -136,9 +157,9 @@ export default function AdminDashboard() {
   return (
     <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white">
       {isImpersonating && (
-        <div className="mb-4 flex items-center gap-3 bg-gold/10 border border-gold/30 rounded-lg px-4 py-3 animate-fade-in">
+        <div className="sticky top-16 z-30 -mx-4 sm:-mx-6 px-4 sm:px-6 mb-4 flex items-center gap-3 bg-gold/15 border-y border-gold/40 py-3 backdrop-blur-sm animate-fade-in shadow-sm">
           <Eye size={16} className="text-gold flex-shrink-0" />
-          <p className="text-sm text-gold font-medium flex-1">
+          <p className="text-sm text-gold font-medium flex-1 min-w-0 truncate">
             Viewing as {resolvedAgencyName || agencySlug}
           </p>
           <button
@@ -151,10 +172,10 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-white">{dashboardTitle}</h1>
-          <p className="text-xs sm:text-sm text-slate-400 mt-0.5">Signed in as {email}</p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 mb-4 sm:mb-6">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-bold text-white truncate">{dashboardTitle}</h1>
+          <p className="text-xs sm:text-sm text-slate-400 mt-0.5 truncate">Signed in as {email}</p>
         </div>
         <div className="flex items-center gap-2 sm:gap-3">
           {showDateRange && (
@@ -174,8 +195,8 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      <div className="relative mb-6">
-        <div className="flex gap-1 bg-navy p-1 rounded-lg w-full sm:w-fit border border-slate-700/50 overflow-x-auto scrollbar-hide snap-x snap-mandatory">
+      <div className="relative mb-4 sm:mb-6">
+        <div ref={tabStripRef} className="flex gap-1 bg-navy p-1 rounded-lg w-full sm:w-fit border border-slate-700/50 overflow-x-auto scrollbar-hide snap-x snap-mandatory">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             return (

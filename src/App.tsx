@@ -15,7 +15,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <AgentAuthProvider>
-      <div className="min-h-screen bg-navy-dark">
+      <div className="min-h-screen bg-navy-dark overflow-x-hidden">
         <Header />
         <Routes>
           <Route path="/" element={<AgentProfile />} />
