@@ -13,9 +13,9 @@ interface StepIndicatorProps {
 
 export default function StepIndicator({ currentStep }: StepIndicatorProps) {
   return (
-    <div className="flex items-center justify-center" role="navigation" aria-label="Form progress">
+    <div className="flex items-center justify-start sm:justify-center overflow-x-auto scrollbar-hide px-1 -mx-1" role="navigation" aria-label="Form progress">
       {steps.map((step, index) => (
-        <div key={step.number} className="flex items-center">
+        <div key={step.number} className="flex items-center flex-shrink-0">
           <div className="flex flex-col items-center">
             <div
               className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm transition-all duration-300 ${
@@ -39,7 +39,7 @@ export default function StepIndicator({ currentStep }: StepIndicatorProps) {
           </div>
           {index < steps.length - 1 && (
             <div
-              className={`w-8 sm:w-14 md:w-20 h-0.5 mx-1.5 mb-6 transition-colors duration-300 ${
+              className={`w-6 sm:w-14 md:w-20 h-0.5 mx-1 sm:mx-1.5 mb-6 flex-shrink-0 transition-colors duration-300 ${
                 step.number < currentStep ? "bg-gold" : "bg-navy"
               }`}
             />
