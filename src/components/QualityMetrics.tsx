@@ -45,31 +45,38 @@ function PersistencyGauge({ value }: { value: number | null }) {
     return `M ${a.x} ${a.y} A ${r} ${r} 0 ${large} 1 ${b.x} ${b.y}`;
   };
   const needleAngle = pct === null ? Math.PI / 2 : Math.PI * (1 - pct / 100);
-  const nx = cx + (r - 12) * Math.cos(needleAngle);
-  const ny = cy - (r - 12) * Math.sin(needleAngle);
-  const tick = toXY(90); // target marker at 90%
-  const tickInner = { x: cx + (r - 14) * Math.cos(Math.PI * (1 - 90 / 100)), y: cy - (r - 14) * Math.sin(Math.PI * (1 - 90 / 100)) };
+  const nx = cx + (r - 14) * Math.cos(needleAngle);
+  const ny = cy - (r - 14) * Math.sin(needleAngle);
+  // 90% target tick: a clean radial mark spanning the band width.
+  const tickAngle = Math.PI * (1 - 90 / 100);
+  const tickOuter = { x: cx + (r + 8) * Math.cos(tickAngle), y: cy - (r + 8) * Math.sin(tickAngle) };
+  const tickInner = { x: cx + (r - 8) * Math.cos(tickAngle), y: cy - (r - 8) * Math.sin(tickAngle) };
+  // Which band is the value in (brighten only that one for a clean read).
+  const active = pct === null ? null : pct >= 90 ? "green" : pct >= 80 ? "amber" : "red";
+  const bandOpacity = (band: string) => (active === band ? 1 : 0.25);
 
   return (
-    <svg viewBox="0 0 200 120" className="w-full max-w-[260px] mx-auto">
-      {/* colored bands: red 0-80, amber 80-90, green 90-100 */}
-      <path d={arc(0, 80)} fill="none" stroke="#ef4444" strokeWidth="12" strokeLinecap="round" opacity="0.35" />
-      <path d={arc(80, 90)} fill="none" stroke="#f59e0b" strokeWidth="12" opacity="0.35" />
-      <path d={arc(90, 100)} fill="none" stroke="#22c55e" strokeWidth="12" strokeLinecap="round" opacity="0.35" />
-      {/* 90% target tick */}
-      <line x1={tickInner.x} y1={tickInner.y} x2={tick.x} y2={tick.y} stroke="#e2e8f0" strokeWidth="2" />
+    <svg viewBox="0 0 200 124" className="w-full max-w-[260px] mx-auto">
+      {/* colored bands: red 0-80, amber 80-90, green 90-100 (active band brightened) */}
+      <path d={arc(0, 80)} fill="none" stroke="#ef4444" strokeWidth="12" strokeLinecap="round" opacity={bandOpacity("red")} />
+      <path d={arc(80, 90)} fill="none" stroke="#f59e0b" strokeWidth="12" opacity={bandOpacity("amber")} />
+      <path d={arc(90, 100)} fill="none" stroke="#22c55e" strokeWidth="12" strokeLinecap="round" opacity={bandOpacity("green")} />
+      {/* 90% target tick + label */}
+      <line x1={tickInner.x} y1={tickInner.y} x2={tickOuter.x} y2={tickOuter.y} stroke="#e2e8f0" strokeWidth="2" />
+      <text x={tickOuter.x} y={tickOuter.y - 4} textAnchor="middle" fontSize="8" fontWeight="600" fill="#cbd5e1">90%</text>
+      {/* scale endpoints */}
+      <text x={toXY(0).x} y={toXY(0).y + 14} textAnchor="middle" fontSize="8" fill="#64748b">0%</text>
+      <text x={toXY(100).x} y={toXY(100).y + 14} textAnchor="middle" fontSize="8" fill="#64748b">100%</text>
       {/* needle */}
       <line x1={cx} y1={cy} x2={nx} y2={ny} stroke={bandColor(pct)} strokeWidth="3" strokeLinecap="round" />
       <circle cx={cx} cy={cy} r="5" fill={bandColor(pct)} />
       {/* center value */}
-      <text x={cx} y={cy - 26} textAnchor="middle" fontSize="26" fontWeight="700" fill={bandColor(pct)}>
+      <text x={cx} y={cy - 24} textAnchor="middle" fontSize="26" fontWeight="700" fill={bandColor(pct)}>
         {pct === null ? "—" : `${pct}%`}
       </text>
       <text x={cx} y={cy - 10} textAnchor="middle" fontSize="9" fill="#94a3b8">
         90-day persistency
       </text>
-      {/* target label */}
-      <text x={tick.x + 2} y={tick.y - 4} fontSize="8" fill="#cbd5e1">90% target</text>
     </svg>
   );
 }
