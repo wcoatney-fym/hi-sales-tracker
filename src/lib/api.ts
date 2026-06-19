@@ -570,13 +570,18 @@ export async function getAgencyLeaderboard(agencyId: string, period: string) {
   return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token });
 }
 
-export async function getQualityMetrics(agencyId?: string | null, agencyName?: string | null) {
+export async function getQualityMetrics(
+  agencyId?: string | null,
+  agencyName?: string | null,
+  agencyNames?: string[] | null,
+) {
   // Quality data requires an authorized session (admin or agent)
   const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || "";
   return callLeaderboardApi({
     action: "get-quality-metrics",
-    ...(agencyId ? { agency_id: agencyId } : {}),
-    ...(!agencyId && agencyName ? { agency_name: agencyName } : {}),
+    ...(agencyNames && agencyNames.length ? { agency_names: agencyNames.join(",") } : {}),
+    ...(!agencyNames && agencyId ? { agency_id: agencyId } : {}),
+    ...(!agencyNames && !agencyId && agencyName ? { agency_name: agencyName } : {}),
     token,
   });
 }
