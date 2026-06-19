@@ -862,6 +862,8 @@ Deno.serve(async (req: Request) => {
       // admins only.
       let qmAgencyId = url.searchParams.get("agency_id");
       const qmAgencyName = url.searchParams.get("agency_name");
+      // Multi-agency scope (e.g. "All Internal" = FYM + Wisechoice): comma list.
+      const qmAgencyNames = url.searchParams.get("agency_names");
       if (!qmAgencyId && qmAgencyName) {
         const { data: namedAgency } = await supabase
           .from("agencies")
@@ -873,6 +875,30 @@ Deno.serve(async (req: Request) => {
       }
       const qmToken = url.searchParams.get("token") || req.headers.get("X-Agent-Token") || "";
       if (!qmToken) return errorResponse("Authentication required", 401);
+
+      // Multi-agency path: resolve names -> ids, authorize each, pass as array.
+      if (qmAgencyNames) {
+        const names = qmAgencyNames.split(",").map((s) => s.trim()).filter(Boolean);
+        if (names.length === 0) return errorResponse("agency_names is empty", 400);
+        const { data: namedRows } = await supabase
+          .from("agencies")
+          .select("id, name")
+          .in("name", names);
+        const ids = (namedRows || []).map((r: { id: string }) => r.id);
+        if (ids.length === 0) return errorResponse("Agencies not found", 404);
+        for (const id of ids) {
+          if (!(await authorizeAgencyAccess(supabase, qmToken, id))) {
+            return errorResponse("Not authorized", 403);
+          }
+        }
+        const { data: multiData, error: multiErr } = await supabase.rpc("get_quality_metrics", {
+          p_agency_id: null,
+          p_agency_ids: ids,
+        });
+        if (multiErr) return errorResponse(multiErr.message, 500);
+        return jsonResponse(multiData || { placement: [], persistency: [] });
+      }
+
       if (!(await authorizeAgencyAccess(supabase, qmToken, qmAgencyId))) {
         return errorResponse("Not authorized", 403);
       }
