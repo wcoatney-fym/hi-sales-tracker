@@ -50,6 +50,16 @@ export default function AdminDashboard() {
     }
   }, [isImpersonating, agencySlug]);
 
+  // Entering an agency view should land on Overview so the admin immediately
+  // sees the agency's data, not whatever tab (e.g. Settings) they came from.
+  // The component doesn't remount on FYM -> agency (same route, param change),
+  // so reset the active tab explicitly.
+  useEffect(() => {
+    if (isAgencyView) {
+      setActiveTab("overview");
+    }
+  }, [isAgencyView, agencySlug]);
+
   useEffect(() => {
     if (!agencySlug) {
       setResolvedAgencyName(null);
