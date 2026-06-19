@@ -41,8 +41,9 @@ function PersistencyGauge({ value }: { value: number | null }) {
   const arc = (from: number, to: number) => {
     const a = toXY(from);
     const b = toXY(to);
-    const large = to - from > 50 ? 1 : 0;
-    return `M ${a.x} ${a.y} A ${r} ${r} 0 ${large} 1 ${b.x} ${b.y}`;
+    // No single band spans > 180deg, so the large-arc-flag is always 0;
+    // sweep-flag 1 draws the minor arc over the top of the semicircle.
+    return `M ${a.x} ${a.y} A ${r} ${r} 0 0 1 ${b.x} ${b.y}`;
   };
   const needleAngle = pct === null ? Math.PI / 2 : Math.PI * (1 - pct / 100);
   const nx = cx + (r - 14) * Math.cos(needleAngle);
