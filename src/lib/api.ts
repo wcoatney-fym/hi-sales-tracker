@@ -245,7 +245,8 @@ export async function adminGetPolicies(
   carrierFilter?: string,
   productTypeFilter?: string,
   agencyFilter?: string,
-  sourceFilter?: string
+  sourceFilter?: string,
+  clientSearch?: string
 ) {
   return callApi("admin-api", {
     action: "get-policies",
@@ -259,6 +260,7 @@ export async function adminGetPolicies(
     ...(productTypeFilter ? { productTypeFilter } : {}),
     ...(agencyFilter ? { agencyFilter } : {}),
     ...(sourceFilter ? { sourceFilter } : {}),
+    ...(clientSearch ? { clientSearch } : {}),
   });
 }
 

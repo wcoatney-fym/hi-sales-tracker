@@ -694,7 +694,7 @@ Deno.serve(async (req: Request) => {
       }
 
       case "get-policies": {
-        const { startDate, endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, page = 1, pageSize = 10 } = body;
+        const { startDate, endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, clientSearch, page = 1, pageSize = 10 } = body;
         if (!startDate || !endDate) {
           return jsonResponse({ error: "Date range required" }, 400);
         }
@@ -756,6 +756,28 @@ Deno.serve(async (req: Request) => {
         if (sourceFilter) {
           countQuery = countQuery.eq("source", sourceFilter);
           dataQuery = dataQuery.eq("source", sourceFilter);
+        }
+
+        if (clientSearch && typeof clientSearch === "string" && clientSearch.trim()) {
+          // Case-insensitive match on client first/last name. Strip PostgREST
+          // reserved chars to keep the .or() filter safe.
+          const cleaned = clientSearch.trim().replace(/[%,().*]/g, " ").replace(/\s+/g, " ").trim();
+          if (cleaned) {
+            const parts = cleaned.split(" ");
+            const orParts = [
+              `client_first_name.ilike.%${cleaned}%`,
+              `client_last_name.ilike.%${cleaned}%`,
+            ];
+            if (parts.length >= 2) {
+              // Handle "First Last" typed together.
+              const first = parts[0];
+              const last = parts.slice(1).join(" ");
+              orParts.push(`and(client_first_name.ilike.%${first}%,client_last_name.ilike.%${last}%)`);
+            }
+            const orFilter = orParts.join(",");
+            countQuery = countQuery.or(orFilter);
+            dataQuery = dataQuery.or(orFilter);
+          }
         }
 
         const [countResult, dataResult] = await Promise.all([countQuery, dataQuery]);

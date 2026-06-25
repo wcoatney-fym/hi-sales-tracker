@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import type { ReactNode } from "react";
 import {
   Download,
   ChevronLeft,
@@ -13,6 +14,14 @@ import {
   ChevronDown,
   SlidersHorizontal,
   Trophy,
+  Search,
+  User,
+  Phone,
+  Mail,
+  MapPin,
+  Building2,
+  FileText,
+  Contact,
 } from "lucide-react";
 import { adminGetPolicies, adminDeletePolicies, adminExportAllPolicies, adminExportLeaderboard } from "../../lib/api";
 import { getDateRange } from "../../lib/dateUtils";
@@ -104,6 +113,14 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
   const [productTypeFilter, setProductTypeFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [agencyFilter, setAgencyFilter] = useState(lockedAgency || "");
+  const [clientSearch, setClientSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [selectedPolicy, setSelectedPolicy] = useState<PolicyRow | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(clientSearch.trim()), 350);
+    return () => clearTimeout(t);
+  }, [clientSearch]);
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -144,7 +161,8 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
         carrierFilter || undefined,
         productTypeFilter || undefined,
         agencyFilter || undefined,
-        sourceFilter || undefined
+        sourceFilter || undefined,
+        debouncedSearch || undefined
       );
       setPolicies(result.policies || []);
       setTotalCount(result.totalCount || 0);
@@ -157,7 +175,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
       setTotalCount(0);
     }
     setLoading(false);
-  }, [token, dateRange.startDate, dateRange.endDate, page, pageSize, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter]);
+  }, [token, dateRange.startDate, dateRange.endDate, page, pageSize, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, debouncedSearch]);
 
   useEffect(() => {
     fetchPolicies();
@@ -166,7 +184,7 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
   useEffect(() => {
     setPage(1);
     setSelected(new Set());
-  }, [dateRange.startDate, dateRange.endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, pageSize]);
+  }, [dateRange.startDate, dateRange.endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, pageSize, debouncedSearch]);
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -458,6 +476,28 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
           </div>
         </div>
 
+        <div className="mt-3">
+          <div className="relative w-full sm:max-w-xs">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            <input
+              type="text"
+              value={clientSearch}
+              onChange={(e) => setClientSearch(e.target.value)}
+              placeholder={"Search by client name\u2026"}
+              className="w-full pl-9 pr-9 py-2.5 text-sm border border-slate-600 rounded-lg bg-navy-light text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-gold min-h-[44px]"
+            />
+            {clientSearch && (
+              <button
+                onClick={() => setClientSearch("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                aria-label="Clear search"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+
         <div className={`${filtersOpen ? "flex" : "hidden"} md:flex flex-wrap items-center gap-2 mt-3`}>
           <div ref={dateRef} className="relative">
             <button
@@ -629,9 +669,13 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="text-white font-medium truncate">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPolicy(p)}
+                        className="text-white font-medium truncate text-left hover:text-gold transition-colors"
+                      >
                         {p.client_first_name} {p.client_last_name}
-                      </p>
+                      </button>
                       <span className="text-gold font-semibold text-sm whitespace-nowrap">
                         ${Number(p.plan_premium).toFixed(2)}/mo
                       </span>
@@ -718,11 +762,12 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
                 {policies.map((p) => (
                   <tr
                     key={p.id}
-                    className={`transition-colors ${
+                    onClick={() => setSelectedPolicy(p)}
+                    className={`transition-colors cursor-pointer ${
                       selected.has(p.id) ? "bg-gold/5" : "hover:bg-navy-light/30"
                     }`}
                   >
-                    <td className="px-4 py-3 sticky left-0 bg-inherit">
+                    <td className="px-4 py-3 sticky left-0 bg-inherit" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={selected.has(p.id)}
@@ -878,6 +923,102 @@ export default function PoliciesTable({ token, lockedAgency }: PoliciesTableProp
           </div>
         </div>
       )}
+
+      {selectedPolicy && (
+        <PolicyDetailModal policy={selectedPolicy} onClose={() => setSelectedPolicy(null)} />
+      )}
+    </div>
+  );
+}
+
+function Field({ icon, label, value }: { icon?: ReactNode; label: string; value: ReactNode }) {
+  const display = value === null || value === undefined || value === "" ? "\u2014" : value;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[11px] uppercase tracking-wider text-slate-500 flex items-center gap-1">
+        {icon}
+        {label}
+      </span>
+      <span className="text-sm text-slate-200 break-words">{display}</span>
+    </div>
+  );
+}
+
+function PolicyDetailModal({ policy, onClose }: { policy: PolicyRow; onClose: () => void }) {
+  const p = policy;
+  const fullAddress = [p.address, [p.city, p.state].filter(Boolean).join(", "), p.zip]
+    .filter((s) => s && String(s).trim())
+    .join(" \u00b7 ");
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-navy rounded-xl shadow-xl max-w-2xl w-full overflow-hidden animate-scale-in border border-slate-700/50 max-h-[90vh] flex flex-col">
+        <div className="flex items-start justify-between gap-4 p-6 pb-4 border-b border-slate-700/50">
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold text-white truncate">
+              {p.client_first_name} {p.client_last_name}
+            </h3>
+            <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+              <StatusBadge status={p.status} />
+              <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${PRODUCT_TYPE_STYLES[p.product_type] || "bg-slate-700/30 text-slate-300 border border-slate-600"}`}>
+                {p.product_type}
+              </span>
+              <span className="text-xs text-slate-400">{p.carrier}</span>
+            </div>
+          </div>
+          <button onClick={onClose} className="flex-shrink-0 text-slate-500 hover:text-white transition-colors" aria-label="Close">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto p-6 space-y-6">
+          <section>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-gold/80 mb-3 flex items-center gap-1.5">
+              <User size={13} /> Client
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Name" value={`${p.client_first_name} ${p.client_last_name}`.trim()} />
+              <Field icon={<Phone size={11} />} label="Phone" value={p.phone} />
+              <Field icon={<Mail size={11} />} label="Email" value={p.email} />
+              <Field icon={<MapPin size={11} />} label="Address" value={fullAddress} />
+            </div>
+          </section>
+
+          <section>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-gold/80 mb-3 flex items-center gap-1.5">
+              <FileText size={13} /> Policy
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Policy #" value={p.policy_number ? <span className="font-mono text-xs">{p.policy_number}</span> : null} />
+              <Field label="Carrier" value={p.carrier} />
+              <Field label="Product Type" value={p.product_type} />
+              <Field label="Plan" value={resolvePlanName(p.plan_name)} />
+              <Field label="Monthly Premium" value={<span className="text-gold font-medium">${Number(p.plan_premium).toFixed(2)}</span>} />
+              <Field label="Status" value={<StatusBadge status={p.status} />} />
+              <Field icon={<Building2 size={11} />} label="Agency" value={p.agency} />
+              <Field icon={<Calendar size={11} />} label="Effective Date" value={p.policy_effective_date ? new Date(p.policy_effective_date).toLocaleDateString() : null} />
+              <Field icon={<Calendar size={11} />} label="App Submit Date" value={p.app_submit_date ? new Date(p.app_submit_date + "T00:00:00").toLocaleDateString() : null} />
+            </div>
+          </section>
+
+          <section>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-gold/80 mb-3 flex items-center gap-1.5">
+              <Contact size={13} /> Agent
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Name" value={`${p.agent_first_name} ${p.agent_last_name}`.trim()} />
+              <Field label="Writing Number" value={p.agent_number ? <span className="font-mono text-xs">{p.agent_number}</span> : null} />
+            </div>
+            <p className="mt-3 text-xs text-slate-500">
+              Agent email/phone aren&rsquo;t stored in the Sales Tracker. Contact details live in the contracting portal.
+            </p>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }
