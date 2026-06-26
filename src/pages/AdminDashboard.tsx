@@ -22,11 +22,12 @@ import InternalTab from "../components/production/InternalTab";
 import SettingsPanel from "../components/production/SettingsPanel";
 import AtRiskTab from "../components/production/AtRiskTab";
 import AgencyRosterPanel from "../components/admin/AgencyRosterPanel";
+import AgencyManagersPanel from "../components/admin/AgencyManagersPanel";
 import type { DateRange, DatePreset } from "../types/dashboard";
 import { getDateRange } from "../lib/dateUtils";
 import { adminResolveAgencySlug } from "../lib/api";
 
-type Tab = "overview" | "internal" | "at-risk" | "policies" | "leaderboard" | "settings" | "roster";
+type Tab = "overview" | "internal" | "at-risk" | "policies" | "leaderboard" | "settings" | "roster" | "managers";
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
@@ -111,6 +112,7 @@ export default function AdminDashboard() {
       { key: "policies", label: "Policies", icon: FileSpreadsheet },
       { key: "leaderboard", label: "Leaderboard", icon: Trophy },
       { key: "roster", label: "Roster", icon: ClipboardList },
+      { key: "managers", label: "Managers", icon: ShieldCheck },
       { key: "settings", label: "Settings", icon: Settings, globalOnly: true },
     ];
 
@@ -269,6 +271,15 @@ export default function AdminDashboard() {
       {activeTab === "roster" && (
         <div className="animate-fade-in">
           <AgencyRosterPanel token={token} overrideAgencyId={isImpersonating ? resolvedAgencyId : (isGlobalAdmin && !isAgencyView ? fymAgencyId : undefined)} />
+        </div>
+      )}
+
+      {activeTab === "managers" && (
+        <div className="animate-fade-in">
+          <AgencyManagersPanel
+            token={token}
+            scopeAgencyId={isAgencyView ? effectiveAgencyId : undefined}
+          />
         </div>
       )}
 

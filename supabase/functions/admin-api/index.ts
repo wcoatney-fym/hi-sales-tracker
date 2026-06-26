@@ -3604,18 +3604,16 @@ Deno.serve(async (req: Request) => {
             .eq("id", data.matched_agent_id);
         }
 
-        // Bridge: keep the per-person manager login in sync with the roster flag.
-        // Toggling the roster Shield on a matched agent mints (or reactivates) an
-        // agency_manager_credentials login; toggling off deactivates it (row kept
-        // for the password log / history).
+        // Bridge: keep the per-person manager login in sync with the roster flag,
+        // keyed off the roster entry so it works for matched AND unmatched entries.
+        // Toggle on mints (or reactivates) an agency_manager_credentials login;
+        // toggle off deactivates it (row kept for the password log / history).
         let bridgedManager: Record<string, unknown> | null = null;
-        if (data?.matched_agent_id) {
-          const agentId = data.matched_agent_id as string;
+        if (data) {
           const { data: existingCred } = await supabase
             .from("agency_manager_credentials")
             .select("id, username, password, is_active")
-            .eq("agency_id", mgrAgencyId)
-            .eq("agent_id", agentId)
+            .eq("roster_id", mgrRosterId)
             .maybeSingle();
 
           if (isManager) {
@@ -3630,8 +3628,6 @@ Deno.serve(async (req: Request) => {
             } else {
               const { data: ag } = await supabase
                 .from("agencies").select("slug, name").eq("id", mgrAgencyId).maybeSingle();
-              const { data: agent } = await supabase
-                .from("agents").select("first_name, last_name").eq("id", agentId).maybeSingle();
               const base = (ag?.slug || ag?.name || "agency").toString();
               const { count: existingCount } = await supabase
                 .from("agency_manager_credentials")
@@ -3639,14 +3635,16 @@ Deno.serve(async (req: Request) => {
                 .eq("agency_id", mgrAgencyId);
               const username = `${base}-mgr-${(existingCount || 0) + 1}`;
               const password = genPassword();
-              const displayName = agent ? `${agent.first_name} ${agent.last_name}`.trim() : username;
+              const rosterName = `${data.agent_first_name || ""} ${data.agent_last_name || ""}`.trim();
+              const displayName = rosterName || username;
               const { data: createdCred } = await supabase
                 .from("agency_manager_credentials")
                 .insert({
                   agency_id: mgrAgencyId,
                   username,
                   password,
-                  agent_id: agentId,
+                  agent_id: data.matched_agent_id || null,
+                  roster_id: mgrRosterId,
                   display_name: displayName,
                   added_by: session.email,
                 })
