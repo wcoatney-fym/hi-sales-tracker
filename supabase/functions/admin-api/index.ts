@@ -3604,7 +3604,66 @@ Deno.serve(async (req: Request) => {
             .eq("id", data.matched_agent_id);
         }
 
-        return jsonResponse(data);
+        // Bridge: keep the per-person manager login in sync with the roster flag.
+        // Toggling the roster Shield on a matched agent mints (or reactivates) an
+        // agency_manager_credentials login; toggling off deactivates it (row kept
+        // for the password log / history).
+        let bridgedManager: Record<string, unknown> | null = null;
+        if (data?.matched_agent_id) {
+          const agentId = data.matched_agent_id as string;
+          const { data: existingCred } = await supabase
+            .from("agency_manager_credentials")
+            .select("id, username, password, is_active")
+            .eq("agency_id", mgrAgencyId)
+            .eq("agent_id", agentId)
+            .maybeSingle();
+
+          if (isManager) {
+            if (existingCred) {
+              if (!existingCred.is_active) {
+                await supabase
+                  .from("agency_manager_credentials")
+                  .update({ is_active: true, updated_at: new Date().toISOString() })
+                  .eq("id", existingCred.id);
+              }
+              bridgedManager = { ...existingCred, is_active: true };
+            } else {
+              const { data: ag } = await supabase
+                .from("agencies").select("slug, name").eq("id", mgrAgencyId).maybeSingle();
+              const { data: agent } = await supabase
+                .from("agents").select("first_name, last_name").eq("id", agentId).maybeSingle();
+              const base = (ag?.slug || ag?.name || "agency").toString();
+              const { count: existingCount } = await supabase
+                .from("agency_manager_credentials")
+                .select("id", { count: "exact", head: true })
+                .eq("agency_id", mgrAgencyId);
+              const username = `${base}-mgr-${(existingCount || 0) + 1}`;
+              const password = genPassword();
+              const displayName = agent ? `${agent.first_name} ${agent.last_name}`.trim() : username;
+              const { data: createdCred } = await supabase
+                .from("agency_manager_credentials")
+                .insert({
+                  agency_id: mgrAgencyId,
+                  username,
+                  password,
+                  agent_id: agentId,
+                  display_name: displayName,
+                  added_by: session.email,
+                })
+                .select("id, username, password, is_active")
+                .maybeSingle();
+              bridgedManager = createdCred || null;
+            }
+          } else if (existingCred && existingCred.is_active) {
+            await supabase
+              .from("agency_manager_credentials")
+              .update({ is_active: false, updated_at: new Date().toISOString() })
+              .eq("id", existingCred.id);
+            bridgedManager = { ...existingCred, is_active: false };
+          }
+        }
+
+        return jsonResponse({ ...data, bridged_manager: bridgedManager });
       }
 
       case "agency-add-writing-number": {

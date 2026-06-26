@@ -169,7 +169,11 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
 
   const handleToggleManager = async (entry: RosterEntry) => {
     try {
-      await agencySetManager(token, entry.id, !entry.is_agency_manager, overrideAgencyId || undefined);
+      const res = await agencySetManager(token, entry.id, !entry.is_agency_manager, overrideAgencyId || undefined) as { bridged_manager?: { username?: string; password?: string; is_active?: boolean } | null };
+      const bm = res?.bridged_manager;
+      if (bm && bm.is_active && bm.username && bm.password) {
+        alert(`Manager login created:\n\nUsername: ${bm.username}\nPassword: ${bm.password}\n\nFind it anytime under Settings → Agency Managers. They sign in at /manager.`);
+      }
       fetchRoster();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not update manager status");
