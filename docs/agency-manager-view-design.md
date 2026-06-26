@@ -41,25 +41,31 @@ Communication is **two-way** between manager and agent. Dispositions are **manag
 ### 4.1 Per-person manager identity (the foundation)
 Today an agency logs in with one shared `agency_admin` username/password. The manager role needs **per-person** identity so we can attribute nudges/dispositions and let a manager belong to multiple agencies.
 
-**Recommended approach:** a real membership table.
+**DECISION (Charlie, 2026-06-26):**
+- Each manager gets their **own login** — per-person, not a shared agency credential.
+- **Username** keeps the same format/name as the existing admin login (agency-name based).
+- **Password is unique per manager.** It is **viewable by the agency admin** (their own managers) **and** in an **overall password log in the FYM global-admin view** — so passwords can be resent or changed.
+- A manager is **exclusive to the single agency** they're assigned/added to (no multi-agency managers).
+- Managers are **listed separately from the agent roster** — a promoted agent does **not** become a duplicate row in the agent roster; managers render in their own list.
+
+**Implementation:** reuse the existing `admin_credentials` / `admin_sessions` rail (already `agency_admin`, scoped by `agency_id`), but make it **per-person** — one credential row per manager instead of one shared row per agency. Add `agent_id` (set when promoted from roster, null for added non-agents) and `display_name`. Because each row is one person scoped to one `agency_id`, exclusivity is enforced by the schema. The FYM password log is a global-admin read over `admin_credentials WHERE role = 'agency_admin'`; the agency-admin view reads only its own agency's rows.
 
 ```
-agency_members
-  id            uuid pk
-  agency_id     uuid fk -> agencies(id)
-  user_id       uuid          -- internal person id (see note)
-  agent_id      uuid fk -> agents(id) nullable   -- set when manager was promoted from roster
-  role          text check (role in ('manager','agent'))
-  is_agent      boolean
-  display_name  text
-  added_by      uuid
-  created_at    timestamptz
-  unique (agency_id, user_id)
+admin_credentials  (extend existing)
+  id                  uuid pk          -- exists
+  agency_id           uuid fk          -- exists; single agency = exclusivity
+  email_domain        text             -- exists; the username (admin-login format)
+  password            text             -- exists; now UNIQUE PER PERSON, surfaced in admin views
+  role                text             -- exists; 'agency_admin' = manager
++ agent_id            uuid fk -> agents(id) nullable   -- set if promoted from roster
++ display_name        text
+  session_duration_days integer        -- exists
+  created_at          timestamptz      -- exists
 ```
 
-Auth then scopes off "which agencies am I a manager of," not a single `agency_id` on a session. A manager can be promoted from the roster (`agent_id` set) or added as a non-agent (`agent_id` null).
-
-> **Open decision (needs Chris):** whether manager login reuses the existing `admin_credentials`/`admin_sessions` rail (add a linked `agent_id` + per-user rows) or gets its own credential path. This touches the contracting/onboarding identity flow, so it's the one call to lock before the migration is final.
+> **UI note:** managers surface in a dedicated "Agency Managers" list, separate from the agent roster (`AgencyRosterPanel`). Promoting an agent links `agent_id` but creates a manager entry, not a second roster row.
+>
+> **Worth a Chris heads-up** (not a blocker): this lights up the `admin_credentials` rail as a per-person login store, which brushes the contracting/onboarding identity flow.
 
 ### 4.2 Two-way nudge thread
 Extend `at_risk_activities` (or a sibling `policy_notes` table) so it reads as a conversation:
@@ -121,7 +127,7 @@ Click a policy → note thread + disposition control.
 - No direct pushes to `main`; no production deploy without sign-off.
 
 ## 7. Build sequence (proposed)
-1. **Manager identity** — `agency_members` migration + auth scoping (after Chris gut-check). *Foundation; nothing else lands until this is settled.*
+1. **Manager identity** — extend `admin_credentials` (per-person, `agent_id` + `display_name`) + auth scoping + password-log reads (agency-admin own rows, FYM global-admin all). *Foundation; decided.*
 2. **Nudge thread** — extend `at_risk_activities` with `author_role` + `kind`; thread API in `admin-api` / `agent-webhook`.
 3. **Disposition** — `policy_dispositions` table + manager-gated write.
 4. **Notifications + popup** — `notifications` table + agent-portal poll-on-load modal.
@@ -131,7 +137,7 @@ Click a policy → note thread + disposition control.
 
 ## 8. What I need to proceed
 - **Approval of this outline.**
-- **The one identity decision** (Section 4.1) — ideally a quick Chris gut-check, since it touches onboarding/login.
+- The identity decision (§4.1) is **locked** (Charlie, 2026-06-26). Optional Chris heads-up since it lights up `admin_credentials` as a per-person login store.
 - Your explicit go-ahead to write code (per the agreed gate: outline approved first, then implementation).
 
 ---
