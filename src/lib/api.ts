@@ -1012,8 +1012,8 @@ export async function agencyReactivateRosterEntry(token: string, rosterId: strin
   return callApi("admin-api", { action: "agency-reactivate-roster-entry", token, rosterId, overrideAgencyId });
 }
 
-export async function agencySetManager(token: string, rosterId: string, isManager: boolean) {
-  return callApi("admin-api", { action: "agency-set-manager", token, rosterId, isManager });
+export async function agencySetManager(token: string, rosterId: string, isManager: boolean, overrideAgencyId?: string) {
+  return callApi("admin-api", { action: "agency-set-manager", token, rosterId, isManager, overrideAgencyId });
 }
 
 export async function agencyAddWritingNumber(token: string, agentId: string, carrierName: string, writingNumber: string) {

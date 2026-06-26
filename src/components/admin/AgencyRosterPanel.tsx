@@ -169,9 +169,11 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
 
   const handleToggleManager = async (entry: RosterEntry) => {
     try {
-      await agencySetManager(token, entry.id, !entry.is_agency_manager);
+      await agencySetManager(token, entry.id, !entry.is_agency_manager, overrideAgencyId || undefined);
       fetchRoster();
-    } catch { /* ignore */ }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update manager status");
+    }
   };
 
   const getAgentWritingNumbers = (agentId: string) => {
