@@ -48,6 +48,16 @@ const LOWERCASE_PARTICLES = new Set([
   "bin", "ibn",
 ]);
 
+// Generate a 14-char password (same charset/policy as reset-agency-credential).
+function genPassword(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*";
+  let out = "";
+  const arr = new Uint8Array(14);
+  crypto.getRandomValues(arr);
+  for (let i = 0; i < 14; i++) out += chars[arr[i] % chars.length];
+  return out;
+}
+
 function capitalizeWord(word: string): string {
   if (word.length === 0) return word;
   if (word.length === 1) return word.toUpperCase();
@@ -240,6 +250,53 @@ Deno.serve(async (req: Request) => {
         .lt("expires_at", new Date().toISOString());
 
       return jsonResponse({ token, email, role: cred.role, agency_id: cred.agency_id, agency_slug: agencySlug, agency_name: agencyName });
+    }
+
+    // Per-person Agency Manager login (separate store from shared agency-admin creds)
+    if (action === "manager-login") {
+      const { username, password } = body;
+      if (!username || !password) {
+        return jsonResponse({ error: "Username and password are required" }, 400);
+      }
+      const { data: mgr } = await supabase
+        .from("agency_manager_credentials")
+        .select("id, agency_id, username, password, display_name, is_active")
+        .ilike("username", username)
+        .maybeSingle();
+
+      if (!mgr || !mgr.is_active || password !== mgr.password) {
+        return jsonResponse({ error: "Invalid credentials" }, 401);
+      }
+
+      const { data: agency } = await supabase
+        .from("agencies")
+        .select("slug, name")
+        .eq("id", mgr.agency_id)
+        .maybeSingle();
+
+      const mgrToken = crypto.randomUUID();
+      const mgrExpires = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+      const { error: msErr } = await supabase.from("admin_sessions").insert({
+        email: mgr.username,
+        token: mgrToken,
+        expires_at: mgrExpires,
+        role: "manager",
+        agency_id: mgr.agency_id,
+        agency_slug: agency?.slug || null,
+      });
+      if (msErr) throw msErr;
+      await supabase.from("admin_sessions").delete().lt("expires_at", new Date().toISOString());
+
+      return jsonResponse({
+        token: mgrToken,
+        manager_id: mgr.id,
+        username: mgr.username,
+        display_name: mgr.display_name,
+        role: "manager",
+        agency_id: mgr.agency_id,
+        agency_slug: agency?.slug || null,
+        agency_name: agency?.name || null,
+      });
     }
 
     const { token } = body;
@@ -4692,6 +4749,225 @@ Deno.serve(async (req: Request) => {
         const { data: submissions, count, error: lsErr } = await query;
         if (lsErr) throw lsErr;
         return jsonResponse({ submissions: submissions || [], total: count || 0 });
+      }
+
+      // ===================== Agency Manager view =====================
+      // Helpers: generate a readable unique-ish password
+      // (manager management is used by agency_admin for own agency, global_admin for all)
+
+      case "list-agency-managers": {
+        if (session.role !== "global_admin" && session.role !== "agency_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+        let q = supabase
+          .from("agency_manager_credentials")
+          .select("id, agency_id, username, password, agent_id, display_name, is_active, created_at")
+          .order("created_at", { ascending: true });
+        if (session.role === "agency_admin") {
+          q = q.eq("agency_id", session.agency_id);
+        } else if (body.agency_id) {
+          q = q.eq("agency_id", body.agency_id);
+        }
+        const { data: managers, error: lmErr } = await q;
+        if (lmErr) throw lmErr;
+        return jsonResponse({ managers: managers || [] });
+      }
+
+      case "create-agency-manager": {
+        if (session.role !== "global_admin" && session.role !== "agency_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+        const agencyId = session.role === "agency_admin" ? session.agency_id : body.agency_id;
+        if (!agencyId) return jsonResponse({ error: "agency_id is required" }, 400);
+        const { agent_id: promoteAgentId, display_name } = body;
+
+        const { data: ag } = await supabase
+          .from("agencies").select("slug, name").eq("id", agencyId).maybeSingle();
+        if (!ag) return jsonResponse({ error: "Agency not found" }, 404);
+
+        let mgrName = display_name as string | undefined;
+        if (promoteAgentId) {
+          const { data: agent } = await supabase
+            .from("agents").select("id, first_name, last_name, agency_id").eq("id", promoteAgentId).maybeSingle();
+          if (!agent) return jsonResponse({ error: "Agent not found" }, 404);
+          if (!mgrName) mgrName = `${agent.first_name} ${agent.last_name}`.trim();
+        }
+        if (!mgrName) return jsonResponse({ error: "display_name or agent_id is required" }, 400);
+
+        // Username keeps the admin-login format: <AgencySlug>-mgr-<n>
+        const base = (ag.slug || ag.name || "agency").toString();
+        const { count: existingCount } = await supabase
+          .from("agency_manager_credentials")
+          .select("id", { count: "exact", head: true })
+          .eq("agency_id", agencyId);
+        const username = `${base}-mgr-${(existingCount || 0) + 1}`;
+        const password = genPassword();
+
+        const { data: created, error: cmErr } = await supabase
+          .from("agency_manager_credentials")
+          .insert({
+            agency_id: agencyId,
+            username,
+            password,
+            agent_id: promoteAgentId || null,
+            display_name: mgrName,
+            added_by: session.email,
+          })
+          .select("id, agency_id, username, password, agent_id, display_name, is_active, created_at")
+          .single();
+        if (cmErr) throw cmErr;
+        return jsonResponse({ manager: created });
+      }
+
+      case "reset-agency-manager-password": {
+        if (session.role !== "global_admin" && session.role !== "agency_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+        const { manager_id } = body;
+        if (!manager_id) return jsonResponse({ error: "manager_id is required" }, 400);
+        const guard = session.role === "agency_admin" ? { agency_id: session.agency_id } : {};
+        const { data: target } = await supabase
+          .from("agency_manager_credentials").select("id, agency_id").eq("id", manager_id).maybeSingle();
+        if (!target || (guard.agency_id && target.agency_id !== guard.agency_id)) {
+          return jsonResponse({ error: "Not found" }, 404);
+        }
+        const newPassword = genPassword();
+        const { error: rpErr } = await supabase
+          .from("agency_manager_credentials")
+          .update({ password: newPassword, updated_at: new Date().toISOString() })
+          .eq("id", manager_id);
+        if (rpErr) throw rpErr;
+        return jsonResponse({ manager_id, password: newPassword });
+      }
+
+      case "toggle-agency-manager": {
+        if (session.role !== "global_admin" && session.role !== "agency_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+        const { manager_id, is_active } = body;
+        if (!manager_id) return jsonResponse({ error: "manager_id is required" }, 400);
+        const { data: target } = await supabase
+          .from("agency_manager_credentials").select("id, agency_id").eq("id", manager_id).maybeSingle();
+        if (!target || (session.role === "agency_admin" && target.agency_id !== session.agency_id)) {
+          return jsonResponse({ error: "Not found" }, 404);
+        }
+        const { error: tgErr } = await supabase
+          .from("agency_manager_credentials")
+          .update({ is_active: is_active !== false, updated_at: new Date().toISOString() })
+          .eq("id", manager_id);
+        if (tgErr) throw tgErr;
+        return jsonResponse({ manager_id, is_active: is_active !== false });
+      }
+
+      // ----- Manager-role data endpoints (role = 'manager') -----
+      case "mgr-at-risk-worklist": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
+        // Policies for this manager's agency
+        const { data: agencyPolicies, error: apErr } = await supabase
+          .from("form_submissions")
+          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date")
+          .eq("agency_id", session.agency_id);
+        if (apErr) throw apErr;
+        const policyIds = (agencyPolicies || []).map((p: { id: string }) => p.id);
+        if (policyIds.length === 0) return jsonResponse({ worklist: [] });
+
+        const [{ data: flags }, { data: disps }] = await Promise.all([
+          supabase
+            .from("at_risk_activities")
+            .select("policy_id, kind, created_at")
+            .eq("kind", "flag")
+            .in("policy_id", policyIds),
+          supabase
+            .from("policy_dispositions")
+            .select("policy_id, disposition, follow_up_at, set_at")
+            .in("policy_id", policyIds),
+        ]);
+        const flaggedIds = new Set((flags || []).map((f: { policy_id: string }) => f.policy_id));
+        const dispByPolicy = new Map(
+          (disps || []).map((d: { policy_id: string }) => [d.policy_id, d])
+        );
+        const worklist = (agencyPolicies || [])
+          .filter((p: { id: string }) => flaggedIds.has(p.id))
+          .map((p: { id: string }) => ({ ...p, disposition: dispByPolicy.get(p.id) || null }));
+        return jsonResponse({ worklist, agency_id: session.agency_id });
+      }
+
+      case "mgr-policy-thread": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
+        const { policy_id } = body;
+        if (!policy_id) return jsonResponse({ error: "policy_id is required" }, 400);
+        const { data: thread, error: thErr } = await supabase
+          .from("at_risk_activities")
+          .select("id, policy_id, agent_id, author_role, kind, note, manager_id, created_at")
+          .eq("policy_id", policy_id)
+          .order("created_at", { ascending: true });
+        if (thErr) throw thErr;
+        const { data: disp } = await supabase
+          .from("policy_dispositions")
+          .select("disposition, note, follow_up_at, set_at")
+          .eq("policy_id", policy_id)
+          .maybeSingle();
+        return jsonResponse({ thread: thread || [], disposition: disp || null });
+      }
+
+      case "mgr-post-note": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
+        const { policy_id, agent_id, note, kind = "note" } = body;
+        if (!policy_id || !note) return jsonResponse({ error: "policy_id and note are required" }, 400);
+        if (!["note", "nudge", "flag"].includes(kind)) return jsonResponse({ error: "invalid kind" }, 400);
+        const { data: mgr } = await supabase
+          .from("agency_manager_credentials").select("id").ilike("username", session.email).maybeSingle();
+        const { data: activity, error: anErr } = await supabase
+          .from("at_risk_activities")
+          .insert({
+            policy_id,
+            agent_id: agent_id || null,
+            admin_user: session.email,
+            author_role: "manager",
+            kind,
+            action_type: "other",
+            note,
+            manager_id: mgr?.id || null,
+          })
+          .select("id")
+          .single();
+        if (anErr) throw anErr;
+        if (agent_id && (kind === "nudge" || kind === "flag")) {
+          await supabase.from("notifications").insert({
+            recipient_kind: "agent",
+            recipient_id: agent_id,
+            agency_id: session.agency_id,
+            policy_id,
+            activity_id: activity.id,
+            type: kind,
+            body: note.slice(0, 280),
+          });
+        }
+        return jsonResponse({ activity_id: activity.id });
+      }
+
+      case "mgr-set-disposition": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
+        const { policy_id, disposition, note = "", follow_up_at } = body;
+        if (!policy_id || !disposition) return jsonResponse({ error: "policy_id and disposition are required" }, 400);
+        if (!["working", "secured", "lost", "follow_up"].includes(disposition)) {
+          return jsonResponse({ error: "invalid disposition" }, 400);
+        }
+        const { data: mgr } = await supabase
+          .from("agency_manager_credentials").select("id").ilike("username", session.email).maybeSingle();
+        const { error: dsErr } = await supabase
+          .from("policy_dispositions")
+          .upsert({
+            policy_id,
+            agency_id: session.agency_id,
+            disposition,
+            note,
+            follow_up_at: follow_up_at || null,
+            set_by: mgr?.id || null,
+            set_at: new Date().toISOString(),
+          }, { onConflict: "policy_id" });
+        if (dsErr) throw dsErr;
+        return jsonResponse({ policy_id, disposition });
       }
 
       default:

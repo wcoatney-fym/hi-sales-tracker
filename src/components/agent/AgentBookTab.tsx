@@ -22,6 +22,7 @@ import {
 } from "../../lib/api";
 import { resolvePlanName } from "../../lib/planCodes";
 import type { AttentionState } from "../../types/leaderboard";
+import AgentNudgesSection from "./AgentNudgesSection";
 
 interface BookCounts {
   active: number;
@@ -178,6 +179,9 @@ export default function AgentBookTab({ sessionToken }: AgentBookTabProps) {
 
   return (
     <div className="space-y-5 animate-fade-in">
+      {/* Nudges from my manager (flagged policies + reply thread) */}
+      <AgentNudgesSection sessionToken={sessionToken} />
+
       {/* Book Summary KPIs */}
       {counts && (
         <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">

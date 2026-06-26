@@ -1652,6 +1652,119 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ actions: data || [] });
     }
 
+    // ---- Agency Manager view: agent side ----
+    if (action === "agent-get-notifications") {
+      const authHeader = req.headers.get("X-Agent-Token") || "";
+      if (!authHeader) return errorResponse("No session token", 401);
+      const { data: session } = await supabase
+        .from("agent_sessions").select("agent_id, expires_at").eq("token", authHeader).maybeSingle();
+      if (!session || new Date(session.expires_at) < new Date()) return errorResponse("Session expired", 401);
+
+      const onlyUnread = new URL(req.url).searchParams.get("unread") === "1";
+      let nq = supabase
+        .from("notifications")
+        .select("id, policy_id, activity_id, type, body, read_at, created_at")
+        .eq("recipient_kind", "agent")
+        .eq("recipient_id", session.agent_id)
+        .order("created_at", { ascending: false });
+      if (onlyUnread) nq = nq.is("read_at", null);
+      const { data: notifs, error: nErr } = await nq;
+      if (nErr) throw nErr;
+      return jsonResponse({ notifications: notifs || [] });
+    }
+
+    if (action === "agent-mark-notifications-read") {
+      const authHeader = req.headers.get("X-Agent-Token") || "";
+      if (!authHeader) return errorResponse("No session token", 401);
+      const { data: session } = await supabase
+        .from("agent_sessions").select("agent_id, expires_at").eq("token", authHeader).maybeSingle();
+      if (!session || new Date(session.expires_at) < new Date()) return errorResponse("Session expired", 401);
+
+      const body = await req.json();
+      const ids: string[] | undefined = body.ids;
+      let uq = supabase
+        .from("notifications")
+        .update({ read_at: new Date().toISOString() })
+        .eq("recipient_kind", "agent")
+        .eq("recipient_id", session.agent_id)
+        .is("read_at", null);
+      if (Array.isArray(ids) && ids.length > 0) uq = uq.in("id", ids);
+      const { error: uErr } = await uq;
+      if (uErr) throw uErr;
+      return jsonResponse({ success: true });
+    }
+
+    if (action === "agent-get-policy-thread") {
+      const authHeader = req.headers.get("X-Agent-Token") || "";
+      if (!authHeader) return errorResponse("No session token", 401);
+      const { data: session } = await supabase
+        .from("agent_sessions").select("agent_id, expires_at").eq("token", authHeader).maybeSingle();
+      if (!session || new Date(session.expires_at) < new Date()) return errorResponse("Session expired", 401);
+
+      const policyId = new URL(req.url).searchParams.get("policy_id");
+      if (!policyId) return errorResponse("policy_id required", 400);
+      const { data: thread, error: tErr } = await supabase
+        .from("at_risk_activities")
+        .select("id, policy_id, author_role, kind, note, created_at")
+        .eq("policy_id", policyId)
+        .order("created_at", { ascending: true });
+      if (tErr) throw tErr;
+      return jsonResponse({ thread: thread || [] });
+    }
+
+    if (action === "agent-reply-note") {
+      const authHeader = req.headers.get("X-Agent-Token") || "";
+      if (!authHeader) return errorResponse("No session token", 401);
+      const { data: session } = await supabase
+        .from("agent_sessions").select("agent_id, expires_at").eq("token", authHeader).maybeSingle();
+      if (!session || new Date(session.expires_at) < new Date()) return errorResponse("Session expired", 401);
+
+      const body = await req.json();
+      const { policyId, note } = body;
+      if (!policyId || !note) return errorResponse("policyId and note required", 400);
+
+      // Agent can only reply on policies they own (match by writing number)
+      const { data: agent } = await supabase
+        .from("agents").select("unl_writing_number, gtl_writing_number, agency_id").eq("id", session.agent_id).maybeSingle();
+      const { data: policy } = await supabase
+        .from("form_submissions").select("id, agent_number, agency_id").eq("id", policyId).maybeSingle();
+      if (!policy) return errorResponse("Policy not found", 404);
+      const ownsByNumber = !!agent && (agent.unl_writing_number === policy.agent_number || agent.gtl_writing_number === policy.agent_number);
+      if (!ownsByNumber) return errorResponse("Forbidden", 403);
+
+      const { data: activity, error: rErr } = await supabase
+        .from("at_risk_activities")
+        .insert({
+          policy_id: policyId,
+          agent_id: session.agent_id,
+          author_role: "agent",
+          kind: "note",
+          action_type: "other",
+          note,
+        })
+        .select("id")
+        .single();
+      if (rErr) throw rErr;
+
+      // Notify the agency's managers (badge)
+      const { data: managers } = await supabase
+        .from("agency_manager_credentials").select("id").eq("agency_id", policy.agency_id).eq("is_active", true);
+      if (managers && managers.length > 0) {
+        await supabase.from("notifications").insert(
+          managers.map((m: { id: string }) => ({
+            recipient_kind: "manager",
+            recipient_id: m.id,
+            agency_id: policy.agency_id,
+            policy_id: policyId,
+            activity_id: activity.id,
+            type: "reply",
+            body: String(note).slice(0, 280),
+          }))
+        );
+      }
+      return jsonResponse({ activity_id: activity.id });
+    }
+
     if (action === "agent-onboarding-status") {
       const authHeader = req.headers.get("X-Agent-Token") || "";
       if (!authHeader) return errorResponse("No session token", 401);
