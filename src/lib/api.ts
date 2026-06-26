@@ -34,7 +34,8 @@ async function callApi(
       response.status === 401 &&
       body.action !== "login" &&
       body.action !== "logout" &&
-      body.action !== "verify-session"
+      body.action !== "verify-session" &&
+      body.action !== "manager-login"
     ) {
       localStorage.removeItem("admin_token");
       localStorage.removeItem("admin_email");
@@ -567,8 +568,8 @@ export async function getLeaderboard(period: string) {
 }
 
 export async function getAgencyLeaderboard(agencyId: string, period: string) {
-  // Agency data requires an authorized session (admin or agent)
-  const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || "";
+  // Agency data requires an authorized session (admin, agent, or manager)
+  const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
   return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token });
 }
 
@@ -577,8 +578,8 @@ export async function getQualityMetrics(
   agencyName?: string | null,
   agencyNames?: string[] | null,
 ) {
-  // Quality data requires an authorized session (admin or agent)
-  const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || "";
+  // Quality data requires an authorized session (admin, agent, or manager)
+  const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
   return callLeaderboardApi({
     action: "get-quality-metrics",
     ...(agencyNames && agencyNames.length ? { agency_names: agencyNames.join(",") } : {}),
@@ -1118,6 +1119,202 @@ export async function agentCompleteOnboarding(sessionToken: string) {
 
 export async function adminGetOnboardingStatus(token: string) {
   return callApi("admin-api", { action: "admin-onboarding-status", token });
+}
+
+// ---------------------------------------------------------------------------
+// Agency Manager View
+// ---------------------------------------------------------------------------
+
+export type ManagerDisposition = "working" | "secured" | "lost" | "follow_up";
+export type ThreadKind = "note" | "nudge" | "flag";
+export type ThreadAuthorRole = "manager" | "agent";
+
+export interface ManagerSession {
+  token: string;
+  manager_id: string;
+  username: string;
+  display_name: string;
+  role: "manager";
+  agency_id: string;
+  agency_slug: string;
+  agency_name: string;
+}
+
+export interface AgencyManager {
+  id: string;
+  agency_id: string;
+  username: string;
+  password: string;
+  agent_id: string | null;
+  display_name: string;
+  is_active: boolean;
+  created_at: string;
+  // present in the global-admin password log
+  agency_name?: string;
+  agency_slug?: string;
+}
+
+export interface ManagerWorklistPolicy {
+  id: string;
+  policy_number: string | null;
+  client_first_name: string;
+  client_last_name: string;
+  agent_first_name: string;
+  agent_last_name: string;
+  agent_number: string | null;
+  product_type: string;
+  carrier: string;
+  plan_premium: number;
+  status: string;
+  paid_to_date: string | null;
+  policy_effective_date: string;
+  disposition: ManagerDisposition | null;
+}
+
+export interface PolicyThreadEntry {
+  id: string;
+  policy_id: string;
+  agent_id: string | null;
+  author_role: ThreadAuthorRole;
+  kind: ThreadKind;
+  note: string;
+  manager_id: string | null;
+  created_at: string;
+}
+
+export interface AgentNotification {
+  id: string;
+  policy_id: string | null;
+  activity_id: string | null;
+  type: "nudge" | "flag" | "reply";
+  body: string;
+  read_at: string | null;
+  created_at: string;
+}
+
+// --- Manager auth (admin-api, token in body) ---
+export async function managerLogin(username: string, password: string): Promise<ManagerSession> {
+  const data = await callApi("admin-api", { action: "manager-login", username, password });
+  return data as unknown as ManagerSession;
+}
+
+// --- Manager management (global_admin / agency_admin; admin token in body) ---
+export async function adminListAgencyManagers(token: string, agencyId?: string) {
+  return callApi("admin-api", {
+    action: "list-agency-managers",
+    token,
+    ...(agencyId ? { agency_id: agencyId } : {}),
+  });
+}
+
+export async function adminCreateAgencyManager(
+  token: string,
+  opts: { agencyId?: string; agentId?: string; displayName?: string }
+) {
+  return callApi("admin-api", {
+    action: "create-agency-manager",
+    token,
+    ...(opts.agencyId ? { agency_id: opts.agencyId } : {}),
+    ...(opts.agentId ? { agent_id: opts.agentId } : {}),
+    ...(opts.displayName ? { display_name: opts.displayName } : {}),
+  });
+}
+
+export async function adminResetAgencyManagerPassword(token: string, managerId: string) {
+  return callApi("admin-api", { action: "reset-agency-manager-password", token, manager_id: managerId });
+}
+
+export async function adminToggleAgencyManager(token: string, managerId: string, isActive: boolean) {
+  return callApi("admin-api", { action: "toggle-agency-manager", token, manager_id: managerId, is_active: isActive });
+}
+
+// --- Manager data (role: manager; manager token in body) ---
+export async function mgrGetAtRiskWorklist(token: string) {
+  return callApi("admin-api", { action: "mgr-at-risk-worklist", token });
+}
+
+export async function mgrGetPolicyThread(token: string, policyId: string) {
+  return callApi("admin-api", { action: "mgr-policy-thread", token, policy_id: policyId });
+}
+
+export async function mgrPostNote(
+  token: string,
+  opts: { policyId: string; agentId?: string; note: string; kind: ThreadKind }
+) {
+  return callApi("admin-api", {
+    action: "mgr-post-note",
+    token,
+    policy_id: opts.policyId,
+    ...(opts.agentId ? { agent_id: opts.agentId } : {}),
+    note: opts.note,
+    kind: opts.kind,
+  });
+}
+
+export async function mgrSetDisposition(
+  token: string,
+  opts: { policyId: string; disposition: ManagerDisposition; note?: string; followUpAt?: string }
+) {
+  return callApi("admin-api", {
+    action: "mgr-set-disposition",
+    token,
+    policy_id: opts.policyId,
+    disposition: opts.disposition,
+    ...(opts.note ? { note: opts.note } : {}),
+    ...(opts.followUpAt ? { follow_up_at: opts.followUpAt } : {}),
+  });
+}
+
+// --- Agent-side notifications & threads (leaderboard-api, X-Agent-Token header) ---
+export async function agentGetNotifications(sessionToken: string, unreadOnly = false) {
+  const params = new URLSearchParams({ action: "agent-get-notifications" });
+  if (unreadOnly) params.set("unread", "1");
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?${params}`,
+    { method: "GET", headers: { ...baseHeaders, "X-Agent-Token": sessionToken } }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to fetch notifications");
+  return data;
+}
+
+export async function agentMarkNotificationsRead(sessionToken: string, ids?: string[]) {
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-mark-notifications-read`,
+    {
+      method: "POST",
+      headers: { ...baseHeaders, "X-Agent-Token": sessionToken },
+      body: JSON.stringify(ids && ids.length ? { ids } : {}),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to mark notifications read");
+  return data;
+}
+
+export async function agentGetPolicyThread(sessionToken: string, policyId: string) {
+  const params = new URLSearchParams({ action: "agent-get-policy-thread", policy_id: policyId });
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?${params}`,
+    { method: "GET", headers: { ...baseHeaders, "X-Agent-Token": sessionToken } }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to fetch policy thread");
+  return data;
+}
+
+export async function agentReplyNote(sessionToken: string, policyId: string, note: string) {
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-reply-note`,
+    {
+      method: "POST",
+      headers: { ...baseHeaders, "X-Agent-Token": sessionToken },
+      body: JSON.stringify({ policyId, note }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to post reply");
+  return data;
 }
 
 export async function adminCompleteOnboarding(token: string) {

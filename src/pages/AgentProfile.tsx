@@ -14,6 +14,7 @@ import { TIER_CONFIG } from "../types/leaderboard";
 import AgentDashboardTab from "../components/agent/AgentDashboardTab";
 import AgentBookTab from "../components/agent/AgentBookTab";
 import AgentAchievementsTab from "../components/agent/AgentAchievementsTab";
+import AgentNotificationsModal from "../components/agent/AgentNotificationsModal";
 
 interface AgentProfileData {
   xp: number;
@@ -200,6 +201,14 @@ export default function AgentProfile() {
           />
         )}
       </div>
+
+      {/* Manager nudge/flag popup on portal load */}
+      {sessionToken && (
+        <AgentNotificationsModal
+          sessionToken={sessionToken}
+          onReview={() => setActiveTab("book")}
+        />
+      )}
 
       {/* Mobile Bottom Tab Bar */}
       <nav className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-navy border-t border-slate-700/50 px-2 pb-safe">
