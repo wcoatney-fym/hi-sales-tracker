@@ -65,8 +65,8 @@ export default function BillingModeSection({
     try {
       const res = await adminGetBillingModeBreakdown(
         token,
-        dateRange.start,
-        dateRange.end,
+        dateRange.startDate,
+        dateRange.endDate,
         agencyFilter,
         agencies,
         agentNumber
@@ -79,7 +79,7 @@ export default function BillingModeSection({
     } finally {
       setLoading(false);
     }
-  }, [token, dateRange.start, dateRange.end, agencyFilter, agencies, agentNumber]);
+  }, [token, dateRange.startDate, dateRange.endDate, agencyFilter, agencies, agentNumber]);
 
   useEffect(() => {
     fetchData();

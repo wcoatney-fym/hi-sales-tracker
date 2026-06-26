@@ -33,8 +33,8 @@ export default function LeadIntakeForm() {
   useEffect(() => {
     getLeadFormConfig()
       .then((data) => {
-        setEnabled(data.enabled);
-        setVendors(data.vendors || []);
+        setEnabled(data.enabled as boolean);
+        setVendors((data.vendors as LeadVendor[]) || []);
       })
       .catch(() => setEnabled(false))
       .finally(() => setLoading(false));
@@ -56,7 +56,7 @@ export default function LeadIntakeForm() {
       const result = await verifyAgent(fn, ln, carrier);
       if (result.found) {
         setVerified(true);
-        setAgentNumber(result.agentNumber);
+        setAgentNumber(result.agentNumber as string);
       } else {
         setVerified(false);
         setAgentNumber("");
