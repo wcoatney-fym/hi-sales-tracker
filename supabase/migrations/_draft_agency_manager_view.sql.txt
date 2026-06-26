@@ -3,16 +3,27 @@
 -- login on the existing admin_credentials rail, exclusive to one agency.
 -- Renamed to .txt so it is NOT picked up by the migration runner.
 
--- 1. Per-person manager identity (extend existing admin_credentials)
---    One row per manager (NOT one shared row per agency).
---    role='agency_admin' = manager; agency_id = the single agency (exclusivity).
-ALTER TABLE admin_credentials
-  ADD COLUMN IF NOT EXISTS agent_id     uuid REFERENCES agents(id) ON DELETE SET NULL,
-  ADD COLUMN IF NOT EXISTS display_name text;
-CREATE INDEX IF NOT EXISTS idx_admin_credentials_agency ON admin_credentials(agency_id);
-CREATE INDEX IF NOT EXISTS idx_admin_credentials_agent  ON admin_credentials(agent_id);
--- Password log: global-admin reads admin_credentials WHERE role='agency_admin';
--- agency-admin reads only its own agency_id rows (enforced in admin-api).
+-- 1. Per-person manager identity (NEW table; admin_credentials stays UNCHANGED).
+--    The existing agency ADMIN login remains shared/universal per agency.
+--    Only MANAGER credentials are per-person, exclusive to one agency.
+CREATE TABLE IF NOT EXISTS agency_manager_credentials (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agency_id     uuid NOT NULL REFERENCES agencies(id) ON DELETE CASCADE,
+  username      text NOT NULL,                 -- admin-login format
+  password      text NOT NULL,                 -- unique per manager
+  agent_id      uuid REFERENCES agents(id) ON DELETE SET NULL,  -- set if promoted from roster
+  display_name  text,
+  added_by      uuid,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT agency_manager_credentials_unique UNIQUE (agency_id, username)
+);
+CREATE INDEX IF NOT EXISTS idx_agency_mgr_creds_agency ON agency_manager_credentials(agency_id);
+CREATE INDEX IF NOT EXISTS idx_agency_mgr_creds_agent  ON agency_manager_credentials(agent_id);
+-- Password log: FYM global-admin reads all rows; agency-admin reads only its
+-- own agency_id rows (enforced in admin-api). Sessions reuse admin_sessions
+-- mechanics with a 'manager' role marker.
+ALTER TABLE agency_manager_credentials ENABLE ROW LEVEL SECURITY;
+-- (no public policy: service_role only, like admin_credentials)
 
 -- 2. Two-way nudge thread (extend existing at_risk_activities)
 ALTER TABLE at_risk_activities

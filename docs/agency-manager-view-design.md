@@ -29,7 +29,7 @@ Communication is **two-way** between manager and agent. Dispositions are **manag
 
 | Capability | Where it lives today | How we use it |
 |---|---|---|
-| Role + agency scoping | `admin_credentials.role` (`global_admin` / `agency_admin`) + `admin_sessions` (role, agency_id) | `agency_admin` becomes the manager role; evolve from shared creds to per-person identity |
+| Role + agency scoping | `admin_credentials.role` (`global_admin` / `agency_admin`) + `admin_sessions` (role, agency_id) | Existing shared agency-admin login stays as-is; new per-person manager creds reuse `admin_sessions` mechanics with a `manager` marker |
 | Agent identity + auth | `agents` table, `useAgentAuth` (name + writing number) | Agent side of the conversation + login popup host |
 | Agent portal UI | `AgentBookTab`, `AgentDashboardTab`, `AgentAchievementsTab` | Agent mirror view + popup mount point |
 | At-risk tracking | `at_risk_activities` (policy_id, agent_id, admin_user, action_type, note) | Extend into the two-way nudge thread |
@@ -48,24 +48,32 @@ Today an agency logs in with one shared `agency_admin` username/password. The ma
 - A manager is **exclusive to the single agency** they're assigned/added to (no multi-agency managers).
 - Managers are **listed separately from the agent roster** — a promoted agent does **not** become a duplicate row in the agent roster; managers render in their own list.
 
-**Implementation:** reuse the existing `admin_credentials` / `admin_sessions` rail (already `agency_admin`, scoped by `agency_id`), but make it **per-person** — one credential row per manager instead of one shared row per agency. Add `agent_id` (set when promoted from roster, null for added non-agents) and `display_name`. Because each row is one person scoped to one `agency_id`, exclusivity is enforced by the schema. The FYM password log is a global-admin read over `admin_credentials WHERE role = 'agency_admin'`; the agency-admin view reads only its own agency's rows.
+**Clarification (Charlie, 2026-06-26):** the existing **agency *admin* credentials stay shared/universal per agency** (one username + password per agency) — we do **not** touch them. Only the **agency *manager* credentials are per-person.** So managers get their **own separate credential store**, not an overload of `admin_credentials`.
+
+**Implementation:** new `agency_manager_credentials` table, one row per manager, scoped to a single `agency_id` (exclusivity by schema). Username follows the admin-login format; password is unique per manager. `agent_id` is set when promoted from the roster (null for added non-agents). Sessions can reuse the `admin_sessions` mechanics with a `manager` role marker.
+
+Password visibility:
+- **Agency admin view** — reads `agency_manager_credentials` for its own `agency_id` only (sees/resets its managers' passwords).
+- **FYM global-admin view** — reads all rows (the overall password log) to resend/change.
 
 ```
-admin_credentials  (extend existing)
-  id                  uuid pk          -- exists
-  agency_id           uuid fk          -- exists; single agency = exclusivity
-  email_domain        text             -- exists; the username (admin-login format)
-  password            text             -- exists; now UNIQUE PER PERSON, surfaced in admin views
-  role                text             -- exists; 'agency_admin' = manager
-+ agent_id            uuid fk -> agents(id) nullable   -- set if promoted from roster
-+ display_name        text
-  session_duration_days integer        -- exists
-  created_at          timestamptz      -- exists
+admin_credentials   (UNCHANGED — shared per-agency admin + FYM global admin)
+
+agency_manager_credentials   (NEW — per-person manager login)
+  id            uuid pk
+  agency_id     uuid fk -> agencies(id)        -- single agency = exclusivity
+  username      text                            -- admin-login format
+  password      text                            -- UNIQUE PER MANAGER
+  agent_id      uuid fk -> agents(id) nullable   -- set if promoted from roster
+  display_name  text
+  added_by      uuid
+  created_at    timestamptz
+  unique (agency_id, username)
 ```
 
 > **UI note:** managers surface in a dedicated "Agency Managers" list, separate from the agent roster (`AgencyRosterPanel`). Promoting an agent links `agent_id` but creates a manager entry, not a second roster row.
 >
-> **Worth a Chris heads-up** (not a blocker): this lights up the `admin_credentials` rail as a per-person login store, which brushes the contracting/onboarding identity flow.
+> **Worth a Chris heads-up** (not a blocker): this adds a per-person manager login store alongside the existing shared admin credentials.
 
 ### 4.2 Two-way nudge thread
 Extend `at_risk_activities` (or a sibling `policy_notes` table) so it reads as a conversation:
@@ -127,7 +135,7 @@ Click a policy → note thread + disposition control.
 - No direct pushes to `main`; no production deploy without sign-off.
 
 ## 7. Build sequence (proposed)
-1. **Manager identity** — extend `admin_credentials` (per-person, `agent_id` + `display_name`) + auth scoping + password-log reads (agency-admin own rows, FYM global-admin all). *Foundation; decided.*
+1. **Manager identity** — new `agency_manager_credentials` table (per-person, single agency, `agent_id` + `display_name`); existing shared agency-admin login untouched. Add auth scoping + password-log reads (agency-admin own rows, FYM global-admin all). *Foundation; decided.*
 2. **Nudge thread** — extend `at_risk_activities` with `author_role` + `kind`; thread API in `admin-api` / `agent-webhook`.
 3. **Disposition** — `policy_dispositions` table + manager-gated write.
 4. **Notifications + popup** — `notifications` table + agent-portal poll-on-load modal.
