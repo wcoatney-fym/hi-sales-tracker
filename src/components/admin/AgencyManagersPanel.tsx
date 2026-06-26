@@ -37,9 +37,12 @@ interface AgentOption {
 
 interface AgencyManagersPanelProps {
   token: string;
+  // When set (e.g. FYM viewing a specific agency), force-scope the list to this
+  // agency. Agency admins are already auto-scoped server-side.
+  scopeAgencyId?: string | null;
 }
 
-export default function AgencyManagersPanel({ token }: AgencyManagersPanelProps) {
+export default function AgencyManagersPanel({ token, scopeAgencyId }: AgencyManagersPanelProps) {
   const { isGlobalAdmin, agencyId: adminAgencyId } = useAdminAuth();
 
   const [managers, setManagers] = useState<AgencyManager[]>([]);
@@ -60,7 +63,7 @@ export default function AgencyManagersPanel({ token }: AgencyManagersPanelProps)
     try {
       const res = await adminListAgencyManagers(
         token,
-        isGlobalAdmin && agencyFilter ? agencyFilter : undefined
+        scopeAgencyId || (isGlobalAdmin && agencyFilter ? agencyFilter : undefined)
       );
       setManagers((res.managers as AgencyManager[]) || []);
       setError("");
@@ -69,7 +72,7 @@ export default function AgencyManagersPanel({ token }: AgencyManagersPanelProps)
     } finally {
       setLoading(false);
     }
-  }, [token, isGlobalAdmin, agencyFilter]);
+  }, [token, isGlobalAdmin, agencyFilter, scopeAgencyId]);
 
   useEffect(() => {
     fetchManagers();
