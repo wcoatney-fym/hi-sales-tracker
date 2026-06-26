@@ -10,6 +10,7 @@ import {
   Loader2,
   Trophy,
   ClipboardList,
+  ShieldCheck,
   ArrowLeft,
   Eye,
 } from "lucide-react";
