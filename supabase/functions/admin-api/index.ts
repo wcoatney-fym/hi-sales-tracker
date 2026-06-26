@@ -58,6 +58,34 @@ function genPassword(): string {
   return out;
 }
 
+// Build a manager username as first-initial + last name (e.g. "rmitchell"),
+// globally unique (usernames are unique across all agencies) by appending a
+// number on collision.
+// deno-lint-ignore no-explicit-any
+async function genManagerUsername(supabase: any, firstName: string, lastName: string): Promise<string> {
+  const clean = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fi = clean(firstName).slice(0, 1);
+  const ln = clean(lastName);
+  const base = (fi + ln) || "manager";
+  const { data } = await supabase
+    .from("agency_manager_credentials")
+    .select("username")
+    .ilike("username", `${base}%`);
+  const taken = new Set(((data || []) as { username: string }[]).map((r) => r.username.toLowerCase()));
+  if (!taken.has(base)) return base;
+  let i = 2;
+  while (taken.has(`${base}${i}`)) i++;
+  return `${base}${i}`;
+}
+
+// Split a display name into first/last for username generation.
+function splitName(full: string): { first: string; last: string } {
+  const parts = (full || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first: "", last: "" };
+  if (parts.length === 1) return { first: parts[0], last: parts[0] };
+  return { first: parts[0], last: parts[parts.length - 1] };
+}
+
 function capitalizeWord(word: string): string {
   if (word.length === 0) return word;
   if (word.length === 1) return word.toUpperCase();
@@ -3626,14 +3654,11 @@ Deno.serve(async (req: Request) => {
               }
               bridgedManager = { ...existingCred, is_active: true };
             } else {
-              const { data: ag } = await supabase
-                .from("agencies").select("slug, name").eq("id", mgrAgencyId).maybeSingle();
-              const base = (ag?.slug || ag?.name || "agency").toString();
-              const { count: existingCount } = await supabase
-                .from("agency_manager_credentials")
-                .select("id", { count: "exact", head: true })
-                .eq("agency_id", mgrAgencyId);
-              const username = `${base}-mgr-${(existingCount || 0) + 1}`;
+              const username = await genManagerUsername(
+                supabase,
+                (data.agent_first_name as string) || "",
+                (data.agent_last_name as string) || "",
+              );
               const password = genPassword();
               const rosterName = `${data.agent_first_name || ""} ${data.agent_last_name || ""}`.trim();
               const displayName = rosterName || username;
@@ -4843,21 +4868,24 @@ Deno.serve(async (req: Request) => {
         if (!ag) return jsonResponse({ error: "Agency not found" }, 404);
 
         let mgrName = display_name as string | undefined;
+        let firstName = "";
+        let lastName = "";
         if (promoteAgentId) {
           const { data: agent } = await supabase
             .from("agents").select("id, first_name, last_name, agency_id").eq("id", promoteAgentId).maybeSingle();
           if (!agent) return jsonResponse({ error: "Agent not found" }, 404);
+          firstName = agent.first_name;
+          lastName = agent.last_name;
           if (!mgrName) mgrName = `${agent.first_name} ${agent.last_name}`.trim();
+        } else if (mgrName) {
+          const sn = splitName(mgrName);
+          firstName = sn.first;
+          lastName = sn.last;
         }
         if (!mgrName) return jsonResponse({ error: "display_name or agent_id is required" }, 400);
 
-        // Username keeps the admin-login format: <AgencySlug>-mgr-<n>
-        const base = (ag.slug || ag.name || "agency").toString();
-        const { count: existingCount } = await supabase
-          .from("agency_manager_credentials")
-          .select("id", { count: "exact", head: true })
-          .eq("agency_id", agencyId);
-        const username = `${base}-mgr-${(existingCount || 0) + 1}`;
+        // Username = first initial + last name (e.g. "rmitchell"), globally unique.
+        const username = await genManagerUsername(supabase, firstName, lastName);
         const password = genPassword();
 
         const { data: created, error: cmErr } = await supabase
