@@ -38,6 +38,8 @@ export default function AdminDashboard() {
   const navState = location.state as { agencyName?: string; agencyId?: string } | null;
   const [resolvedAgencyName, setResolvedAgencyName] = useState<string | null>(navState?.agencyName || null);
   const [resolvedAgencyId, setResolvedAgencyId] = useState<string | null>(navState?.agencyId || null);
+  // FYM's own agency id, resolved for the global-admin (FYM) standard Roster tab.
+  const [fymAgencyId, setFymAgencyId] = useState<string | null>(null);
 
   const isAgencyView = !!agencySlug;
   const isImpersonating = isAgencyView && isGlobalAdmin;
@@ -50,6 +52,16 @@ export default function AdminDashboard() {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   }, [isImpersonating, agencySlug]);
+
+  // Global (FYM) admin: resolve FYM's own agency id so the standard Roster tab
+  // can scope to it, mirroring what an agency admin (e.g. Wisechoice) sees.
+  useEffect(() => {
+    if (token && isGlobalAdmin && !isAgencyView && !fymAgencyId) {
+      adminResolveAgencySlug(token, "fym")
+        .then((a) => setFymAgencyId(a.id))
+        .catch(() => {});
+    }
+  }, [token, isGlobalAdmin, isAgencyView, fymAgencyId]);
 
   // Entering an agency view should land on Overview so the admin immediately
   // sees the agency's data, not whatever tab (e.g. Settings) they came from.
@@ -98,7 +110,7 @@ export default function AdminDashboard() {
       { key: "at-risk", label: "At Risk", icon: AlertTriangle },
       { key: "policies", label: "Policies", icon: FileSpreadsheet },
       { key: "leaderboard", label: "Leaderboard", icon: Trophy },
-      { key: "roster", label: "Roster", icon: ClipboardList, agencyOnly: true },
+      { key: "roster", label: "Roster", icon: ClipboardList },
       { key: "settings", label: "Settings", icon: Settings, globalOnly: true },
     ];
 
@@ -256,7 +268,7 @@ export default function AdminDashboard() {
 
       {activeTab === "roster" && (
         <div className="animate-fade-in">
-          <AgencyRosterPanel token={token} overrideAgencyId={isImpersonating ? resolvedAgencyId : undefined} />
+          <AgencyRosterPanel token={token} overrideAgencyId={isImpersonating ? resolvedAgencyId : (isGlobalAdmin && !isAgencyView ? fymAgencyId : undefined)} />
         </div>
       )}
 
