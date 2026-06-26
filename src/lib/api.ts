@@ -6,10 +6,15 @@ const baseHeaders = {
   "Content-Type": "application/json",
 };
 
+// NOTE: Edge-function responses are intentionally typed loosely (any) at this
+// boundary. Typed wrappers (e.g. adminLogin, adminVerifySession) narrow where it
+// matters. This keeps `tsc` focused on real errors (missing imports, undefined
+// refs, bad component props) without forcing a cast at every call site.
+// deno-lint-ignore no-explicit-any
 async function callApi(
   functionName: string,
   body: Record<string, unknown>
-) {
+): Promise<any> {
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/${functionName}`,
     {
@@ -104,8 +109,17 @@ export async function adminGetLeadSubmissions(token: string, opts: { page?: numb
   return callApi("admin-api", { action: "get-lead-submissions", token, ...opts });
 }
 
-export async function adminLogin(email: string, password: string) {
-  return callApi("admin-api", { action: "login", email, password });
+export interface AdminAuthResult {
+  token: string;
+  email?: string;
+  role: "global_admin" | "agency_admin";
+  agency_id: string | null;
+  agency_slug: string | null;
+  agency_name: string | null;
+}
+
+export async function adminLogin(email: string, password: string): Promise<AdminAuthResult> {
+  return (await callApi("admin-api", { action: "login", email, password })) as unknown as AdminAuthResult;
 }
 
 export async function adminUploadRoster(
@@ -444,8 +458,8 @@ export async function adminLogout(token: string) {
   return callApi("admin-api", { action: "logout", token });
 }
 
-export async function adminVerifySession(token: string) {
-  return callApi("admin-api", { action: "verify-session", token });
+export async function adminVerifySession(token: string): Promise<AdminAuthResult> {
+  return (await callApi("admin-api", { action: "verify-session", token })) as unknown as AdminAuthResult;
 }
 
 export async function adminGetAgencyBreakdown(
@@ -802,9 +816,9 @@ export async function adminProcessSourceUpload(
 
     const res = await callApi("admin-api", payload);
     if (!res.success) return res;
-    if (!uploadId) uploadId = res.uploadId;
-    totalImported += res.imported || 0;
-    totalErrors += res.errors || 0;
+    if (!uploadId) uploadId = res.uploadId as string;
+    totalImported += (res.imported as number) || 0;
+    totalErrors += (res.errors as number) || 0;
 
     if (isFinalChunk) {
       return res;

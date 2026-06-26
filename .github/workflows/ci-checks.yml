@@ -11,6 +11,8 @@ jobs:
         with:
           node-version: "20"
       - run: npm ci
+      - name: Type-check
+        run: npm run typecheck
       - name: Build
         run: npm run build
       - name: Scan for hardcoded secrets in source

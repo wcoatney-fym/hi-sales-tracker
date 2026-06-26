@@ -52,7 +52,7 @@ export default function AgentProfile() {
       if (!agent.agencySlug || agent.agencySlug === "fym") {
         try {
           const config = await getLeadFormConfig();
-          setShowLeadForm(config.enabled);
+          setShowLeadForm(config.enabled as boolean);
         } catch { /* ignore */ }
       }
     } catch {
