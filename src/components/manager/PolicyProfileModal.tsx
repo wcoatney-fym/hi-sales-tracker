@@ -106,6 +106,8 @@ export default function PolicyProfileModal({
   // contact source). Render gracefully until the field lands.
   const agentPhone = (policy as { agent_phone?: string | null }).agent_phone || null;
   const agentEmail = (policy as { agent_email?: string | null }).agent_email || null;
+  const clientPhone = policy.client_phone || null;
+  const clientEmail = policy.client_email || null;
 
   const fetchThread = useCallback(async () => {
     setLoading(true);
@@ -202,6 +204,25 @@ export default function PolicyProfileModal({
                 valueClass={overdueClass}
               />
               <ProfileField icon={FileText} label="Product" value={`${policy.product_type} · ${policy.carrier}`} />
+            </div>
+          </div>
+
+          {/* Client contact */}
+          <div className="px-5 py-4 border-b border-slate-700/50">
+            <p className="text-[11px] uppercase tracking-wider text-slate-500 font-medium mb-3">
+              Client Contact
+            </p>
+            <div className="grid grid-cols-2 gap-y-3 gap-x-4">
+              <ProfileField
+                icon={Phone}
+                label="Phone"
+                value={clientPhone ? <a href={`tel:${clientPhone}`} className="text-gold hover:underline">{clientPhone}</a> : "—"}
+              />
+              <ProfileField
+                icon={Mail}
+                label="Email"
+                value={clientEmail ? <a href={`mailto:${clientEmail}`} className="text-gold hover:underline">{clientEmail}</a> : "—"}
+              />
             </div>
           </div>
 

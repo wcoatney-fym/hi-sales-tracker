@@ -10,7 +10,7 @@ type Tab = "retention" | "worklist" | "production";
 
 const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: "retention", label: "Retention", icon: Gauge },
-  { key: "worklist", label: "At-Risk Pipeline", icon: AlertTriangle },
+  { key: "worklist", label: "Pipeline", icon: AlertTriangle },
   { key: "production", label: "Production", icon: Users },
 ];
 
