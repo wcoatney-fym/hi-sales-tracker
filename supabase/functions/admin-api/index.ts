@@ -137,6 +137,33 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
+// Resolve the agents.id that owns a policy, using the policy's writing number.
+// Matches the current UNL/GTL writing number or any prior/alias writing number
+// (carrier number reassignments leave historical form_submissions stamped with
+// the old number). Returns null when no unambiguous match exists.
+async function resolveAgentIdFromPolicy(
+  supabase: ReturnType<typeof createClient>,
+  policyId: string
+): Promise<string | null> {
+  const { data: policy } = await supabase
+    .from("form_submissions")
+    .select("agent_number")
+    .eq("id", policyId)
+    .maybeSingle();
+  const num = (policy?.agent_number || "").trim().toUpperCase();
+  if (!num) return null;
+  const { data: matches } = await supabase
+    .from("agents")
+    .select("id")
+    .or(
+      `unl_writing_number.eq.${num},gtl_writing_number.eq.${num},prior_writing_numbers.cs.{${num}}`
+    )
+    .limit(2);
+  // Only attribute when exactly one agent owns the writing number.
+  if (matches && matches.length === 1) return matches[0].id as string;
+  return null;
+}
+
 async function promoteQualifyingAgents(
   supabase: ReturnType<typeof createClient>,
   uploadIds: string[]
@@ -5017,18 +5044,34 @@ Deno.serve(async (req: Request) => {
           .select("id")
           .single();
         if (anErr) throw anErr;
-        if (agent_id && (kind === "nudge" || kind === "flag")) {
+        // Resolve the owning agent from the policy when the client doesn't pass
+        // an agent_id (the manager worklist only carries agent_number). Without
+        // this, nudge/flag notifications silently never fired. agent_id stays
+        // the source of truth; we derive it via the policy's writing number.
+        let recipientAgentId: string | null = agent_id || null;
+        if (!recipientAgentId && (kind === "nudge" || kind === "flag")) {
+          recipientAgentId = await resolveAgentIdFromPolicy(supabase, policy_id);
+        }
+        if (recipientAgentId && (kind === "nudge" || kind === "flag")) {
           await supabase.from("notifications").insert({
             recipient_kind: "agent",
-            recipient_id: agent_id,
+            recipient_id: recipientAgentId,
             agency_id: session.agency_id,
             policy_id,
             activity_id: activity.id,
             type: kind,
             body: note.slice(0, 280),
           });
+          // Backfill the activity's agent_id so the thread is correctly
+          // attributed even when the client omitted it.
+          if (!agent_id) {
+            await supabase
+              .from("at_risk_activities")
+              .update({ agent_id: recipientAgentId })
+              .eq("id", activity.id);
+          }
         }
-        return jsonResponse({ activity_id: activity.id });
+        return jsonResponse({ activity_id: activity.id, agent_id: recipientAgentId });
       }
 
       case "mgr-set-disposition": {
