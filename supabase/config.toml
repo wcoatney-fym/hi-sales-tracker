@@ -1,0 +1,19 @@
+# Supabase project config (pins per-function settings under source control).
+#
+# Why this file exists: the sql-import-cron function authenticates cron calls
+# itself via the X-Cron-Secret header (validated against Vault) and the
+# service-role key — it deliberately does NOT receive a user JWT. The pg_cron
+# jobs (sql-import-poll, daily safety net) send only X-Cron-Secret and no
+# Authorization header.
+#
+# With the platform default (verify_jwt = true), the Supabase edge GATEWAY
+# rejects those cron calls at the door with 401 UNAUTHORIZED_NO_AUTH_HEADER
+# before our function code ever runs — which silently broke the UNL import
+# pipeline (no logs, no errors). Pinning verify_jwt = false here keeps the
+# function's own X-Cron-Secret/service-role auth as the gate and prevents a
+# future redeploy from silently re-enabling JWT verification and killing the
+# pipeline again.
+project_id = "lryxxnpafaxjgehqirdp"
+
+[functions.sql-import-cron]
+verify_jwt = false
