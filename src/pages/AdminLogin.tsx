@@ -1,14 +1,20 @@
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { Shield, Loader2, AlertCircle } from "lucide-react";
 import { useAdminAuth } from "../hooks/useAdminAuth";
+import { useManagerAuth } from "../hooks/useManagerAuth";
 import FormField from "../components/ui/FormField";
 
 export default function AdminLogin() {
   const { login, loading, error, isAuthenticated, isGlobalAdmin, agencySlug, verifying } = useAdminAuth();
+  const { login: managerLogin, loading: managerLoading } = useManagerAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  // Combined auth error: only surfaced after BOTH admin and manager auth fail,
+  // so a manager username doesn't flash the admin "Invalid credentials" first.
+  const [authError, setAuthError] = useState("");
 
   if (verifying) {
     return (
@@ -40,7 +46,22 @@ export default function AdminLogin() {
     setFormErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
-    await login(email, password);
+    setAuthError("");
+
+    // 1) Try admin credentials (email-domain match). On success, the
+    //    isAuthenticated branch above redirects into the admin dashboard.
+    const adminResult = await login(email.trim(), password);
+    if (adminResult) return;
+
+    // 2) Fall back to per-person Agency Manager credentials (username match),
+    //    so managers can sign in through the same admin portal entry point.
+    const managerProfile = await managerLogin(email.trim(), password);
+    if (managerProfile) {
+      navigate("/manager");
+      return;
+    }
+
+    setAuthError("Invalid credentials");
   };
 
   return (
@@ -105,22 +126,22 @@ export default function AdminLogin() {
             />
           </FormField>
 
-          {error && (
+          {(authError || error) && (
             <div className="flex items-center gap-2 p-3 bg-red-500/10 rounded-lg border border-red-500/30">
               <AlertCircle
                 className="text-red-400 flex-shrink-0"
                 size={16}
               />
-              <span className="text-sm text-red-300">{error}</span>
+              <span className="text-sm text-red-300">{authError || error}</span>
             </div>
           )}
 
           <button
             type="submit"
             className="btn-primary w-full flex items-center justify-center gap-2"
-            disabled={loading}
+            disabled={loading || managerLoading}
           >
-            {loading ? (
+            {loading || managerLoading ? (
               <>
                 <Loader2 className="animate-spin" size={18} />
                 Signing in...
