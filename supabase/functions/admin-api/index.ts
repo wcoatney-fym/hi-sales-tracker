@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { resolveAgentIdFromPolicy } from "./resolve.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -135,33 +136,6 @@ function jsonResponse(data: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-}
-
-// Resolve the agents.id that owns a policy, using the policy's writing number.
-// Matches the current UNL/GTL writing number or any prior/alias writing number
-// (carrier number reassignments leave historical form_submissions stamped with
-// the old number). Returns null when no unambiguous match exists.
-async function resolveAgentIdFromPolicy(
-  supabase: ReturnType<typeof createClient>,
-  policyId: string
-): Promise<string | null> {
-  const { data: policy } = await supabase
-    .from("form_submissions")
-    .select("agent_number")
-    .eq("id", policyId)
-    .maybeSingle();
-  const num = (policy?.agent_number || "").trim().toUpperCase();
-  if (!num) return null;
-  const { data: matches } = await supabase
-    .from("agents")
-    .select("id")
-    .or(
-      `unl_writing_number.eq.${num},gtl_writing_number.eq.${num},prior_writing_numbers.cs.{${num}}`
-    )
-    .limit(2);
-  // Only attribute when exactly one agent owns the writing number.
-  if (matches && matches.length === 1) return matches[0].id as string;
-  return null;
 }
 
 async function promoteQualifyingAgents(
