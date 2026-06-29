@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { resolveAgentIdFromPolicy } from "./resolve.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -5017,18 +5018,34 @@ Deno.serve(async (req: Request) => {
           .select("id")
           .single();
         if (anErr) throw anErr;
-        if (agent_id && (kind === "nudge" || kind === "flag")) {
+        // Resolve the owning agent from the policy when the client doesn't pass
+        // an agent_id (the manager worklist only carries agent_number). Without
+        // this, nudge/flag notifications silently never fired. agent_id stays
+        // the source of truth; we derive it via the policy's writing number.
+        let recipientAgentId: string | null = agent_id || null;
+        if (!recipientAgentId && (kind === "nudge" || kind === "flag")) {
+          recipientAgentId = await resolveAgentIdFromPolicy(supabase, policy_id);
+        }
+        if (recipientAgentId && (kind === "nudge" || kind === "flag")) {
           await supabase.from("notifications").insert({
             recipient_kind: "agent",
-            recipient_id: agent_id,
+            recipient_id: recipientAgentId,
             agency_id: session.agency_id,
             policy_id,
             activity_id: activity.id,
             type: kind,
             body: note.slice(0, 280),
           });
+          // Backfill the activity's agent_id so the thread is correctly
+          // attributed even when the client omitted it.
+          if (!agent_id) {
+            await supabase
+              .from("at_risk_activities")
+              .update({ agent_id: recipientAgentId })
+              .eq("id", activity.id);
+          }
         }
-        return jsonResponse({ activity_id: activity.id });
+        return jsonResponse({ activity_id: activity.id, agent_id: recipientAgentId });
       }
 
       case "mgr-set-disposition": {
