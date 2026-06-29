@@ -138,6 +138,30 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
+// Normalize a form_submissions row into the manager worklist payload shape.
+// Renames client contact columns and surfaces the (optional) termination
+// reason. `contract_reason` stays null until the UNL "Contract Reason" column
+// is mapped into the import pipeline.
+function shapeWorklistRow(
+  p: Record<string, unknown>,
+  dispRow: unknown
+) {
+  const { phone, email, ...rest } = p;
+  // dispRow is the policy_dispositions row ({ disposition, follow_up_at, ... })
+  // or null; the worklist payload exposes just the disposition enum string.
+  const disposition =
+    dispRow && typeof dispRow === "object"
+      ? ((dispRow as { disposition?: string }).disposition ?? null)
+      : (dispRow as string | null) ?? null;
+  return {
+    ...rest,
+    client_phone: (phone as string | null) ?? null,
+    client_email: (email as string | null) ?? null,
+    contract_reason: (p["contract_reason"] as string | null) ?? null,
+    disposition,
+  };
+}
+
 async function promoteQualifyingAgents(
   supabase: ReturnType<typeof createClient>,
   uploadIds: string[]
@@ -4951,7 +4975,7 @@ Deno.serve(async (req: Request) => {
         // Policies for this manager's agency
         const { data: agencyPolicies, error: apErr } = await supabase
           .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date")
+          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code")
           .eq("agency_id", session.agency_id);
         if (apErr) throw apErr;
         const policyIds = (agencyPolicies || []).map((p: { id: string }) => p.id);
@@ -4974,7 +4998,32 @@ Deno.serve(async (req: Request) => {
         );
         const worklist = (agencyPolicies || [])
           .filter((p: { id: string }) => flaggedIds.has(p.id))
-          .map((p: { id: string }) => ({ ...p, disposition: dispByPolicy.get(p.id) || null }));
+          .map((p: Record<string, unknown>) => shapeWorklistRow(p, dispByPolicy.get(p.id as string) || null));
+        return jsonResponse({ worklist, agency_id: session.agency_id });
+      }
+
+      case "mgr-terminated-worklist": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
+        // All terminated policies for this manager's agency — the outreach lane.
+        const { data: termPolicies, error: tpErr } = await supabase
+          .from("form_submissions")
+          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code")
+          .eq("agency_id", session.agency_id)
+          .eq("status", "terminated");
+        if (tpErr) throw tpErr;
+        const termIds = (termPolicies || []).map((p: { id: string }) => p.id);
+        if (termIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const { data: termDisps } = await supabase
+          .from("policy_dispositions")
+          .select("policy_id, disposition, follow_up_at, set_at")
+          .in("policy_id", termIds);
+        const termDispByPolicy = new Map(
+          (termDisps || []).map((d: { policy_id: string }) => [d.policy_id, d])
+        );
+        const worklist = (termPolicies || []).map((p: Record<string, unknown>) =>
+          shapeWorklistRow(p, termDispByPolicy.get(p.id as string) || null)
+        );
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
