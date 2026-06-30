@@ -162,6 +162,81 @@ function shapeWorklistRow(
   };
 }
 
+// ---- At-Risk pipeline v3 stage model -------------------------------------
+// Membership is data-driven (active + DIR + paid_to_date < today). The 45-day
+// grace clock starts at the missed draft, which is ~paid_to_date, so age and
+// urgency derive straight from paid_to_date — no stored flag needed.
+const AT_RISK_TOTAL_DAYS = 45;   // policy auto-terminates at day 45
+const HEATING_UP_DAY = 30;       // early escalation tier
+const CODE_RED_DAY = 38;         // <7 days left — drop everything
+const AGENT_SLA_DAYS = 5;        // agent must make contact within 5 days
+
+type DispRow = {
+  disposition?: string | null;
+  agent_id?: string | null;
+  agent_outreach_at?: string | null;
+  agent_contacted_at?: string | null;
+  agent_saved_at?: string | null;
+  manager_approved_at?: string | null;
+} | null;
+
+function daysBetween(fromIso: string | null, to = Date.now()): number | null {
+  if (!fromIso) return null;
+  const t = new Date(fromIso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor((to - t) / 86400000);
+}
+
+// Returns the action-stage (persisted), the computed urgency overlay, and
+// the current owner. Code Red / Heating Up are overlays: a policy keeps its
+// action-stage AND carries is_code_red so the board can bucket it regardless.
+function computeAtRiskStage(paidToDate: string | null, disp: DispRow) {
+  const ageDays = daysBetween(paidToDate) ?? 0;
+  const daysToTerminate = AT_RISK_TOTAL_DAYS - ageDays;
+  const d = (disp?.disposition as string | null) ?? null;
+
+  // action-stage (normalize legacy values onto the v3 set)
+  let stage: string;
+  if (d === "saved" || d === "secured") stage = "saved";
+  else if (d === "lost") stage = "lost";
+  else if (d === "agent_saved_pending") stage = "agent_saved_pending";
+  else if (d === "agent_outreach") stage = "agent_outreach";
+  else if (d === "manager_outreach" || d === "working" || d === "follow_up") stage = "manager_outreach";
+  else if (d === "responded") stage = "responded";
+  else stage = "new";
+
+  let owner: "system" | "manager" | "agent" | "closed";
+  if (stage === "saved" || stage === "lost") owner = "closed";
+  else if (stage === "agent_outreach" || stage === "agent_saved_pending") owner = "agent";
+  else if (stage === "responded" || stage === "manager_outreach") owner = "manager";
+  else owner = "system";
+
+  const terminal = stage === "saved" || stage === "lost";
+  const isCodeRed = !terminal && ageDays >= CODE_RED_DAY;
+  const isHeatingUp = !terminal && !isCodeRed && ageDays >= HEATING_UP_DAY;
+
+  // 5-day agent follow-up SLA: handed off, never contacted, past the window.
+  const agentDays = daysBetween(disp?.agent_outreach_at ?? null);
+  const agentOverdue =
+    stage === "agent_outreach" &&
+    !disp?.agent_contacted_at &&
+    agentDays !== null &&
+    agentDays > AGENT_SLA_DAYS;
+
+  return {
+    stage,
+    owner,
+    days_at_risk: ageDays,
+    days_to_terminate: daysToTerminate,
+    is_heating_up: isHeatingUp,
+    is_code_red: isCodeRed,
+    agent_overdue: agentOverdue,
+    agent_id: disp?.agent_id ?? null,
+    agent_outreach_at: disp?.agent_outreach_at ?? null,
+    agent_contacted_at: disp?.agent_contacted_at ?? null,
+  };
+}
+
 async function promoteQualifyingAgents(
   supabase: ReturnType<typeof createClient>,
   uploadIds: string[]
@@ -4995,17 +5070,20 @@ Deno.serve(async (req: Request) => {
         const policyIds = (agencyPolicies || []).map((p: { id: string }) => p.id);
         if (policyIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
 
-        // Disposition state (working / follow-up / secured / lost) overlays the
-        // computed list so a manager's progress on a policy persists.
+        // Disposition + agent-handoff state overlays the computed list so a
+        // manager's (and agent's) progress on a policy persists across refreshes.
         const { data: disps } = await supabase
           .from("policy_dispositions")
-          .select("policy_id, disposition, follow_up_at, set_at")
+          .select("policy_id, disposition, follow_up_at, set_at, agent_id, agent_outreach_at, agent_contacted_at, agent_saved_at, manager_approved_at")
           .in("policy_id", policyIds);
         const dispByPolicy = new Map(
           (disps || []).map((d: { policy_id: string }) => [d.policy_id, d])
         );
-        const worklist = (agencyPolicies || [])
-          .map((p: Record<string, unknown>) => shapeWorklistRow(p, dispByPolicy.get(p.id as string) || null));
+        const worklist = (agencyPolicies || []).map((p: Record<string, unknown>) => {
+          const disp = dispByPolicy.get(p.id as string) || null;
+          const computed = computeAtRiskStage((p.paid_to_date as string | null) ?? null, disp as DispRow);
+          return { ...shapeWorklistRow(p, disp), ...computed };
+        });
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
@@ -5115,7 +5193,10 @@ Deno.serve(async (req: Request) => {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
         const { policy_id, disposition, note = "", follow_up_at } = body;
         if (!policy_id || !disposition) return jsonResponse({ error: "policy_id and disposition are required" }, 400);
-        if (!["working", "secured", "lost", "follow_up"].includes(disposition)) {
+        // v3 stages a manager may set directly. Agent-only states
+        // (agent_outreach, agent_saved_pending) go through their own actions.
+        const MGR_SETTABLE = ["responded", "manager_outreach", "saved", "lost", "working", "secured", "follow_up"];
+        if (!MGR_SETTABLE.includes(disposition)) {
           return jsonResponse({ error: "invalid disposition" }, 400);
         }
         const { data: mgr } = await supabase
@@ -5133,6 +5214,111 @@ Deno.serve(async (req: Request) => {
           }, { onConflict: "policy_id" });
         if (dsErr) throw dsErr;
         return jsonResponse({ policy_id, disposition });
+      }
+
+      // Manager hands a policy to the writing agent (warm relationship save).
+      // Stays on the manager's board; ownership shows as the agent. Stamps the
+      // 5-day SLA clock and notifies the agent.
+      case "mgr-handoff-to-agent": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
+        const { policy_id, note = "" } = body;
+        if (!policy_id) return jsonResponse({ error: "policy_id is required" }, 400);
+        let agentId = (body.agent_id as string | null) || null;
+        if (!agentId) agentId = await resolveAgentIdFromPolicy(supabase, policy_id);
+        const { data: mgr } = await supabase
+          .from("agency_manager_credentials").select("id").ilike("username", session.email).maybeSingle();
+        const { error: hoErr } = await supabase
+          .from("policy_dispositions")
+          .upsert({
+            policy_id,
+            agency_id: session.agency_id,
+            disposition: "agent_outreach",
+            note,
+            agent_id: agentId,
+            agent_outreach_at: new Date().toISOString(),
+            agent_contacted_at: null,
+            set_by: mgr?.id || null,
+            set_at: new Date().toISOString(),
+          }, { onConflict: "policy_id" });
+        if (hoErr) throw hoErr;
+        if (agentId) {
+          await supabase.from("notifications").insert({
+            recipient_kind: "agent",
+            recipient_id: agentId,
+            agency_id: session.agency_id,
+            policy_id,
+            type: "flag",
+            body: (note || "At-risk policy handed to you to save — please reach out to the client.").slice(0, 280),
+          });
+        }
+        return jsonResponse({ policy_id, disposition: "agent_outreach", agent_id: agentId });
+      }
+
+      // Manager approves an agent-claimed save → moves it into Saved.
+      case "mgr-approve-save": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
+        const { policy_id } = body;
+        if (!policy_id) return jsonResponse({ error: "policy_id is required" }, 400);
+        const { error: apErr } = await supabase
+          .from("policy_dispositions")
+          .update({
+            disposition: "saved",
+            manager_approved_at: new Date().toISOString(),
+            set_at: new Date().toISOString(),
+          })
+          .eq("policy_id", policy_id)
+          .eq("agency_id", session.agency_id)
+          .eq("disposition", "agent_saved_pending");
+        if (apErr) throw apErr;
+        return jsonResponse({ policy_id, disposition: "saved" });
+      }
+
+      // NOTE: the agent-side writes that complete the loop — agent logs contact
+      // (sets agent_contacted_at, satisfies the 5-day SLA) and agent marks saved
+      // (sets disposition='agent_saved_pending', pending manager approval) — live
+      // in the agent-facing app where the agent session authenticates, not here
+      // in admin-api (manager/admin sessions only). They land in the agent-app
+      // follow-up PR. The columns + manager approval gate are ready for them.
+
+      // Per-agent Agent Quality rollup: how many at-risk policies were handed to
+      // each agent, and what % the agent contacted within the 5-day SLA. Low
+      // follow-up % flags agents who don't chase their own clients.
+      case "mgr-agent-quality": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
+        const { data: rows, error: aqErr } = await supabase
+          .from("policy_dispositions")
+          .select("agent_id, agent_outreach_at, agent_contacted_at")
+          .eq("agency_id", session.agency_id)
+          .not("agent_outreach_at", "is", null);
+        if (aqErr) throw aqErr;
+        const byAgent = new Map<string, { handed_off: number; contacted_in_sla: number }>();
+        for (const r of (rows || []) as DispRow[]) {
+          const aid = r?.agent_id || "unknown";
+          const agg = byAgent.get(aid) || { handed_off: 0, contacted_in_sla: 0 };
+          agg.handed_off += 1;
+          if (r?.agent_contacted_at && r?.agent_outreach_at) {
+            const diff = new Date(r.agent_contacted_at).getTime() - new Date(r.agent_outreach_at).getTime();
+            if (diff <= AGENT_SLA_DAYS * 86400000) agg.contacted_in_sla += 1;
+          }
+          byAgent.set(aid, agg);
+        }
+        const agentIds = [...byAgent.keys()].filter((a) => a !== "unknown");
+        const nameById = new Map<string, string>();
+        if (agentIds.length) {
+          const { data: ag } = await supabase
+            .from("agents").select("id, first_name, last_name").in("id", agentIds);
+          for (const a of (ag || []) as Array<Record<string, string>>) {
+            nameById.set(a.id, `${a.first_name ?? ""} ${a.last_name ?? ""}`.trim());
+          }
+        }
+        const agents = [...byAgent.entries()].map(([aid, v]) => ({
+          agent_id: aid === "unknown" ? null : aid,
+          agent_name: nameById.get(aid) || "Unassigned",
+          handed_off: v.handed_off,
+          contacted_in_sla: v.contacted_in_sla,
+          followup_rate_pct: v.handed_off ? Math.round((1000 * v.contacted_in_sla) / v.handed_off) / 10 : 0,
+        })).sort((a, b) => a.followup_rate_pct - b.followup_rate_pct);
+        return jsonResponse({ agents, sla_days: AGENT_SLA_DAYS, agency_id: session.agency_id });
       }
 
       default:
