@@ -900,6 +900,36 @@ export async function agentLogAtRiskActivity(sessionToken: string, policyId: str
   return data;
 }
 
+// Agent logs first contact on a handed-off at-risk policy (5-day SLA).
+export async function agentLogContact(sessionToken: string, policyId: string) {
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-log-contact`,
+    {
+      method: "POST",
+      headers: { ...baseHeaders, "X-Agent-Token": sessionToken },
+      body: JSON.stringify({ policyId }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to log contact");
+  return data;
+}
+
+// Agent marks a handed-off policy saved -> awaits manager approval.
+export async function agentMarkSaved(sessionToken: string, policyId: string, note?: string) {
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-mark-saved`,
+    {
+      method: "POST",
+      headers: { ...baseHeaders, "X-Agent-Token": sessionToken },
+      body: JSON.stringify({ policyId, ...(note ? { note } : {}) }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to mark saved");
+  return data;
+}
+
 export async function agentGetDashboardStats(sessionToken: string) {
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-dashboard-stats`,
