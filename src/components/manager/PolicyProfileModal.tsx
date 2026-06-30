@@ -14,10 +14,13 @@ import {
   DollarSign,
   ShieldAlert,
 } from "lucide-react";
+import { UserPlus, CheckCircle, Clock } from "lucide-react";
 import {
   mgrGetPolicyThread,
   mgrPostNote,
   mgrSetDisposition,
+  mgrHandoffToAgent,
+  mgrApproveSave,
 } from "../../lib/api";
 import type {
   ManagerWorklistPolicy,
@@ -26,10 +29,12 @@ import type {
   ThreadKind,
 } from "../../lib/api";
 
+// Manager-settable v3 stages. Agent stages (agent_outreach / agent_saved_pending)
+// are reached via Hand-to-Agent + the agent app, not these buttons.
 const DISPOSITIONS: { key: ManagerDisposition; label: string; color: string }[] = [
-  { key: "working", label: "Working", color: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
-  { key: "secured", label: "Secured", color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" },
-  { key: "follow_up", label: "Follow Up", color: "bg-sky-500/10 text-sky-400 border-sky-500/30" },
+  { key: "responded", label: "Responded", color: "bg-sky-500/10 text-sky-400 border-sky-500/30" },
+  { key: "manager_outreach", label: "Manager Outreach", color: "bg-amber-500/10 text-amber-400 border-amber-500/30" },
+  { key: "saved", label: "Saved", color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" },
   { key: "lost", label: "Lost", color: "bg-rose-500/10 text-rose-400 border-rose-500/30" },
 ];
 
@@ -153,6 +158,38 @@ export default function PolicyProfileModal({
     }
   };
 
+  const [acting, setActing] = useState<"handoff" | "approve" | null>(null);
+  const daysToTerminate = (policy as { days_to_terminate?: number }).days_to_terminate;
+  const isCodeRed = (policy as { is_code_red?: boolean }).is_code_red;
+  const isHeatingUp = (policy as { is_heating_up?: boolean }).is_heating_up;
+  const agentOverdue = (policy as { agent_overdue?: boolean }).agent_overdue;
+
+  const handleHandoff = async () => {
+    setActing("handoff");
+    try {
+      await mgrHandoffToAgent(token, { policyId: policy.id });
+      setDisposition("agent_outreach");
+      onDispositionChange(policy.id, "agent_outreach");
+    } catch {
+      /* ignore */
+    } finally {
+      setActing(null);
+    }
+  };
+
+  const handleApprove = async () => {
+    setActing("approve");
+    try {
+      await mgrApproveSave(token, policy.id);
+      setDisposition("saved");
+      onDispositionChange(policy.id, "saved");
+    } catch {
+      /* ignore */
+    } finally {
+      setActing(null);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
@@ -251,6 +288,27 @@ export default function PolicyProfileModal({
             </div>
           </div>
 
+          {/* Urgency banner: Code Red / Heating Up / days-to-terminate */}
+          {(isCodeRed || isHeatingUp || typeof daysToTerminate === "number") && (
+            <div
+              className={`px-5 py-2.5 border-b flex items-center gap-2 text-xs font-semibold ${
+                isCodeRed
+                  ? "bg-rose-500/10 border-rose-500/30 text-rose-300"
+                  : isHeatingUp
+                  ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                  : "bg-navy border-slate-700/50 text-slate-300"
+              }`}
+            >
+              <Clock size={13} />
+              {isCodeRed ? "CODE RED" : isHeatingUp ? "Heating Up" : "At Risk"}
+              {typeof daysToTerminate === "number" && (
+                <span className="ml-auto">
+                  {daysToTerminate > 0 ? `${daysToTerminate} days to termination` : "Past grace \u2014 terminating"}
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Disposition control */}
           <div className="px-5 py-4 border-b border-slate-700/50">
             <p className="text-[11px] uppercase tracking-wider text-slate-500 font-medium mb-2">
@@ -273,6 +331,35 @@ export default function PolicyProfileModal({
                   </button>
                 );
               })}
+            </div>
+
+            {/* Agent handoff + approval gate */}
+            <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-slate-700/40">
+              <button
+                onClick={handleHandoff}
+                disabled={acting !== null}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border bg-violet-500/10 text-violet-300 border-violet-500/30 hover:bg-violet-500/20 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                title="Hand this policy to the writing agent (warm relationship save). Starts the 5-day SLA."
+              >
+                {acting === "handoff" ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />}
+                Hand to Agent
+              </button>
+              {disposition === "agent_saved_pending" && (
+                <button
+                  onClick={handleApprove}
+                  disabled={acting !== null}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                  title="Agent marked this saved \u2014 approve to confirm the save."
+                >
+                  {acting === "approve" ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle size={12} />}
+                  Approve Save
+                </button>
+              )}
+              {agentOverdue && (
+                <span className="px-2 py-1.5 rounded-lg text-[11px] font-semibold bg-rose-500/10 text-rose-300 border border-rose-500/30 flex items-center gap-1">
+                  <Clock size={11} /> Agent overdue (5d SLA)
+                </span>
+              )}
             </div>
           </div>
 
