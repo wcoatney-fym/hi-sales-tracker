@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { Loader2, AlertTriangle, RefreshCw } from "lucide-react";
-import { mgrGetAtRiskWorklist } from "../../lib/api";
+import { Loader2, AlertTriangle, RefreshCw, XCircle } from "lucide-react";
+import { mgrGetAtRiskWorklist, mgrGetTerminatedWorklist } from "../../lib/api";
 import type { ManagerWorklistPolicy, ManagerDisposition } from "../../lib/api";
 import PolicyProfileModal from "./PolicyProfileModal";
+
+type Lane = "at_risk" | "terminated";
 
 interface ManagerWorklistPanelProps {
   token: string;
@@ -36,11 +38,15 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<ManagerWorklistPolicy | null>(null);
+  const [lane, setLane] = useState<Lane>("at_risk");
 
   const fetchWorklist = useCallback(async (isRefresh = false) => {
     isRefresh ? setRefreshing(true) : setLoading(true);
     try {
-      const res = await mgrGetAtRiskWorklist(token);
+      const res =
+        lane === "terminated"
+          ? await mgrGetTerminatedWorklist(token)
+          : await mgrGetAtRiskWorklist(token);
       const list: ManagerWorklistPolicy[] = (res.worklist as ManagerWorklistPolicy[]) || [];
       // Worst-first: most days lapsed at the top of each stage column.
       list.sort((a, b) => (daysLapsed(b.paid_to_date) ?? -1) - (daysLapsed(a.paid_to_date) ?? -1));
@@ -52,7 +58,7 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
       setLoading(false);
       setRefreshing(false);
     }
-  }, [token]);
+  }, [token, lane]);
 
   useEffect(() => {
     fetchWorklist();
@@ -63,10 +69,39 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
     setSelected((prev) => (prev && prev.id === policyId ? { ...prev, disposition } : prev));
   };
 
+  const laneTabs: { key: Lane; label: string; icon: React.ElementType }[] = [
+    { key: "at_risk", label: "At-Risk", icon: AlertTriangle },
+    { key: "terminated", label: "Terminated", icon: XCircle },
+  ];
+
+  const LaneSwitch = (
+    <div className="flex gap-1 bg-navy p-1 rounded-lg w-fit border border-slate-700/50">
+      {laneTabs.map((t) => {
+        const Icon = t.icon;
+        const active = lane === t.key;
+        return (
+          <button
+            key={t.key}
+            onClick={() => { setLane(t.key); setSelected(null); }}
+            className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              active ? "bg-navy-light text-gold border border-gold/20" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <Icon size={14} />
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-16">
-        <Loader2 className="animate-spin text-gold" size={28} />
+      <div className="space-y-4">
+        {LaneSwitch}
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="animate-spin text-gold" size={28} />
+        </div>
       </div>
     );
   }
@@ -86,11 +121,20 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
 
   return (
     <div className="space-y-4">
+      {LaneSwitch}
       {/* Header */}
       <div className="flex items-center gap-2">
-        <AlertTriangle size={16} className="text-amber-400" />
-        <h3 className="text-sm font-semibold text-white">At-Risk Pipeline</h3>
-        <span className="text-xs text-slate-500">({worklist.length} flagged)</span>
+        {lane === "terminated" ? (
+          <XCircle size={16} className="text-rose-400" />
+        ) : (
+          <AlertTriangle size={16} className="text-amber-400" />
+        )}
+        <h3 className="text-sm font-semibold text-white">
+          {lane === "terminated" ? "Terminated Outreach" : "At-Risk Pipeline"}
+        </h3>
+        <span className="text-xs text-slate-500">
+          ({worklist.length} {lane === "terminated" ? "terminated" : "flagged"})
+        </span>
         <button
           onClick={() => fetchWorklist(true)}
           disabled={refreshing}
@@ -104,7 +148,9 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
 
       {worklist.length === 0 ? (
         <div className="text-center py-12 text-slate-500 text-sm bg-navy rounded-xl border border-slate-700/50">
-          No at-risk policies right now. Nice and clean.
+          {lane === "terminated"
+            ? "No terminated policies to work right now."
+            : "No at-risk policies right now. Nice and clean."}
         </div>
       ) : (
         // Kanban: columns scroll horizontally on narrow screens.
@@ -149,6 +195,11 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
                           <p className="text-[11px] text-slate-400 mt-0.5 truncate">
                             {p.carrier} · {p.product_type} · ${((p.plan_premium || 0) * 12).toLocaleString(undefined, { maximumFractionDigits: 0 })} AP
                           </p>
+                          {lane === "terminated" && p.contract_reason && (
+                            <span className="inline-block mt-1 text-[9px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-300 border border-rose-500/20">
+                              {p.contract_reason}
+                            </span>
+                          )}
                           <p className="text-[10px] text-slate-500 mt-0.5 truncate">
                             {p.agent_first_name} {p.agent_last_name}
                             {p.agent_number ? ` · #${p.agent_number}` : ""}

@@ -1183,6 +1183,14 @@ export interface ManagerWorklistPolicy {
   paid_to_date: string | null;
   policy_effective_date: string;
   disposition: ManagerDisposition | null;
+  // Client contact (available now from form_submissions).
+  client_phone?: string | null;
+  client_email?: string | null;
+  // Raw UNL contract code (A/T/P/S). Present for terminated outreach.
+  contract_code?: string | null;
+  // Granular termination reason once the UNL "Contract Reason" column is
+  // mapped into the import (pipeline gap — routed to Max). Null until then.
+  contract_reason?: string | null;
 }
 
 export interface PolicyThreadEntry {
@@ -1245,6 +1253,10 @@ export async function adminToggleAgencyManager(token: string, managerId: string,
 // --- Manager data (role: manager; manager token in body) ---
 export async function mgrGetAtRiskWorklist(token: string) {
   return callApi("admin-api", { action: "mgr-at-risk-worklist", token });
+}
+
+export async function mgrGetTerminatedWorklist(token: string) {
+  return callApi("admin-api", { action: "mgr-terminated-worklist", token });
 }
 
 export async function mgrGetPolicyThread(token: string, policyId: string) {
