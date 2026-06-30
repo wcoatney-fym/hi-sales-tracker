@@ -5011,28 +5011,19 @@ Deno.serve(async (req: Request) => {
 
       case "mgr-terminated-worklist": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
-        // Recently-terminated policies for this manager's agency — the win-back
-        // outreach lane. We only surface policies that fell off within the last
-        // TERMINATED_WINDOW_DAYS so managers chase fresh, still-recoverable
-        // business instead of a years-deep graveyard.
-        //
-        // NOTE (data gap): form_submissions has no true termination timestamp.
-        // The UNL file is current-state only and created_at reflects ingestion
-        // (all current rows backfilled this month), so it can't date a status
-        // change. paid_to_date — the date coverage was last paid through — is
-        // the best available proxy for "when it fell off". Proper fix is a
-        // terminated_at captured in the ingestion pipeline (loop in Max); swap
-        // the filter below to that column once it exists.
-        const TERMINATED_WINDOW_DAYS = 45;
-        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000)
-          .toISOString()
-          .slice(0, 10);
+        // Terminated policies for this manager's agency — the win-back lane.
+        // Membership comes EXCLUSIVELY from the imported data source
+        // (status = 'terminated'). No derived recency logic: the UNL file maps
+        // only effective/submit/paid-to dates plus a status code, so there is
+        // no termination date to time-window on. A 45-day window will return
+        // once the ingestion pipeline stamps a real terminated_at on the
+        // status transition (tracked separately with Max); until then we show
+        // what the source says is terminated.
         const { data: termPolicies, error: tpErr } = await supabase
           .from("form_submissions")
           .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code")
           .eq("agency_id", session.agency_id)
-          .eq("status", "terminated")
-          .gte("paid_to_date", termCutoff);
+          .eq("status", "terminated");
         if (tpErr) throw tpErr;
         const termIds = (termPolicies || []).map((p: { id: string }) => p.id);
         if (termIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
