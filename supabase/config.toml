@@ -17,3 +17,10 @@ project_id = "lryxxnpafaxjgehqirdp"
 
 [functions.sql-import-cron]
 verify_jwt = false
+
+# ghl-webhook is called by GoHighLevel automations, which send our own
+# x-api-key (validated against GHL_WEBHOOK_KEY) and no Supabase JWT. Pin
+# verify_jwt = false so the edge gateway doesn't 401 GHL before our code runs;
+# the x-api-key check is the gate.
+[functions.ghl-webhook]
+verify_jwt = false
