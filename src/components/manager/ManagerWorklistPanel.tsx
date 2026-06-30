@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { Loader2, AlertTriangle, RefreshCw, XCircle } from "lucide-react";
-import { mgrGetAtRiskWorklist, mgrGetTerminatedWorklist } from "../../lib/api";
+import {
+  mgrGetAtRiskWorklist,
+  mgrGetTerminatedWorklist,
+  mgrSetDisposition,
+  mgrHandoffToAgent,
+  mgrApproveSave,
+} from "../../lib/api";
 import type { ManagerWorklistPolicy, ManagerDisposition } from "../../lib/api";
 import PolicyProfileModal from "./PolicyProfileModal";
 
@@ -65,6 +71,9 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<ManagerWorklistPolicy | null>(null);
   const [lane, setLane] = useState<Lane>("at_risk");
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<Stage | null>(null);
+  const [movingId, setMovingId] = useState<string | null>(null);
 
   const fetchWorklist = useCallback(async (isRefresh = false) => {
     isRefresh ? setRefreshing(true) : setLoading(true);
@@ -91,8 +100,35 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
   }, [fetchWorklist]);
 
   const handleDispositionChange = (policyId: string, disposition: ManagerDisposition) => {
-    setWorklist((prev) => prev.map((p) => (p.id === policyId ? { ...p, disposition } : p)));
+    setWorklist((prev) => prev.map((p) => (p.id === policyId ? { ...p, disposition, stage: disposition } : p)));
     setSelected((prev) => (prev && prev.id === policyId ? { ...prev, disposition } : prev));
+  };
+
+  // Stages a manager can drop a card into, and the action each drop performs.
+  // 'new' (system/auto) and 'agent_saved_pending' (agent-set) are not manual
+  // drop targets.
+  const DROPPABLE: Stage[] = ["responded", "manager_outreach", "agent_outreach", "saved", "lost"];
+
+  const moveToStage = async (policy: ManagerWorklistPolicy, target: Stage) => {
+    const current = stageOf(policy);
+    if (current === target || !DROPPABLE.includes(target)) return;
+    setMovingId(policy.id);
+    // optimistic
+    setWorklist((prev) => prev.map((p) => (p.id === policy.id ? { ...p, stage: target, disposition: target as ManagerDisposition } : p)));
+    try {
+      if (target === "agent_outreach") {
+        await mgrHandoffToAgent(token, { policyId: policy.id });
+      } else if (target === "saved" && current === "agent_saved_pending") {
+        await mgrApproveSave(token, policy.id);
+      } else {
+        await mgrSetDisposition(token, { policyId: policy.id, disposition: target as ManagerDisposition });
+      }
+    } catch {
+      // revert on failure
+      setWorklist((prev) => prev.map((p) => (p.id === policy.id ? policy : p)));
+    } finally {
+      setMovingId(null);
+    }
   };
 
   const laneTabs: { key: Lane; label: string; icon: React.ElementType }[] = [
@@ -179,18 +215,30 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
             : "No at-risk policies right now. Nice and clean."}
         </div>
       ) : (
-        // Kanban: columns scroll horizontally on narrow screens.
-        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide snap-x">
+        // Kanban: all 7 stages fit one screen on desktop (grid), wrap on mobile.
+        // Drag a card between columns to set its stage.
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 pb-2">
           {STAGES.map((stage) => {
             const cards = byStage(stage.key);
+            const isDroppable = DROPPABLE.includes(stage.key);
+            const isOver = dropTarget === stage.key && isDroppable;
             return (
               <div
                 key={stage.key}
-                className="shrink-0 w-[78vw] sm:w-64 snap-start"
+                onDragOver={(e) => { if (isDroppable && dragId) { e.preventDefault(); setDropTarget(stage.key); } }}
+                onDragLeave={() => setDropTarget((t) => (t === stage.key ? null : t))}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDropTarget(null);
+                  const p = worklist.find((w) => w.id === dragId);
+                  if (p) moveToStage(p, stage.key);
+                  setDragId(null);
+                }}
+                className={`rounded-lg transition-colors ${isOver ? "bg-gold/5 ring-1 ring-gold/40" : ""} ${dragId && !isDroppable ? "opacity-50" : ""}`}
               >
-                <div className={`flex items-center gap-2 px-1 pb-2 border-b ${stage.accent} mb-2`}>
-                  <span className={`w-2 h-2 rounded-full ${stage.dot}`} />
-                  <span className="text-xs font-semibold text-slate-200">{stage.label}</span>
+                <div className={`flex items-center gap-1.5 px-1 pb-2 border-b ${stage.accent} mb-2`}>
+                  <span className={`w-2 h-2 rounded-full ${stage.dot} shrink-0`} />
+                  <span className="text-[11px] font-semibold text-slate-200 truncate">{stage.label}</span>
                   <span className="text-[11px] text-slate-500 ml-auto">{cards.length}</span>
                 </div>
                 <div className="space-y-2 min-h-[40px]">
@@ -212,8 +260,11 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
                       return (
                         <button
                           key={p.id}
+                          draggable={lane === "at_risk"}
+                          onDragStart={() => setDragId(p.id)}
+                          onDragEnd={() => { setDragId(null); setDropTarget(null); }}
                           onClick={() => setSelected(p)}
-                          className={`w-full text-left bg-navy border rounded-lg p-3 transition-colors ${
+                          className={`w-full text-left bg-navy border rounded-lg p-2.5 transition-colors ${lane === "at_risk" ? "cursor-grab active:cursor-grabbing" : ""} ${movingId === p.id ? "opacity-60" : ""} ${
                             codeRed ? "border-rose-500/50 hover:border-rose-400" : "border-slate-700/50 hover:border-gold/30"
                           }`}
                         >
