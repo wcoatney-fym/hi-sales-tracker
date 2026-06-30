@@ -31,7 +31,7 @@ export default function ManagerView() {
   };
 
   return (
-    <main className="max-w-4xl mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white">
+    <main className={`${activeTab === "worklist" ? "max-w-screen-2xl" : "max-w-4xl"} mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white transition-[max-width]`}>
       {/* Header */}
       <div className="flex items-center justify-between gap-3 mb-5">
         <div className="flex items-center gap-3 min-w-0">

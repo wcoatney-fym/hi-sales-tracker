@@ -29,11 +29,11 @@ type Stage =
   | "lost";
 
 const STAGES: { key: Stage; label: string; accent: string; dot: string }[] = [
-  { key: "new", label: "New · Auto-Outreach", accent: "border-slate-600/60", dot: "bg-slate-400" },
+  { key: "new", label: "New", accent: "border-slate-600/60", dot: "bg-slate-400" },
   { key: "responded", label: "Responded", accent: "border-sky-500/40", dot: "bg-sky-400" },
-  { key: "manager_outreach", label: "Manager Outreach", accent: "border-amber-500/40", dot: "bg-amber-400" },
-  { key: "agent_outreach", label: "Agent Outreach", accent: "border-violet-500/40", dot: "bg-violet-400" },
-  { key: "agent_saved_pending", label: "Pending Approval", accent: "border-teal-500/40", dot: "bg-teal-400" },
+  { key: "manager_outreach", label: "Manager", accent: "border-amber-500/40", dot: "bg-amber-400" },
+  { key: "agent_outreach", label: "Agent", accent: "border-violet-500/40", dot: "bg-violet-400" },
+  { key: "agent_saved_pending", label: "Pending", accent: "border-teal-500/40", dot: "bg-teal-400" },
   { key: "saved", label: "Saved", accent: "border-emerald-500/40", dot: "bg-emerald-400" },
   { key: "lost", label: "Lost", accent: "border-rose-500/40", dot: "bg-rose-400" },
 ];
@@ -215,9 +215,9 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
             : "No at-risk policies right now. Nice and clean."}
         </div>
       ) : (
-        // Kanban: all 7 stages fit one screen on desktop (grid), wrap on mobile.
-        // Drag a card between columns to set its stage.
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 pb-2">
+        // Kanban: horizontal-scroll columns on mobile, all 7 stages as a full-
+        // width grid on desktop (one screen). Drag a card between columns.
+        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide snap-x lg:grid lg:grid-cols-7 lg:gap-2.5 lg:overflow-visible">
           {STAGES.map((stage) => {
             const cards = byStage(stage.key);
             const isDroppable = DROPPABLE.includes(stage.key);
@@ -234,7 +234,7 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
                   if (p) moveToStage(p, stage.key);
                   setDragId(null);
                 }}
-                className={`rounded-lg transition-colors ${isOver ? "bg-gold/5 ring-1 ring-gold/40" : ""} ${dragId && !isDroppable ? "opacity-50" : ""}`}
+                className={`shrink-0 w-[68vw] sm:w-[38vw] lg:w-auto snap-start rounded-lg p-1.5 transition-colors ${isOver ? "bg-gold/5 ring-1 ring-gold/40" : "bg-navy/40"} ${dragId && !isDroppable ? "opacity-50" : ""}`}
               >
                 <div className={`flex items-center gap-1.5 px-1 pb-2 border-b ${stage.accent} mb-2`}>
                   <span className={`w-2 h-2 rounded-full ${stage.dot} shrink-0`} />
@@ -268,34 +268,31 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
                             codeRed ? "border-rose-500/50 hover:border-rose-400" : "border-slate-700/50 hover:border-gold/30"
                           }`}
                         >
-                          {(codeRed || pp.agent_overdue) && (
-                            <div className="flex items-center gap-1 mb-1.5">
-                              {codeRed && (
-                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                                  CODE RED
-                                </span>
-                              )}
-                              {pp.agent_overdue && (
-                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                                  AGENT OVERDUE
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          <div className="flex items-start justify-between gap-2">
-                            <p className="text-sm font-medium text-white truncate">
-                              {p.client_first_name} {p.client_last_name}
-                            </p>
+                          {/* Urgency row: badge(s) on the left, countdown on the right */}
+                          <div className="flex items-center gap-1 mb-1 min-h-[16px]">
+                            {codeRed && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                CODE RED
+                              </span>
+                            )}
+                            {pp.agent_overdue && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                OVERDUE
+                              </span>
+                            )}
                             {lane === "at_risk" && typeof dtt === "number" ? (
-                              <span className={`text-xs font-bold shrink-0 ${dttColor}`}>
+                              <span className={`text-[11px] font-bold ml-auto ${dttColor}`}>
                                 {dtt > 0 ? `${dtt}d left` : "grace up"}
                               </span>
                             ) : (
                               (() => { const days = daysLapsed(p.paid_to_date); return days !== null ? (
-                                <span className="text-xs font-bold shrink-0 text-slate-400">{days}d</span>
+                                <span className="text-[11px] font-bold ml-auto text-slate-400">{days}d</span>
                               ) : null; })()
                             )}
                           </div>
+                          <p className="text-sm font-semibold text-white leading-snug break-words">
+                            {p.client_first_name} {p.client_last_name}
+                          </p>
                           <p className="text-[11px] text-slate-400 mt-0.5 truncate">
                             {p.carrier} · {p.product_type} · ${((p.plan_premium || 0) * 12).toLocaleString(undefined, { maximumFractionDigits: 0 })} AP
                           </p>
