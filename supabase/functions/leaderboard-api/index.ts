@@ -1344,6 +1344,69 @@ Deno.serve(async (req: Request) => {
       return jsonResponse(data);
     }
 
+    // Agent logs that they made contact on a policy handed to them by their
+    // manager (at-risk pipeline). Satisfies the 5-day follow-up SLA and feeds
+    // the manager's Agent Quality metric. Only stamps the first contact.
+    if (action === "agent-log-contact") {
+      const authHeader = req.headers.get("X-Agent-Token") || "";
+      if (!authHeader) return errorResponse("No session token", 401);
+      const { data: session } = await supabase
+        .from("agent_sessions")
+        .select("agent_id, expires_at")
+        .eq("token", authHeader)
+        .maybeSingle();
+      if (!session || new Date(session.expires_at) < new Date()) {
+        return errorResponse("Session expired", 401);
+      }
+      const body = await req.json();
+      const { policyId } = body;
+      if (!policyId) return errorResponse("policyId required", 400);
+      // Only the agent the policy was handed to, and only if not already logged.
+      const { error } = await supabase
+        .from("policy_dispositions")
+        .update({ agent_contacted_at: new Date().toISOString() })
+        .eq("policy_id", policyId)
+        .eq("agent_id", session.agent_id)
+        .is("agent_contacted_at", null);
+      if (error) throw error;
+      return jsonResponse({ ok: true, policy_id: policyId, agent_contacted: true });
+    }
+
+    // Agent marks a handed-off policy as saved -> awaits manager approval.
+    if (action === "agent-mark-saved") {
+      const authHeader = req.headers.get("X-Agent-Token") || "";
+      if (!authHeader) return errorResponse("No session token", 401);
+      const { data: session } = await supabase
+        .from("agent_sessions")
+        .select("agent_id, expires_at")
+        .eq("token", authHeader)
+        .maybeSingle();
+      if (!session || new Date(session.expires_at) < new Date()) {
+        return errorResponse("Session expired", 401);
+      }
+      const body = await req.json();
+      const { policyId, note: saveNote } = body;
+      if (!policyId) return errorResponse("policyId required", 400);
+      const nowIso = new Date().toISOString();
+      // Only the owning agent, only from the agent_outreach stage. Manager
+      // approval (admin-api mgr-approve-save) flips it to 'saved'.
+      const { error } = await supabase
+        .from("policy_dispositions")
+        .update({
+          disposition: "agent_saved_pending",
+          agent_saved_at: nowIso,
+          agent_contacted_at: nowIso,
+          sync_origin: "tracker",
+          ...(saveNote ? { note: String(saveNote).slice(0, 280) } : {}),
+          set_at: nowIso,
+        })
+        .eq("policy_id", policyId)
+        .eq("agent_id", session.agent_id)
+        .eq("disposition", "agent_outreach");
+      if (error) throw error;
+      return jsonResponse({ ok: true, policy_id: policyId, disposition: "agent_saved_pending" });
+    }
+
     if (action === "agent-dashboard-stats") {
       const authHeader = req.headers.get("X-Agent-Token") || "";
       if (!authHeader) return errorResponse("No session token", 401);
