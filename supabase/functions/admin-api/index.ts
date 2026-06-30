@@ -4972,32 +4972,39 @@ Deno.serve(async (req: Request) => {
       // ----- Manager-role data endpoints (role = 'manager') -----
       case "mgr-at-risk-worklist": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
-        // Policies for this manager's agency
+        // Data-driven at-risk lane. A policy is at-risk when it is still active
+        // but its premium is past due — i.e. a draft was missed. We compute this
+        // straight from policy state instead of waiting on a manual flag row, so
+        // the board reflects reality the moment the daily UNL file lands.
+        //
+        // Definition (locked w/ Charlie 2026-06-30):
+        //   status = 'active' AND billing_form = 'DIR' AND paid_to_date < today
+        // Only direct-bill (DIR) policies count — a past-due DIR is a genuinely
+        // missed auto-draft. This mirrors the dashboard's at-risk KPI so the
+        // manager pipeline and the internal dashboard report the same number.
+        // Flags/dispositions are an ACTION layer on top, never the entry gate.
+        const todayIso = new Date().toISOString().slice(0, 10);
         const { data: agencyPolicies, error: apErr } = await supabase
           .from("form_submissions")
           .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code")
-          .eq("agency_id", session.agency_id);
+          .eq("agency_id", session.agency_id)
+          .eq("status", "active")
+          .eq("billing_form", "DIR")
+          .lt("paid_to_date", todayIso);
         if (apErr) throw apErr;
         const policyIds = (agencyPolicies || []).map((p: { id: string }) => p.id);
-        if (policyIds.length === 0) return jsonResponse({ worklist: [] });
+        if (policyIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
 
-        const [{ data: flags }, { data: disps }] = await Promise.all([
-          supabase
-            .from("at_risk_activities")
-            .select("policy_id, kind, created_at")
-            .eq("kind", "flag")
-            .in("policy_id", policyIds),
-          supabase
-            .from("policy_dispositions")
-            .select("policy_id, disposition, follow_up_at, set_at")
-            .in("policy_id", policyIds),
-        ]);
-        const flaggedIds = new Set((flags || []).map((f: { policy_id: string }) => f.policy_id));
+        // Disposition state (working / follow-up / secured / lost) overlays the
+        // computed list so a manager's progress on a policy persists.
+        const { data: disps } = await supabase
+          .from("policy_dispositions")
+          .select("policy_id, disposition, follow_up_at, set_at")
+          .in("policy_id", policyIds);
         const dispByPolicy = new Map(
           (disps || []).map((d: { policy_id: string }) => [d.policy_id, d])
         );
         const worklist = (agencyPolicies || [])
-          .filter((p: { id: string }) => flaggedIds.has(p.id))
           .map((p: Record<string, unknown>) => shapeWorklistRow(p, dispByPolicy.get(p.id as string) || null));
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
