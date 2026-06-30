@@ -196,9 +196,14 @@ function computeAtRiskStage(paidToDate: string | null, disp: DispRow) {
   const d = (disp?.disposition as string | null) ?? null;
 
   // action-stage (normalize legacy values onto the v3 set)
+  const ageDays0 = ageDays;
   let stage: string;
   if (d === "saved" || d === "secured") stage = "saved";
   else if (d === "lost") stage = "lost";
+  // Grace is over (>= 45 days past due): the policy is effectively gone, so it
+  // drops into Lost even before the next data refresh flips it to terminated.
+  // A confirmed save (above) still wins.
+  else if (ageDays0 >= AT_RISK_TOTAL_DAYS) stage = "lost";
   else if (d === "agent_saved_pending") stage = "agent_saved_pending";
   else if (d === "agent_outreach") stage = "agent_outreach";
   else if (d === "manager_outreach" || d === "working" || d === "follow_up") stage = "manager_outreach";
