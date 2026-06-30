@@ -10,14 +10,25 @@ interface ManagerWorklistPanelProps {
   token: string;
 }
 
-// Pipeline stages, left → right. "new" = no disposition set yet (untouched).
-type Stage = "new" | "working" | "follow_up" | "secured" | "lost";
+// v3 pipeline stages, left → right. The backend computes `stage` per policy
+// (data-driven entry + keyword + manager/agent actions); Code Red / Heating Up
+// are urgency overlays carried on each card, not columns.
+type Stage =
+  | "new"
+  | "responded"
+  | "manager_outreach"
+  | "agent_outreach"
+  | "agent_saved_pending"
+  | "saved"
+  | "lost";
 
 const STAGES: { key: Stage; label: string; accent: string; dot: string }[] = [
-  { key: "new", label: "New", accent: "border-slate-600/60", dot: "bg-slate-400" },
-  { key: "working", label: "Working", accent: "border-amber-500/40", dot: "bg-amber-400" },
-  { key: "follow_up", label: "Follow Up", accent: "border-sky-500/40", dot: "bg-sky-400" },
-  { key: "secured", label: "Secured", accent: "border-emerald-500/40", dot: "bg-emerald-400" },
+  { key: "new", label: "New · Auto-Outreach", accent: "border-slate-600/60", dot: "bg-slate-400" },
+  { key: "responded", label: "Responded", accent: "border-sky-500/40", dot: "bg-sky-400" },
+  { key: "manager_outreach", label: "Manager Outreach", accent: "border-amber-500/40", dot: "bg-amber-400" },
+  { key: "agent_outreach", label: "Agent Outreach", accent: "border-violet-500/40", dot: "bg-violet-400" },
+  { key: "agent_saved_pending", label: "Pending Approval", accent: "border-teal-500/40", dot: "bg-teal-400" },
+  { key: "saved", label: "Saved", accent: "border-emerald-500/40", dot: "bg-emerald-400" },
   { key: "lost", label: "Lost", accent: "border-rose-500/40", dot: "bg-rose-400" },
 ];
 
@@ -29,7 +40,22 @@ function daysLapsed(paidToDate: string | null): number | null {
 }
 
 function stageOf(p: ManagerWorklistPolicy): Stage {
-  return (p.disposition as Stage) || "new";
+  // Prefer the backend-computed stage; fall back to disposition for safety.
+  const s = (p as { stage?: string }).stage || p.disposition || "new";
+  const valid: Stage[] = ["new", "responded", "manager_outreach", "agent_outreach", "agent_saved_pending", "saved", "lost"];
+  return (valid.includes(s as Stage) ? s : "new") as Stage;
+}
+
+// Worst-first within a column: Code Red, then overdue agent handoffs, then
+// closest to termination.
+function urgencyRank(p: ManagerWorklistPolicy): number {
+  let r = 0;
+  if ((p as { is_code_red?: boolean }).is_code_red) r += 1000;
+  if ((p as { agent_overdue?: boolean }).agent_overdue) r += 500;
+  if ((p as { is_heating_up?: boolean }).is_heating_up) r += 100;
+  const dtt = (p as { days_to_terminate?: number }).days_to_terminate;
+  if (typeof dtt === "number") r += Math.max(0, 45 - dtt);
+  return r;
 }
 
 export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProps) {
@@ -48,8 +74,8 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
           ? await mgrGetTerminatedWorklist(token)
           : await mgrGetAtRiskWorklist(token);
       const list: ManagerWorklistPolicy[] = (res.worklist as ManagerWorklistPolicy[]) || [];
-      // Worst-first: most days lapsed at the top of each stage column.
-      list.sort((a, b) => (daysLapsed(b.paid_to_date) ?? -1) - (daysLapsed(a.paid_to_date) ?? -1));
+      // Worst-first: Code Red / overdue / closest-to-termination at the top.
+      list.sort((a, b) => urgencyRank(b) - urgencyRank(a));
       setWorklist(list);
       setError("");
     } catch (err) {
@@ -172,24 +198,51 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
                     <p className="text-[11px] text-slate-600 px-1 py-3 text-center">—</p>
                   ) : (
                     cards.map((p) => {
-                      const days = daysLapsed(p.paid_to_date);
-                      const daysColor =
-                        days === null ? "text-slate-500"
-                        : days > 60 ? "text-rose-400"
-                        : days > 30 ? "text-amber-400"
+                      const pp = p as ManagerWorklistPolicy & {
+                        days_to_terminate?: number; is_code_red?: boolean;
+                        is_heating_up?: boolean; agent_overdue?: boolean;
+                      };
+                      const dtt = pp.days_to_terminate;
+                      const codeRed = !!pp.is_code_red;
+                      const heating = !!pp.is_heating_up;
+                      const dttColor =
+                        codeRed ? "text-rose-400"
+                        : heating ? "text-amber-400"
                         : "text-yellow-300";
                       return (
                         <button
                           key={p.id}
                           onClick={() => setSelected(p)}
-                          className="w-full text-left bg-navy border border-slate-700/50 rounded-lg p-3 hover:border-gold/30 transition-colors"
+                          className={`w-full text-left bg-navy border rounded-lg p-3 transition-colors ${
+                            codeRed ? "border-rose-500/50 hover:border-rose-400" : "border-slate-700/50 hover:border-gold/30"
+                          }`}
                         >
+                          {(codeRed || pp.agent_overdue) && (
+                            <div className="flex items-center gap-1 mb-1.5">
+                              {codeRed && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                  CODE RED
+                                </span>
+                              )}
+                              {pp.agent_overdue && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                                  AGENT OVERDUE
+                                </span>
+                              )}
+                            </div>
+                          )}
                           <div className="flex items-start justify-between gap-2">
                             <p className="text-sm font-medium text-white truncate">
                               {p.client_first_name} {p.client_last_name}
                             </p>
-                            {days !== null && (
-                              <span className={`text-xs font-bold shrink-0 ${daysColor}`}>{days}d</span>
+                            {lane === "at_risk" && typeof dtt === "number" ? (
+                              <span className={`text-xs font-bold shrink-0 ${dttColor}`}>
+                                {dtt > 0 ? `${dtt}d left` : "grace up"}
+                              </span>
+                            ) : (
+                              (() => { const days = daysLapsed(p.paid_to_date); return days !== null ? (
+                                <span className="text-xs font-bold shrink-0 text-slate-400">{days}d</span>
+                              ) : null; })()
                             )}
                           </div>
                           <p className="text-[11px] text-slate-400 mt-0.5 truncate">
