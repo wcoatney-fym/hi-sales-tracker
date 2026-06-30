@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Loader2, AlertTriangle, RefreshCw, XCircle } from "lucide-react";
+import { Loader2, AlertTriangle, RefreshCw, XCircle, Search } from "lucide-react";
 import {
   mgrGetAtRiskWorklist,
   mgrGetTerminatedWorklist,
@@ -74,6 +74,8 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<Stage | null>(null);
   const [movingId, setMovingId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "code_red" | "heating_up" | "agent_overdue">("all");
+  const [query, setQuery] = useState("");
 
   const fetchWorklist = useCallback(async (isRefresh = false) => {
     isRefresh ? setRefreshing(true) : setLoading(true);
@@ -179,7 +181,34 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
     );
   }
 
-  const byStage = (stage: Stage) => worklist.filter((p) => stageOf(p) === stage);
+  // Triage counts across the whole at-risk book (pre-filter).
+  const counts = {
+    total: worklist.length,
+    code_red: worklist.filter((p) => (p as { is_code_red?: boolean }).is_code_red).length,
+    heating_up: worklist.filter((p) => (p as { is_heating_up?: boolean }).is_heating_up).length,
+    agent_overdue: worklist.filter((p) => (p as { agent_overdue?: boolean }).agent_overdue).length,
+  };
+
+  const matchesQuery = (p: ManagerWorklistPolicy) => {
+    if (!query.trim()) return true;
+    const q = query.trim().toLowerCase();
+    return (
+      `${p.client_first_name} ${p.client_last_name}`.toLowerCase().includes(q) ||
+      `${p.agent_first_name} ${p.agent_last_name}`.toLowerCase().includes(q) ||
+      (p.policy_number || "").toLowerCase().includes(q)
+    );
+  };
+
+  const matchesFilter = (p: ManagerWorklistPolicy) => {
+    if (filter === "all") return true;
+    if (filter === "code_red") return !!(p as { is_code_red?: boolean }).is_code_red;
+    if (filter === "heating_up") return !!(p as { is_heating_up?: boolean }).is_heating_up;
+    if (filter === "agent_overdue") return !!(p as { agent_overdue?: boolean }).agent_overdue;
+    return true;
+  };
+
+  const visible = worklist.filter((p) => matchesQuery(p) && matchesFilter(p));
+  const byStage = (stage: Stage) => visible.filter((p) => stageOf(p) === stage);
 
   return (
     <div className="space-y-4">
@@ -207,6 +236,35 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
           <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
         </button>
       </div>
+
+      {/* Triage bar + search (at-risk lane) */}
+      {lane === "at_risk" && worklist.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {([
+            { key: "all", label: `All ${counts.total}`, cls: "text-slate-300 border-slate-600/60", active: "bg-slate-600/30 text-white border-slate-400" },
+            { key: "code_red", label: `Code Red ${counts.code_red}`, cls: "text-rose-300 border-rose-500/30", active: "bg-rose-500/20 text-rose-200 border-rose-400" },
+            { key: "agent_overdue", label: `Agent Overdue ${counts.agent_overdue}`, cls: "text-rose-300 border-rose-500/30", active: "bg-rose-500/20 text-rose-200 border-rose-400" },
+            { key: "heating_up", label: `Heating Up ${counts.heating_up}`, cls: "text-amber-300 border-amber-500/30", active: "bg-amber-500/20 text-amber-200 border-amber-400" },
+          ] as const).map((chip) => (
+            <button
+              key={chip.key}
+              onClick={() => setFilter((f) => (f === chip.key ? "all" : chip.key))}
+              className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border transition-colors ${filter === chip.key ? chip.active : `bg-navy ${chip.cls} hover:text-white`}`}
+            >
+              {chip.label}
+            </button>
+          ))}
+          <div className="relative ml-auto">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search client, agent, policy #"
+              className="bg-navy border border-slate-700/60 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-gold w-52"
+            />
+          </div>
+        </div>
+      )}
 
       {worklist.length === 0 ? (
         <div className="text-center py-12 text-slate-500 text-sm bg-navy rounded-xl border border-slate-700/50">

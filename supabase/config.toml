@@ -17,3 +17,10 @@ project_id = "lryxxnpafaxjgehqirdp"
 
 [functions.sql-import-cron]
 verify_jwt = false
+
+# ghl-webhook is the inbound half of the bidirectional GHL sync. GHL automations
+# call it with our x-api-key (validated against GHL_WEBHOOK_KEY) and no Supabase
+# JWT, so the edge gateway would 401 it under the default. Pin verify_jwt=false;
+# the x-api-key check is the gate.
+[functions.ghl-webhook]
+verify_jwt = false
