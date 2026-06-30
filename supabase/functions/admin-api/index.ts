@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { resolveAgentIdFromPolicy } from "./resolve.ts";
+import { syncStageToGhl } from "./ghl.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -5218,9 +5219,11 @@ Deno.serve(async (req: Request) => {
             note,
             follow_up_at: follow_up_at || null,
             set_by: mgr?.id || null,
+            sync_origin: "tracker",
             set_at: new Date().toISOString(),
           }, { onConflict: "policy_id" });
         if (dsErr) throw dsErr;
+        await syncStageToGhl(supabase, policy_id, disposition, "tracker");
         return jsonResponse({ policy_id, disposition });
       }
 
@@ -5246,9 +5249,11 @@ Deno.serve(async (req: Request) => {
             agent_outreach_at: new Date().toISOString(),
             agent_contacted_at: null,
             set_by: mgr?.id || null,
+            sync_origin: "tracker",
             set_at: new Date().toISOString(),
           }, { onConflict: "policy_id" });
         if (hoErr) throw hoErr;
+        await syncStageToGhl(supabase, policy_id, "agent_outreach", "tracker");
         if (agentId) {
           await supabase.from("notifications").insert({
             recipient_kind: "agent",
@@ -5272,12 +5277,14 @@ Deno.serve(async (req: Request) => {
           .update({
             disposition: "saved",
             manager_approved_at: new Date().toISOString(),
+            sync_origin: "tracker",
             set_at: new Date().toISOString(),
           })
           .eq("policy_id", policy_id)
           .eq("agency_id", session.agency_id)
           .eq("disposition", "agent_saved_pending");
         if (apErr) throw apErr;
+        await syncStageToGhl(supabase, policy_id, "saved", "tracker");
         return jsonResponse({ policy_id, disposition: "saved" });
       }
 
