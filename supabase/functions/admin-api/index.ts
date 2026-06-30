@@ -5092,19 +5092,19 @@ Deno.serve(async (req: Request) => {
         // Terminated policies for this manager's agency — the win-back lane.
         // Membership comes from the imported data source (status='terminated').
         // We auto-drop policies terminated more than TERMINATED_WINDOW_DAYS ago
-        // so the lane stays a fresh, workable list. terminated_at is stamped by
-        // a trigger the first time UNL reports the policy terminated (observed,
-        // not derived) — see migration 20260630150500. Rows that terminated
-        // before that trigger existed have NULL terminated_at and are excluded
-        // (no derived backfill date, by design).
+        // so the lane stays a fresh, workable list, using the carrier's real
+        // Term Date from the UNL source (form_submissions.terminated_date) —
+        // not a derived date.
         const TERMINATED_WINDOW_DAYS = 45;
-        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000).toISOString();
+        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000)
+          .toISOString()
+          .slice(0, 10);
         const { data: termPolicies, error: tpErr } = await supabase
           .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, terminated_at")
+          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, terminated_date")
           .eq("agency_id", session.agency_id)
           .eq("status", "terminated")
-          .gte("terminated_at", termCutoff);
+          .gte("terminated_date", termCutoff);
         if (tpErr) throw tpErr;
         const termIds = (termPolicies || []).map((p: { id: string }) => p.id);
         if (termIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
