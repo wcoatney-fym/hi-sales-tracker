@@ -32,6 +32,25 @@ function usDate(d: string | null): string {
   return y ? `${m}/${day}/${y}` : "";
 }
 
+// Translate the raw UNL billing-mode code to a human-readable draft cadence for
+// the Zap payload (Charlie, 2026-07-01). Unknown/blank codes pass through as-is
+// so GHL still sees the raw value rather than an empty string.
+function billingModeLabel(code: string | null): string {
+  const c = (code ?? "").trim();
+  switch (c) {
+    case "1":
+      return "monthly";
+    case "3":
+      return "quarterly";
+    case "6":
+      return "semi annual";
+    case "12":
+      return "annual";
+    default:
+      return c;
+  }
+}
+
 // Fire lifecycle events for one synced batch. Best-effort, fire-and-forget.
 async function fireLifecycleEvents(
   supabase: ReturnType<typeof createClient>,
@@ -101,7 +120,7 @@ async function fireLifecycleEvents(
       submission_date: usDate((p.app_submit_date as string) ?? null),
       effective_date: usDate((p.policy_effective_date as string) ?? null),
       paid_to_date: usDate((p.paid_to_date as string) ?? null),
-      billing_mode: p.billing_mode ?? "",
+      billing_mode: billingModeLabel(p.billing_mode as string | null),
       at_risk_status: atRiskStatus,
       termination_date: usDate((p.terminated_date as string) ?? null),
       contract_reason: p.contract_reason ?? "",
