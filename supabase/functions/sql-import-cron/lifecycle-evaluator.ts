@@ -81,43 +81,41 @@ export interface LifecycleEvent {
   risk_signal: string | null;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-const AT_RISK_WINDOW_DAYS = 60;
-// One monthly cycle of grace on paid_to_date past the effective date. If the
-// carrier hasn't collected past effective + ~1 cycle, the draft didn't hold.
-const ONE_CYCLE_DAYS = 31;
-
 function parseIso(d: string | null): number | null {
   if (!d) return null;
   const t = Date.parse(`${d}T00:00:00Z`);
   return Number.isNaN(t) ? null : t;
 }
 
+// Start-of-today in UTC, for a strict paid_to_date < today comparison.
+function todayUtcMidnight(now: number): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
 /**
- * Derived at-risk signal. True when a monthly, direct-bill (DIR) policy is
- * inside its first 60 days and its paid_to_date has NOT advanced one cycle
- * past the effective date — i.e. the early draft failed to hold.
+ * Derived at-risk signal (Charlie, 2026-06-30): active + DIR + paid_to_date is
+ * in the past. i.e. an active, direct-bill policy whose premium is paid through
+ * a date earlier than today has fallen behind on its draft.
  *
  * `now` is injectable for deterministic tests.
  */
 export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean {
-  // Only monthly + direct-bill policies are in scope for the early-draft signal.
-  const mode = (p.billing_mode || "").trim();
+  // ACTIVE policies only. A pending (P) / submission-status policy has not
+  // completed a draft yet, so it must never fire at-risk automatically — the
+  // whole pending/submission status is paused + locked until the UNL webhook
+  // cutover (see SUBMISSION_TRIGGER_ENABLED). Terminated/suspended are also out.
+  const code = (p.contract_code || "").trim().toUpperCase();
+  if (code !== "A") return false;
+
+  // Direct-bill only (PAC auto-draft is out of scope).
   const form = (p.billing_form || "").trim().toUpperCase();
-  if (mode !== "1") return false;
   if (form !== "DIR") return false;
 
-  const eff = parseIso(p.policy_effective_date);
-  if (eff === null) return false;
-
-  // Inside the first 60 days of coverage only.
-  const ageDays = (now - eff) / DAY_MS;
-  if (ageDays < 0 || ageDays > AT_RISK_WINDOW_DAYS) return false;
-
-  // paid_to_date must have advanced at least one cycle past effective.
+  // paid_to_date strictly before today => behind on premium => at risk.
   const ptd = parseIso(p.paid_to_date);
-  if (ptd === null) return true; // never drafted past effective => at risk
-  return ptd <= eff + ONE_CYCLE_DAYS * DAY_MS;
+  if (ptd === null) return false; // no paid-to-date on file => not evaluable
+  return ptd < todayUtcMidnight(now);
 }
 
 // TEMPORARY: the `submission` event is currently owned by the intake form
@@ -126,9 +124,10 @@ export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean 
 // data-side evaluator ALSO fire `submission` on Contract Code -> P would
 // double-trigger the same policy. So submission is disabled here by default.
 //
-// Revisit when the UNL live feed cuts over: at that point the intake form goes
-// away and the evaluator becomes the single source for `submission` — flip
-// this to true (or pass { emitSubmission: true }).
+// LOCKED (Charlie, 2026-06-30): the pending/submission status is PAUSED. Do not
+// flip this to true (and do not pass { emitSubmission: true } from production)
+// without an explicit manual thumbs-up AND the live UNL webhook in place. Until
+// then the intake form remains the single source of the submission event.
 export const SUBMISSION_TRIGGER_ENABLED = false;
 
 export interface LifecycleOptions {
@@ -210,7 +209,7 @@ export function evaluateAtRisk(
         policy_number: next.policy_number,
         previous_contract_code: prior?.contract_code ?? null,
         contract_reason: next.contract_reason ?? null,
-        risk_signal: "early-draft-not-held",
+        risk_signal: "active-dir-paid-to-date-past-due",
       },
     };
   }
