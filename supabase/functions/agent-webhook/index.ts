@@ -108,6 +108,25 @@ async function syncAgencyRoster(supabase: any, params: {
   }
   if (!primary) return false;
 
+  // Self-heal: collapse any pre-existing extra roster rows for this agent into the
+  // single-record model. Non-primary carriers move to agent_writing_numbers; the
+  // extra roster row is then removed. (Fixes historical double records.)
+  const extras = (existingRosters || []).slice(1);
+  for (const ex of extras) {
+    if (ex.carrier !== primary.carrier) {
+      const { data: awnRows } = await supabase
+        .from("agent_writing_numbers")
+        .select("id")
+        .eq("agent_id", params.agentId)
+        .eq("agency_id", params.agencyId)
+        .eq("carrier_name", ex.carrier);
+      if (!(awnRows && awnRows[0])) {
+        await supabase.from("agent_writing_numbers").insert({ agent_id: params.agentId, agency_id: params.agencyId, carrier_name: ex.carrier, writing_number: ex.writing_number });
+      }
+    }
+    await supabase.from("agency_rosters").delete().eq("id", ex.id);
+  }
+
   for (const [carrier, number] of carriers) {
     if (carrier === primary.carrier) {
       if (primary.writing_number !== number) {
