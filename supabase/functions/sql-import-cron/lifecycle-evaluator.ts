@@ -64,6 +64,13 @@ function parseIso(d: string | null): number | null {
  * `now` is injectable for deterministic tests.
  */
 export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean {
+  // ACTIVE policies only. A pending (P) / submission-status policy has not
+  // completed a draft yet, so it must never fire at-risk automatically — the
+  // whole pending/submission status is paused + locked until the UNL webhook
+  // cutover (see SUBMISSION_TRIGGER_ENABLED). Terminated/suspended are also out.
+  const code = (p.contract_code || "").trim().toUpperCase();
+  if (code !== "A") return false;
+
   // Only monthly + direct-bill policies are in scope for the early-draft signal.
   const mode = (p.billing_mode || "").trim();
   const form = (p.billing_form || "").trim().toUpperCase();
@@ -89,9 +96,10 @@ export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean 
 // data-side evaluator ALSO fire `submission` on Contract Code -> P would
 // double-trigger the same policy. So submission is disabled here by default.
 //
-// Revisit when the UNL live feed cuts over: at that point the intake form goes
-// away and the evaluator becomes the single source for `submission` — flip
-// this to true (or pass { emitSubmission: true }).
+// LOCKED (Charlie, 2026-06-30): the pending/submission status is PAUSED. Do not
+// flip this to true (and do not pass { emitSubmission: true } from production)
+// without an explicit manual thumbs-up AND the live UNL webhook in place. Until
+// then the intake form remains the single source of the submission event.
 export const SUBMISSION_TRIGGER_ENABLED = false;
 
 export interface LifecycleOptions {
