@@ -44,22 +44,22 @@ export interface LifecycleEvent {
   risk_signal: string | null;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-const AT_RISK_WINDOW_DAYS = 60;
-// One monthly cycle of grace on paid_to_date past the effective date. If the
-// carrier hasn't collected past effective + ~1 cycle, the draft didn't hold.
-const ONE_CYCLE_DAYS = 31;
-
 function parseIso(d: string | null): number | null {
   if (!d) return null;
   const t = Date.parse(`${d}T00:00:00Z`);
   return Number.isNaN(t) ? null : t;
 }
 
+// Start-of-today in UTC, for a strict paid_to_date < today comparison.
+function todayUtcMidnight(now: number): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
 /**
- * Derived at-risk signal. True when a monthly, direct-bill (DIR) policy is
- * inside its first 60 days and its paid_to_date has NOT advanced one cycle
- * past the effective date — i.e. the early draft failed to hold.
+ * Derived at-risk signal (Charlie, 2026-06-30): active + DIR + paid_to_date is
+ * in the past. i.e. an active, direct-bill policy whose premium is paid through
+ * a date earlier than today has fallen behind on its draft.
  *
  * `now` is injectable for deterministic tests.
  */
@@ -71,23 +71,14 @@ export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean 
   const code = (p.contract_code || "").trim().toUpperCase();
   if (code !== "A") return false;
 
-  // Only monthly + direct-bill policies are in scope for the early-draft signal.
-  const mode = (p.billing_mode || "").trim();
+  // Direct-bill only (PAC auto-draft is out of scope).
   const form = (p.billing_form || "").trim().toUpperCase();
-  if (mode !== "1") return false;
   if (form !== "DIR") return false;
 
-  const eff = parseIso(p.policy_effective_date);
-  if (eff === null) return false;
-
-  // Inside the first 60 days of coverage only.
-  const ageDays = (now - eff) / DAY_MS;
-  if (ageDays < 0 || ageDays > AT_RISK_WINDOW_DAYS) return false;
-
-  // paid_to_date must have advanced at least one cycle past effective.
+  // paid_to_date strictly before today => behind on premium => at risk.
   const ptd = parseIso(p.paid_to_date);
-  if (ptd === null) return true; // never drafted past effective => at risk
-  return ptd <= eff + ONE_CYCLE_DAYS * DAY_MS;
+  if (ptd === null) return false; // no paid-to-date on file => not evaluable
+  return ptd < todayUtcMidnight(now);
 }
 
 // TEMPORARY: the `submission` event is currently owned by the intake form
@@ -181,7 +172,7 @@ export function evaluateAtRisk(
         policy_number: next.policy_number,
         previous_contract_code: prior?.contract_code ?? null,
         contract_reason: next.contract_reason ?? null,
-        risk_signal: "early-draft-not-held",
+        risk_signal: "active-dir-paid-to-date-past-due",
       },
     };
   }
