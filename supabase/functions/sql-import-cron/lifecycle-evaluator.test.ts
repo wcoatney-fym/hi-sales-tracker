@@ -89,6 +89,15 @@ Deno.test("at-risk: null paid_to_date is at risk", () => {
   assertEquals(deriveAtRisk(policy({ paid_to_date: null }), NOW), true);
 });
 
+Deno.test("at-risk: pending (P / submission status) never fires at-risk", () => {
+  assertEquals(deriveAtRisk(policy({ contract_code: "P" }), NOW), false);
+});
+
+Deno.test("at-risk: terminated / suspended are out of scope", () => {
+  assertEquals(deriveAtRisk(policy({ contract_code: "T" }), NOW), false);
+  assertEquals(deriveAtRisk(policy({ contract_code: "S" }), NOW), false);
+});
+
 Deno.test("at-risk: quarterly (mode 3) is out of scope", () => {
   assertEquals(deriveAtRisk(policy({ billing_mode: "3" }), NOW), false);
 });
