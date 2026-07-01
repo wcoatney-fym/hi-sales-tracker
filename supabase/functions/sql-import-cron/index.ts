@@ -894,9 +894,27 @@ async function handleSync(
       details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted },
     });
 
+    // --- Lifecycle evaluator: fire status-change + at-risk events to Zapier ---
+    // Best-effort: a firing failure must never fail the import or reconciliation.
+    let lifecycle: Record<string, unknown> | null = null;
+    try {
+      lifecycle = await evaluateAndFireLifecycle(supabase, sourceId, uploadId);
+      await supabase.from("upload_history_log").insert({
+        action: "lifecycle_evaluated",
+        source: "sql_import",
+        details: { source_id: sourceId, upload_id: uploadId, ...lifecycle },
+      });
+    } catch (e) {
+      await supabase.from("upload_history_log").insert({
+        action: "lifecycle_error",
+        source: "sql_import",
+        details: { source_id: sourceId, upload_id: uploadId, error: e instanceof Error ? e.message : String(e) },
+      });
+    }
+
     // Staging is intentionally retained: the admin "View" screen reads it, and the
     // next import purges prior uploads' rows at init (see purgeOldStagingRows).
-    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted });
+    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted, lifecycle });
   }
 
   const newLastId = batchRecs[batchRecs.length - 1].id;
@@ -1147,6 +1165,272 @@ async function handleSync(
   });
 
   return jsonResponse({ success: true, phase: "sync", lastId: newLastId, synced: totalSyncedSoFar, agentsAdded, agentsUpdated, continuing: true });
+}
+
+// ===========================================================================
+// LIFECYCLE EVALUATOR
+// ---------------------------------------------------------------------------
+// Fires four events to the Zapier catch hook when a policy's state CHANGES vs
+// the last state we acted on (policy_lifecycle_state) — never on mere presence,
+// because the daily UNL pull is a full-state refresh.
+//
+// Triggers (exact strings, GHL owns all downstream timing):
+//   submission  — contract_code -> P
+//   approved    — P -> A
+//   terminated  — * -> T
+//   at risk     — at-risk derivation flips false -> true
+//
+// contract_reason rides along on EVERY payload (GHL filters); at-risk also
+// carries risk_signal.
+//
+// Safety rails:
+//  - No ZAPIER_HOOK_URL env  -> evaluator is idle (no state writes, no fires).
+//  - First run on an empty state table -> SEED baseline only, fire nothing
+//    (prevents blasting the whole book on rollout).
+//  - Per-agency gate: only agencies with zaps_enabled=true actually fire; state
+//    is still tracked for everyone, so enabling an agency later never backfires
+//    its whole book.
+//  - Every attempt is logged to lifecycle_event_log.
+//
+// At-risk definition is aligned to the LIVE manager pipeline (admin-api v3):
+//   status='active' AND billing_form='DIR' AND paid_to_date < today.
+// (The older HHC-lifecycle note used a monthly+60d framing; aligning to the
+//  in-product board so the Zap and the UI agree. Flagged for Charlie to confirm.)
+// ===========================================================================
+type LifecyclePolicy = {
+  policy_number: string;
+  contract_code: string | null;
+  contract_reason: string | null;
+  status: string | null;
+  product_type: string | null;
+  carrier: string | null;
+  plan_premium: number | null;
+  policy_effective_date: string | null;
+  paid_to_date: string | null;
+  billing_mode: string | null;
+  billing_form: string | null;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  phone: string | null;
+  email: string | null;
+  agent_first_name: string | null;
+  agent_last_name: string | null;
+  agent_number: string | null;
+  agency: string | null;
+  agency_id: string | null;
+};
+
+function isAtRisk(p: LifecyclePolicy): boolean {
+  // Live at-risk membership: active + DIR + paid_to_date in the past.
+  if ((p.status || "").toLowerCase() !== "active") return false;
+  if ((p.billing_form || "").toUpperCase() !== "DIR") return false;
+  if (!p.paid_to_date) return false;
+  const ptd = new Date(p.paid_to_date).getTime();
+  if (Number.isNaN(ptd)) return false;
+  return ptd < Date.now();
+}
+
+function buildPayload(
+  p: LifecyclePolicy,
+  trigger: string,
+  previousContractCode: string | null,
+  dataSourceName: string,
+  riskSignal: string | null,
+) {
+  return {
+    trigger,
+    previous_contract_code: previousContractCode,
+    contract_reason: p.contract_reason ?? null,
+    ...(riskSignal ? { risk_signal: riskSignal } : {}),
+    policy_number: p.policy_number,
+    contract_code: p.contract_code,
+    status: p.status,
+    product_type: p.product_type,
+    carrier: p.carrier,
+    plan_premium: p.plan_premium,
+    policy_effective_date: p.policy_effective_date,
+    paid_to_date: p.paid_to_date,
+    billing_mode: p.billing_mode,
+    billing_form: p.billing_form,
+    client_first_name: p.client_first_name,
+    client_last_name: p.client_last_name,
+    phone: p.phone,
+    email: p.email,
+    agent_first_name: p.agent_first_name,
+    agent_last_name: p.agent_last_name,
+    agent_number: p.agent_number,
+    agency: p.agency,
+    agency_id: p.agency_id,
+    data_source_name: dataSourceName,
+    fired_at: new Date().toISOString(),
+  };
+}
+
+async function evaluateAndFireLifecycle(
+  supabase: ReturnType<typeof createClient>,
+  sourceId: string,
+  uploadId: string,
+): Promise<Record<string, unknown>> {
+  const hookUrl = Deno.env.get("ZAPIER_HOOK_URL") || "";
+  if (!hookUrl) {
+    return { status: "idle", reason: "ZAPIER_HOOK_URL not set" };
+  }
+
+  // Data source name (carries the carrier token, e.g. "FYL | UNL BoB").
+  const { data: ds } = await supabase
+    .from("data_sources")
+    .select("name")
+    .eq("id", sourceId)
+    .maybeSingle();
+  const dataSourceName = (ds?.name as string) || "";
+
+  // Is this the first run? (empty state table => seed baseline, fire nothing)
+  const { count: stateCount } = await supabase
+    .from("policy_lifecycle_state")
+    .select("*", { count: "exact", head: true });
+  const firstRun = !stateCount || stateCount === 0;
+
+  // Which agencies are Zap-enabled.
+  const { data: enabledAgencies } = await supabase
+    .from("agencies")
+    .select("id")
+    .eq("zaps_enabled", true);
+  const enabledSet = new Set((enabledAgencies || []).map((a: { id: string }) => a.id));
+
+  // Page the current Data Source book.
+  const cols =
+    "policy_number, contract_code, contract_reason, status, product_type, carrier, plan_premium, policy_effective_date, paid_to_date, billing_mode, billing_form, client_first_name, client_last_name, phone, email, agent_first_name, agent_last_name, agent_number, agency, agency_id";
+  const pageSize = 1000;
+  let from = 0;
+  const counts = { seeded: 0, evaluated: 0, submission: 0, approved: 0, terminated: 0, "at risk": 0, fired: 0, skipped_disabled: 0, errors: 0 };
+
+  while (true) {
+    const { data: rows, error } = await supabase
+      .from("form_submissions")
+      .select(cols)
+      .eq("source", "Data Source")
+      .order("policy_number", { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    if (!rows || rows.length === 0) break;
+
+    const policies = rows as unknown as LifecyclePolicy[];
+    const pns = policies.map((p) => p.policy_number).filter(Boolean);
+
+    // Prior state for this page.
+    const priorMap = new Map<string, { last_contract_code: string | null; last_at_risk: boolean }>();
+    if (!firstRun && pns.length > 0) {
+      const { data: states } = await supabase
+        .from("policy_lifecycle_state")
+        .select("policy_number, last_contract_code, last_at_risk")
+        .in("policy_number", pns);
+      const stateRows = (states || []) as unknown as Array<{ policy_number: string; last_contract_code: string | null; last_at_risk: boolean }>;
+      for (const s of stateRows) {
+        priorMap.set(s.policy_number, { last_contract_code: s.last_contract_code, last_at_risk: !!s.last_at_risk });
+      }
+    }
+
+    const stateUpserts: Record<string, unknown>[] = [];
+
+    for (const p of policies) {
+      if (!p.policy_number) continue;
+      counts.evaluated++;
+      const code = (p.contract_code || "").trim().toUpperCase() || null;
+      const atRisk = isAtRisk(p);
+
+      if (firstRun) {
+        counts.seeded++;
+        stateUpserts.push({
+          policy_number: p.policy_number,
+          last_contract_code: code,
+          last_at_risk: atRisk,
+          last_fired_trigger: null,
+          last_evaluated_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      const prior = priorMap.get(p.policy_number) || null;
+      const prevCode = prior ? prior.last_contract_code : null;
+      const prevAtRisk = prior ? prior.last_at_risk : false;
+      const zapOn = p.agency_id ? enabledSet.has(p.agency_id) : false;
+
+      // Determine which events to fire (a policy can flip code AND at-risk).
+      const events: { trigger: string; prev: string | null; risk: string | null }[] = [];
+
+      if (code !== prevCode) {
+        if (code === "P") events.push({ trigger: "submission", prev: prevCode, risk: null });
+        else if (code === "A" && (prevCode === "P" || prevCode === null)) events.push({ trigger: "approved", prev: prevCode, risk: null });
+        else if (code === "T") events.push({ trigger: "terminated", prev: prevCode, risk: null });
+        // other transitions (e.g. reinstatements S/back to A from T) update
+        // state silently — no locked trigger for them.
+      }
+      if (atRisk && !prevAtRisk) {
+        events.push({ trigger: "at risk", prev: prevCode, risk: `active+DIR, paid_to_date ${p.paid_to_date} past due` });
+      }
+
+      for (const ev of events) {
+        if (!zapOn) { counts.skipped_disabled++; continue; }
+        const payload = buildPayload(p, ev.trigger, ev.prev, dataSourceName, ev.risk);
+        let httpStatus = 0;
+        let ok = false;
+        let errMsg: string | null = null;
+        try {
+          const resp = await fetch(hookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          httpStatus = resp.status;
+          ok = resp.ok;
+          if (!resp.ok) errMsg = `HTTP ${resp.status}`;
+        } catch (e) {
+          errMsg = e instanceof Error ? e.message : String(e);
+        }
+        if (ok) { counts.fired++; (counts as Record<string, number>)[ev.trigger]++; }
+        else counts.errors++;
+        await supabase.from("lifecycle_event_log").insert({
+          policy_number: p.policy_number,
+          trigger: ev.trigger,
+          previous_contract_code: ev.prev,
+          contract_code: code,
+          contract_reason: p.contract_reason ?? null,
+          risk_signal: ev.risk,
+          agency_id: p.agency_id,
+          http_status: httpStatus,
+          ok,
+          error: errMsg,
+          upload_id: uploadId,
+        });
+      }
+
+      stateUpserts.push({
+        policy_number: p.policy_number,
+        last_contract_code: code,
+        last_at_risk: atRisk,
+        // Informational only (full history lives in lifecycle_event_log); keep
+        // the upsert batch's columns uniform so PostgREST accepts it.
+        last_fired_trigger: events.length ? events[events.length - 1].trigger : null,
+        last_evaluated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    // Persist new state for this page.
+    for (let i = 0; i < stateUpserts.length; i += 500) {
+      const batch = stateUpserts.slice(i, i + 500);
+      const { error: upErr } = await supabase
+        .from("policy_lifecycle_state")
+        .upsert(batch, { onConflict: "policy_number" });
+      if (upErr) throw upErr;
+    }
+
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return { status: firstRun ? "seeded_baseline" : "fired", ...counts };
 }
 
 // Fire-and-forget: the next batch starts as soon as its request is received, so we
