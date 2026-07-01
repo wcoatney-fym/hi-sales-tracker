@@ -141,8 +141,8 @@ function jsonResponse(data: unknown, status = 200) {
 
 // Normalize a form_submissions row into the manager worklist payload shape.
 // Renames client contact columns and surfaces the (optional) termination
-// reason. `contract_reason` stays null until the UNL "Contract Reason" column
-// is mapped into the import pipeline.
+// reason. `contract_reason` is now populated from the mapped UNL "Contract
+// Reason" column by sql-import-cron (null if the source row has none).
 function shapeWorklistRow(
   p: Record<string, unknown>,
   dispRow: unknown
@@ -5083,7 +5083,7 @@ Deno.serve(async (req: Request) => {
         const todayIso = new Date().toISOString().slice(0, 10);
         const { data: agencyPolicies, error: apErr } = await supabase
           .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code")
+          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, contract_reason")
           .eq("agency_id", session.agency_id)
           .eq("status", "active")
           .eq("billing_form", "DIR")
@@ -5123,7 +5123,7 @@ Deno.serve(async (req: Request) => {
           .slice(0, 10);
         const { data: termPolicies, error: tpErr } = await supabase
           .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, terminated_date")
+          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, contract_reason, terminated_date")
           .eq("agency_id", session.agency_id)
           .eq("status", "terminated")
           .gte("terminated_date", termCutoff);
