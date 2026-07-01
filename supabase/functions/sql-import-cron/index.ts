@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   computeLifecycleEvents,
   deriveAtRisk,
+  derivePlanType,
   evaluateAtRisk,
   type LifecycleEvent,
   type PolicyState,
@@ -89,6 +90,7 @@ async function fireLifecycleEvents(
       agent_npn: npnByWritingNumber.get(String(p.agent_number ?? "").toUpperCase()) ?? "",
       carrier,
       plan_name: p.plan_name ?? "",
+      plan_type: derivePlanType((p.plan_name as string | null) ?? null),
       plan_premium: p.plan_premium ?? 0,
       submission_date: usDate((p.app_submit_date as string) ?? null),
       effective_date: usDate((p.policy_effective_date as string) ?? null),

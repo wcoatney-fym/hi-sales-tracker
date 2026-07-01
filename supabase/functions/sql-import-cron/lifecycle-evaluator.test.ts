@@ -2,10 +2,50 @@ import { assertEquals } from "jsr:@std/assert@1";
 import {
   computeLifecycleEvents,
   deriveAtRisk,
+  derivePlanType,
   evaluateAtRisk,
   type PolicyState,
   type PriorState,
 } from "./lifecycle-evaluator.ts";
+
+// ---- plan-type classification (validated against live plan_name values) ----
+
+Deno.test("derivePlanType: HHC variants", () => {
+  for (const n of ["UTHHC", "UTHHC OH", "UNHHC KY", "Home Health Care Shield with TCARE benefit", "Original Home Health Care Shield", "Short Term Home Health Care W/ TCare", "HHC"]) {
+    assertEquals(derivePlanType(n), "HHC", n);
+  }
+});
+
+Deno.test("derivePlanType: HI / HIP variants", () => {
+  for (const n of ["UHIP2", "UGHIP", "UFHIP", "UNHIP", "UFGHI", "UNHIP IL", "Guaranteed Issue Hospital Indemnity Shield", "Hospital Indemnity Shield 2.0", "UNL GI HIP Shield"]) {
+    assertEquals(derivePlanType(n), "HI", n);
+  }
+});
+
+Deno.test("derivePlanType: Dental/Vision variants", () => {
+  for (const n of ["UDN24", "UDN24 PA", "UDN21", "Dental Shield 2.0"]) {
+    assertEquals(derivePlanType(n), "DV", n);
+  }
+});
+
+Deno.test("derivePlanType: Cancer", () => {
+  assertEquals(derivePlanType("UNCAN"), "Cancer");
+});
+
+Deno.test("derivePlanType: Life / final expense", () => {
+  assertEquals(derivePlanType("UNFEX"), "Life");
+  assertEquals(derivePlanType("Optional Guaranteed Issue $5k Life policy offered on Hosp Indem Shield"), "Life");
+});
+
+Deno.test("derivePlanType: HHC wins over HI in a combo", () => {
+  assertEquals(derivePlanType("HHC + HI"), "HHC");
+});
+
+Deno.test("derivePlanType: unknown / empty", () => {
+  assertEquals(derivePlanType("Advantage Plus Elite"), "Unknown");
+  assertEquals(derivePlanType(""), "Unknown");
+  assertEquals(derivePlanType(null), "Unknown");
+});
 
 // Fixed "now" = 2026-06-30 for deterministic date math.
 const NOW = Date.parse("2026-06-30T00:00:00Z");

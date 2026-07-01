@@ -19,6 +19,43 @@
 
 export type Trigger = "submission" | "approved" | "terminated" | "at risk";
 
+// Product/plan-type buckets matching the GHL Zap paths.
+export type PlanType = "HHC" | "HI" | "Life" | "DV" | "Cancer" | "Unknown";
+
+/**
+ * Classify a UNL plan name into the GHL Zap path bucket. Deterministic keyword
+ * match validated against the live `form_submissions.plan_name` values.
+ *
+ * Order matters: more specific / higher-priority riders are matched first so a
+ * combined descriptor (e.g. a Life rider "...offered on Hosp Indem Shield")
+ * lands in the right bucket instead of the substring it happens to contain.
+ *
+ * Examples from real data:
+ *   UTHHC, "Home Health Care Shield with TCARE benefit"   -> HHC
+ *   UHIP2, UGHIP, UFGHI, "Hospital Indemnity Shield 2.0"  -> HI
+ *   UDN24, "Dental Shield 2.0"                             -> DV
+ *   UNCAN, "...Cancer..."                                  -> Cancer
+ *   UNFEX, "...$5k Life policy..."                         -> Life
+ */
+export function derivePlanType(planName: string | null): PlanType {
+  const s = (planName || "").toUpperCase();
+  if (!s.trim()) return "Unknown";
+
+  // 1. Cancer
+  if (/CANCER|UNCAN|\bCAN\b/.test(s)) return "Cancer";
+  // 2. Life / Final Expense (matched before HI so a life rider written on a
+  //    hospital-indemnity base is classed as Life).
+  if (/LIFE|FINAL EXPENSE|\bFEX\b|UNFEX/.test(s)) return "Life";
+  // 3. Dental / Vision
+  if (/DENTAL|VISION|\bDV\b|UDN|UDEN/.test(s)) return "DV";
+  // 4. Home Health Care (before HI so "HHC + HI" combos class as HHC).
+  if (/HHC|HOME HEALTH/.test(s)) return "HHC";
+  // 5. Hospital Indemnity (HIP / HI / GHI / "Hospital Indemnity").
+  if (/HOSPITAL INDEMNITY|HIP|GHI|\bHI\b/.test(s)) return "HI";
+
+  return "Unknown";
+}
+
 // Minimal shape the evaluator needs off a synced policy row.
 export interface PolicyState {
   policy_number: string;
