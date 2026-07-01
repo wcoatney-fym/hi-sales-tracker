@@ -2,6 +2,7 @@ import { assertEquals } from "jsr:@std/assert@1";
 import {
   computeLifecycleEvents,
   deriveAtRisk,
+  contractReasonLabel,
   derivePlanType,
   evaluateAtRisk,
   type PolicyState,
@@ -39,6 +40,15 @@ Deno.test("derivePlanType: Life / final expense", () => {
 
 Deno.test("derivePlanType: HHC wins over HI in a combo", () => {
   assertEquals(derivePlanType("HHC + HI"), "HHC");
+});
+
+Deno.test("contractReasonLabel: maps codes, passes through unknown/blank", () => {
+  assertEquals(contractReasonLabel("LP"), "Lapsed");
+  assertEquals(contractReasonLabel("wi"), "Withdrawn");
+  assertEquals(contractReasonLabel("OW"), "Owner Withdrawn");
+  assertEquals(contractReasonLabel("ZZ"), "ZZ");
+  assertEquals(contractReasonLabel(""), "");
+  assertEquals(contractReasonLabel(null), "");
 });
 
 Deno.test("derivePlanType: unknown / empty", () => {

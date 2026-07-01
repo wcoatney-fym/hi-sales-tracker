@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   computeLifecycleEvents,
+  contractReasonLabel,
   deriveAtRisk,
   derivePlanType,
   evaluateAtRisk,
@@ -129,7 +130,7 @@ async function fireLifecycleEvents(
       billing_mode: billingModeLabel(p.billing_mode as string | null),
       at_risk_status: atRiskStatus,
       termination_date: usDate((p.terminated_date as string) ?? null),
-      contract_reason: p.contract_reason ?? "",
+      contract_reason: contractReasonLabel((p.contract_reason as string | null) ?? null),
       policy_number: ev.policy_number,
       client_status: p.status ?? "",
       trigger: ev.trigger,
