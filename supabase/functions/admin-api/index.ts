@@ -253,7 +253,7 @@ Deno.serve(async (req: Request) => {
       // Look up credentials by email domain
       const { data: allCreds } = await supabase
         .from("admin_credentials")
-        .select("id, agency_id, email_domain, password, role, session_duration_days");
+        .select("id, agency_id, email_domain, password, role, session_duration_days, login_count");
 
       const cred = (allCreds || []).find(
         (c: { email_domain: string; password: string }) =>
@@ -296,6 +296,20 @@ Deno.serve(async (req: Request) => {
         });
 
       if (error) throw error;
+
+      // Stamp usage tracking on the credential (best-effort — never block login).
+      try {
+        await supabase
+          .from("admin_credentials")
+          .update({
+            last_login_at: new Date().toISOString(),
+            login_count: (cred.login_count ?? 0) + 1,
+          })
+          .eq("id", cred.id);
+      } catch (_e) {
+        // usage tracking is non-critical; swallow so a tracking failure never
+        // prevents a valid login
+      }
 
       await supabase
         .from("admin_sessions")
@@ -4114,7 +4128,7 @@ Deno.serve(async (req: Request) => {
 
         const { data: creds, error: credsErr } = await supabase
           .from("admin_credentials")
-          .select("id, email_domain, password, agency_id, session_duration_days")
+          .select("id, email_domain, password, agency_id, session_duration_days, last_login_at, login_count")
           .eq("role", "agency_admin");
 
         if (credsErr) throw credsErr;
@@ -4129,7 +4143,7 @@ Deno.serve(async (req: Request) => {
           (agencyRows || []).map((a: { id: string; name: string; slug: string; zaps_enabled: boolean }) => [a.id, a])
         );
 
-        const credentials = (creds || []).map((c: { id: string; email_domain: string; password: string; agency_id: string; session_duration_days: number }) => ({
+        const credentials = (creds || []).map((c: { id: string; email_domain: string; password: string; agency_id: string; session_duration_days: number; last_login_at: string | null; login_count: number | null }) => ({
           id: c.id,
           username: c.email_domain,
           password: c.password,
@@ -4138,6 +4152,8 @@ Deno.serve(async (req: Request) => {
           agency_slug: agencyMap[c.agency_id]?.slug || "",
           zaps_enabled: agencyMap[c.agency_id]?.zaps_enabled ?? false,
           session_duration_days: c.session_duration_days,
+          last_login_at: c.last_login_at ?? null,
+          login_count: c.login_count ?? 0,
         }));
 
         credentials.sort((a: { agency_name: string }, b: { agency_name: string }) => a.agency_name.localeCompare(b.agency_name));

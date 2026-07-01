@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Copy, Check, RefreshCw, Pencil, X, Save, Loader2, Search, LayoutDashboard, Zap } from "lucide-react";
+import { Eye, EyeOff, Copy, Check, RefreshCw, Pencil, X, Save, Loader2, Search, LayoutDashboard, Zap, Clock } from "lucide-react";
 import {
   adminGetAgencyCredentials,
   adminUpdateAgencyCredential,
@@ -17,6 +17,24 @@ interface Credential {
   agency_slug: string;
   zaps_enabled: boolean;
   session_duration_days: number;
+  last_login_at: string | null;
+  login_count: number;
+}
+
+// Human-friendly relative time for last-login display.
+function formatLastLogin(iso: string | null): string {
+  if (!iso) return "Never";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "Never";
+  const diffMs = Date.now() - then;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 interface AgencyCredentialsPanelProps {
@@ -227,6 +245,24 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
                     /{cred.agency_slug}
                   </span>
                 </div>
+              </div>
+
+              {/* Portal usage: last login + total logins */}
+              <div className="flex items-center gap-2 mb-4 -mt-2">
+                <Clock size={12} className={cred.last_login_at ? "text-slate-400" : "text-slate-600"} />
+                <span className="text-xs text-slate-400">
+                  Last login:{" "}
+                  <span className={cred.last_login_at ? "text-slate-200 font-medium" : "text-slate-500 italic"}
+                    title={cred.last_login_at ? new Date(cred.last_login_at).toLocaleString() : "This admin has never logged into the portal"}
+                  >
+                    {formatLastLogin(cred.last_login_at)}
+                  </span>
+                </span>
+                {cred.login_count > 0 && (
+                  <span className="text-[11px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">
+                    {cred.login_count} total
+                  </span>
+                )}
               </div>
 
               <div className="space-y-3">
