@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   computeLifecycleEvents,
+  contractReasonLabel,
   deriveAtRisk,
   derivePlanType,
   evaluateAtRisk,
@@ -30,6 +31,25 @@ function usDate(d: string | null): string {
   if (!d) return "";
   const [y, m, day] = d.split("-");
   return y ? `${m}/${day}/${y}` : "";
+}
+
+// Translate the raw UNL billing-mode code to a human-readable draft cadence for
+// the Zap payload (Charlie, 2026-07-01). Unknown/blank codes pass through as-is
+// so GHL still sees the raw value rather than an empty string.
+function billingModeLabel(code: string | null): string {
+  const c = (code ?? "").trim();
+  switch (c) {
+    case "1":
+      return "monthly";
+    case "3":
+      return "quarterly";
+    case "6":
+      return "semi annual";
+    case "12":
+      return "annual";
+    default:
+      return c;
+  }
 }
 
 // Fire lifecycle events for one synced batch. Best-effort, fire-and-forget.
@@ -90,8 +110,15 @@ async function fireLifecycleEvents(
       state: p.state ?? "",
       zip: p.zip ?? "",
       agency: p.agency ?? "",
+      // Stable agency UUID for GHL routing (maps to contact.ancillary_agency__sorting).
+      // Names drift; the id is the reliable filter/sort key.
+      agency_id: p.agency_id ?? "",
       agent_first_name: p.agent_first_name ?? "",
       agent_last_name: p.agent_last_name ?? "",
+      // GHL stores an "Agent Full Name" field (no last-name field), so provide a
+      // pre-joined full name in addition to the split parts.
+      agent_full_name: [p.agent_first_name, p.agent_last_name].filter(Boolean).join(" "),
+      agent_writing_number: p.agent_number ?? "",
       agent_npn: npnByWritingNumber.get(String(p.agent_number ?? "").toUpperCase()) ?? "",
       carrier,
       plan_name: p.plan_name ?? "",
@@ -100,10 +127,10 @@ async function fireLifecycleEvents(
       submission_date: usDate((p.app_submit_date as string) ?? null),
       effective_date: usDate((p.policy_effective_date as string) ?? null),
       paid_to_date: usDate((p.paid_to_date as string) ?? null),
-      billing_mode: p.billing_mode ?? "",
+      billing_mode: billingModeLabel(p.billing_mode as string | null),
       at_risk_status: atRiskStatus,
       termination_date: usDate((p.terminated_date as string) ?? null),
-      contract_reason: p.contract_reason ?? "",
+      contract_reason: contractReasonLabel((p.contract_reason as string | null) ?? null),
       policy_number: ev.policy_number,
       client_status: p.status ?? "",
       trigger: ev.trigger,
@@ -1019,6 +1046,41 @@ async function handleSync(
       // Reconciliation is best-effort; don't block completion
     }
 
+    // --- Intake<->policy matching: supersede + dedupe ---
+    // Charlie's original design: once a Data Source (UNL/Max's DB) record
+    // confirms an agent-submitted Intake Form for the same client, the Intake
+    // Form is marked 'superseded' so production/premium rollups count ONE
+    // policy, not two. The manual-upload path runs this inline; the automated
+    // SQL-import cron never did, so every intake that also landed in the daily
+    // file was double-counted. Re-wire it here so the daily path dedupes too.
+    // Best-effort: a matching failure must never block finalizing the import.
+    let recordsSuperseded = 0;
+    let duplicatesFlagged = 0;
+    try {
+      const { data: supersededResult } = await supabase.rpc(
+        "flag_superseded_by_data_source",
+      );
+      recordsSuperseded = supersededResult || 0;
+      const { data: dupResult } = await supabase.rpc(
+        "flag_duplicate_submissions",
+      );
+      duplicatesFlagged = dupResult || 0;
+      if (recordsSuperseded > 0 || duplicatesFlagged > 0) {
+        await supabase.from("upload_history_log").insert({
+          action: "intake_dedupe_complete",
+          source: "sql_import",
+          details: {
+            source_id: sourceId,
+            upload_id: uploadId,
+            records_superseded: recordsSuperseded,
+            duplicates_flagged: duplicatesFlagged,
+          },
+        });
+      }
+    } catch (_) {
+      // Dedupe is best-effort; don't block completion
+    }
+
     // Mark complete
     await supabase
       .from("source_uploads")
@@ -1033,12 +1095,12 @@ async function handleSync(
     await supabase.from("upload_history_log").insert({
       action: "auto_import_complete",
       source: "sql_import",
-      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted },
+      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted, records_superseded: recordsSuperseded, duplicates_flagged: duplicatesFlagged },
     });
 
     // Staging is intentionally retained: the admin "View" screen reads it, and the
     // next import purges prior uploads' rows at init (see purgeOldStagingRows).
-    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted });
+    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted, records_superseded: recordsSuperseded, duplicates_flagged: duplicatesFlagged });
   }
 
   const newLastId = batchRecs[batchRecs.length - 1].id;
