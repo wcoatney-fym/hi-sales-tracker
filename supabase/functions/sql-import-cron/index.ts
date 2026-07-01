@@ -32,12 +32,35 @@ function usDate(d: string | null): string {
 
 // Fire lifecycle events for one synced batch. Best-effort, fire-and-forget.
 async function fireLifecycleEvents(
+  supabase: ReturnType<typeof createClient>,
   events: LifecycleEvent[],
   policyByNumber: Map<string, Record<string, unknown>>,
   carrier: string,
   dataSourceName: string,
+  uploadId: string,
 ): Promise<void> {
   const dry = lifecycleDryRun();
+  const auditRows: Record<string, unknown>[] = [];
+  const audit = (
+    ev: LifecycleEvent,
+    p: Record<string, unknown>,
+    r: { ok: boolean; http_status: number | null; error: string | null },
+  ) => {
+    auditRows.push({
+      policy_number: ev.policy_number,
+      trigger: ev.trigger,
+      previous_contract_code: ev.previous_contract_code,
+      contract_code: (p.contract_code as string | null) ?? null,
+      contract_reason: ev.contract_reason,
+      risk_signal: ev.risk_signal,
+      agency_id: (p.agency_id as string | null) ?? null,
+      upload_id: uploadId,
+      http_status: r.http_status,
+      ok: r.ok,
+      dry_run: dry,
+      error: r.error,
+    });
+  };
   for (const ev of events) {
     const p = policyByNumber.get(ev.policy_number) || {};
     const payload = {
@@ -68,17 +91,36 @@ async function fireLifecycleEvents(
     };
     if (dry) {
       console.log(`[lifecycle:dry-run] ${ev.trigger} ${ev.policy_number}`, JSON.stringify(payload));
+      audit(ev, p, { ok: true, http_status: null, error: null });
       continue;
     }
     try {
-      await fetch(LIFECYCLE_ZAP_HOOK, {
+      const resp = await fetch(LIFECYCLE_ZAP_HOOK, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-    } catch (_) {
+      audit(ev, p, {
+        ok: resp.ok,
+        http_status: resp.status,
+        error: resp.ok ? null : `HTTP ${resp.status}`,
+      });
+    } catch (err) {
       // Best-effort: never let a Zap failure break the import.
+      audit(ev, p, {
+        ok: false,
+        http_status: null,
+        error: err instanceof Error ? err.message : "fetch failed",
+      });
     }
+  }
+  // Persist the audit trail (best-effort; chunked to stay under payload limits).
+  try {
+    for (let i = 0; i < auditRows.length; i += 500) {
+      await supabase.from("lifecycle_event_log").insert(auditRows.slice(i, i + 500));
+    }
+  } catch (logErr) {
+    console.error("[lifecycle] audit log write failed (non-fatal):", logErr);
   }
 }
 
@@ -1267,7 +1309,7 @@ async function handleSync(
         }
 
         if (events.length > 0) {
-          await fireLifecycleEvents(events, batchByNumber, carrier, dataSourceName);
+          await fireLifecycleEvents(supabase, events, batchByNumber, carrier, dataSourceName, uploadId);
         }
         // Persist at-risk fired state so the daily full-state pull doesn't
         // re-blast. set => flag now; clear => recovered, allow future re-fire.
