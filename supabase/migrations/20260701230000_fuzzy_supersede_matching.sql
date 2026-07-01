@@ -69,8 +69,11 @@ DECLARE
   superseded_count integer := 0;
 BEGIN
   -- Candidate intake<->data-source pairs sharing the anchor block.
+  -- Anchor on app_submit_date (when the agent entered / the app was taken):
+  -- it is closest to how the record lands in the Data Source and is far more
+  -- stable than policy_effective_date, which drifts as the carrier sets it.
   WITH ds AS (
-    SELECT id, agent_number, left(zip, 5) AS zip5, policy_effective_date AS eff,
+    SELECT id, agent_number, left(zip, 5) AS zip5, app_submit_date AS eff,
            plan_premium AS prem, norm_name(client_first_name) AS fn,
            norm_name(client_last_name) AS ln
     FROM form_submissions
@@ -79,7 +82,7 @@ BEGIN
       AND (p_source_upload_id IS NULL OR source_upload_id = p_source_upload_id)
   ),
   intake AS (
-    SELECT id, agent_number, left(zip, 5) AS zip5, policy_effective_date AS eff,
+    SELECT id, agent_number, left(zip, 5) AS zip5, app_submit_date AS eff,
            plan_premium AS prem, norm_name(client_first_name) AS fn,
            norm_name(client_last_name) AS ln
     FROM form_submissions
@@ -107,9 +110,9 @@ BEGIN
     JOIN ds d
       ON d.agent_number = i.agent_number
      AND d.zip5 = i.zip5
-     -- wide block (45d) so near-exact names with small date drift surface;
-     -- tier logic below keeps auto-merges tight.
-     AND (i.eff IS NULL OR d.eff IS NULL OR abs(i.eff - d.eff) <= 45)
+     -- submit dates line up closely between intake and Data Source; a 14d
+     -- block absorbs entry lag while the tier logic keeps auto-merges tight.
+     AND (i.eff IS NULL OR d.eff IS NULL OR abs(i.eff - d.eff) <= 14)
   ),
   best AS (
     SELECT * FROM pairs WHERE rn = 1
