@@ -18,7 +18,7 @@ Deno.test("derivePlanType: HHC variants", () => {
 
 Deno.test("derivePlanType: HI / HIP variants", () => {
   for (const n of ["UHIP2", "UGHIP", "UFHIP", "UNHIP", "UFGHI", "UNHIP IL", "Guaranteed Issue Hospital Indemnity Shield", "Hospital Indemnity Shield 2.0", "UNL GI HIP Shield"]) {
-    assertEquals(derivePlanType(n), "HI", n);
+    assertEquals(derivePlanType(n), "HIP", n);
   }
 });
 

@@ -20,7 +20,7 @@
 export type Trigger = "submission" | "approved" | "terminated" | "at risk";
 
 // Product/plan-type buckets matching the GHL Zap paths.
-export type PlanType = "HHC" | "HI" | "Life" | "DV" | "Cancer" | "Unknown";
+export type PlanType = "HHC" | "HIP" | "Life" | "DV" | "Cancer" | "Unknown";
 
 /**
  * Classify a UNL plan name into the GHL Zap path bucket. Deterministic keyword
@@ -51,7 +51,8 @@ export function derivePlanType(planName: string | null): PlanType {
   // 4. Home Health Care (before HI so "HHC + HI" combos class as HHC).
   if (/HHC|HOME HEALTH/.test(s)) return "HHC";
   // 5. Hospital Indemnity (HIP / HI / GHI / "Hospital Indemnity").
-  if (/HOSPITAL INDEMNITY|HIP|GHI|\bHI\b/.test(s)) return "HI";
+  // Emit "HIP" to match the GHL/Zapier product path label (Charlie, 2026-07-01).
+  if (/HOSPITAL INDEMNITY|HIP|GHI|\bHI\b/.test(s)) return "HIP";
 
   return "Unknown";
 }
