@@ -76,14 +76,19 @@ async function fireLifecycleEvents(
       policy_effective_date: (p.policy_effective_date as string | null) ?? null,
       paid_to_date: (p.paid_to_date as string | null) ?? null,
     });
-    // EXACT Zap payload contract (Charlie, 2026-06-30). These fields ONLY — GHL
-    // branches on `trigger`; every event carries the full flat set. Do not add
-    // fields here without sign-off (keeps the Zapier field map stable).
+    // EXACT Zap payload contract (Charlie, 2026-06-30; +address/city/state/zip
+    // 2026-07-01). These fields ONLY — GHL branches on `trigger`; every event
+    // carries the full flat set. Do not add fields here without sign-off (keeps
+    // the Zapier field map stable).
     const payload = {
       client_first_name: p.client_first_name ?? "",
       client_last_name: p.client_last_name ?? "",
       phone: p.phone ?? "",
       email: p.email ?? "",
+      address: p.address ?? "",
+      city: p.city ?? "",
+      state: p.state ?? "",
+      zip: p.zip ?? "",
       agency: p.agency ?? "",
       agent_first_name: p.agent_first_name ?? "",
       agent_last_name: p.agent_last_name ?? "",
@@ -1232,10 +1237,12 @@ async function handleSync(
       // Client email from the UNL feed (source column name varies; try the
       // common aliases). Persisted so the lifecycle Zap payload can carry it.
       email: (md["Email"] || md["Email Address"] || md["Client Email"] || "").trim(),
-      address: "",
-      city: "",
+      // Client mailing address from the UNL feed (source column names vary; try
+      // the common aliases). Persisted so the lifecycle Zap payload can carry them.
+      address: (md["Address"] || md["Address 1"] || md["Street"] || md["Street Address"] || "").trim(),
+      city: (md["City"] || "").trim(),
       state: (md["State"] || "").trim(),
-      zip: (md["Zip"] || "").trim(),
+      zip: (md["Zip"] || md["Zip Code"] || md["Zipcode"] || "").trim(),
       plan_name: planCode,
       plan_premium: monthlyPremium,
       policy_effective_date: parseDate(md["Effective Date"] || ""),
