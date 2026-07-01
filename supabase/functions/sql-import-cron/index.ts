@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   computeLifecycleEvents,
+  deriveAtRisk,
   evaluateAtRisk,
   type LifecycleEvent,
   type PolicyState,
@@ -38,6 +39,7 @@ async function fireLifecycleEvents(
   carrier: string,
   dataSourceName: string,
   uploadId: string,
+  npnByWritingNumber: Map<string, string>,
 ): Promise<void> {
   const dry = lifecycleDryRun();
   const auditRows: Record<string, unknown>[] = [];
@@ -63,31 +65,41 @@ async function fireLifecycleEvents(
   };
   for (const ev of events) {
     const p = policyByNumber.get(ev.policy_number) || {};
-    const payload = {
-      trigger: ev.trigger,
-      previous_contract_code: ev.previous_contract_code,
-      ...(ev.trigger === "terminated" ? { contract_reason: ev.contract_reason } : {}),
-      ...(ev.trigger === "at risk" ? { risk_signal: ev.risk_signal } : {}),
-      carrier,
-      data_source_name: dataSourceName,
+    // Current derived at-risk state for this policy (independent of whether an
+    // "at risk" event fired this run) so GHL always sees the live flag.
+    const atRiskStatus = deriveAtRisk({
       policy_number: ev.policy_number,
-      agent_first_name: p.agent_first_name ?? "",
-      agent_last_name: p.agent_last_name ?? "",
-      agent_number: p.agent_number ?? "",
-      product_type: p.product_type ?? "",
+      contract_code: (p.contract_code as string | null) ?? null,
+      billing_mode: (p.billing_mode as string | null) ?? null,
+      billing_form: (p.billing_form as string | null) ?? null,
+      policy_effective_date: (p.policy_effective_date as string | null) ?? null,
+      paid_to_date: (p.paid_to_date as string | null) ?? null,
+    });
+    // EXACT Zap payload contract (Charlie, 2026-06-30). These fields ONLY — GHL
+    // branches on `trigger`; every event carries the full flat set. Do not add
+    // fields here without sign-off (keeps the Zapier field map stable).
+    const payload = {
       client_first_name: p.client_first_name ?? "",
       client_last_name: p.client_last_name ?? "",
       phone: p.phone ?? "",
-      state: p.state ?? "",
-      zip: p.zip ?? "",
+      email: p.email ?? "",
+      agency: p.agency ?? "",
+      agent_first_name: p.agent_first_name ?? "",
+      agent_last_name: p.agent_last_name ?? "",
+      agent_npn: npnByWritingNumber.get(String(p.agent_number ?? "").toUpperCase()) ?? "",
+      carrier,
       plan_name: p.plan_name ?? "",
       plan_premium: p.plan_premium ?? 0,
-      policy_effective_date: usDate((p.policy_effective_date as string) ?? null),
+      submission_date: usDate((p.app_submit_date as string) ?? null),
+      effective_date: usDate((p.policy_effective_date as string) ?? null),
       paid_to_date: usDate((p.paid_to_date as string) ?? null),
       billing_mode: p.billing_mode ?? "",
-      billing_form: p.billing_form ?? "",
-      contract_code: p.contract_code ?? "",
-      agency: p.agency ?? "",
+      at_risk_status: atRiskStatus,
+      termination_date: usDate((p.terminated_date as string) ?? null),
+      contract_reason: p.contract_reason ?? "",
+      policy_number: ev.policy_number,
+      client_status: p.status ?? "",
+      trigger: ev.trigger,
     };
     if (dry) {
       console.log(`[lifecycle:dry-run] ${ev.trigger} ${ev.policy_number}`, JSON.stringify(payload));
@@ -1138,11 +1150,18 @@ async function handleSync(
   // Deduplicate by policy_number within this batch, keeping the row with the greatest id
   const { data: agentsList } = await supabase
     .from("agents")
-    .select("unl_writing_number, agency")
+    .select("unl_writing_number, agency, npn")
     .range(0, 9999);
   const agencyLookup = new Map<string, string>();
+  // NPN is not a form_submissions column — it lives on agents, keyed by UNL
+  // writing number. Resolve it here so the Zap payload can carry agent_npn.
+  const agentNpnLookup = new Map<string, string>();
   for (const a of agentsList || []) {
-    if (a.unl_writing_number) agencyLookup.set(a.unl_writing_number.toUpperCase(), a.agency || "");
+    if (a.unl_writing_number) {
+      const wn = a.unl_writing_number.toUpperCase();
+      agencyLookup.set(wn, a.agency || "");
+      if (a.npn) agentNpnLookup.set(wn, a.npn as string);
+    }
   }
 
   const { data: rosterEntries } = await supabase
@@ -1309,7 +1328,7 @@ async function handleSync(
         }
 
         if (events.length > 0) {
-          await fireLifecycleEvents(supabase, events, batchByNumber, carrier, dataSourceName, uploadId);
+          await fireLifecycleEvents(supabase, events, batchByNumber, carrier, dataSourceName, uploadId, agentNpnLookup);
         }
         // Persist at-risk fired state so the daily full-state pull doesn't
         // re-blast. set => flag now; clear => recovered, allow future re-fire.
