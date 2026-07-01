@@ -1,5 +1,86 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  computeLifecycleEvents,
+  evaluateAtRisk,
+  type LifecycleEvent,
+  type PolicyState,
+  type PriorState,
+} from "./lifecycle-evaluator.ts";
+
+// GHL/Zapier catch hook for the 4 locked retention lifecycle events. Fire is
+// gated per-agency on agencies.zaps_enabled and is fully best-effort — a Zap
+// failure must never block or fail the daily import.
+const LIFECYCLE_ZAP_HOOK =
+  "https://hooks.zapier.com/hooks/catch/25274165/43n0alz/";
+
+// Set LIFECYCLE_ZAP_DRY_RUN="true" as a function secret to evaluate + log
+// events without POSTing to Zapier (safe rollout / verification mode).
+function lifecycleDryRun(): boolean {
+  try {
+    return (Deno.env.get("LIFECYCLE_ZAP_DRY_RUN") || "").toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
+
+function usDate(d: string | null): string {
+  if (!d) return "";
+  const [y, m, day] = d.split("-");
+  return y ? `${m}/${day}/${y}` : "";
+}
+
+// Fire lifecycle events for one synced batch. Best-effort, fire-and-forget.
+async function fireLifecycleEvents(
+  events: LifecycleEvent[],
+  policyByNumber: Map<string, Record<string, unknown>>,
+  carrier: string,
+  dataSourceName: string,
+): Promise<void> {
+  const dry = lifecycleDryRun();
+  for (const ev of events) {
+    const p = policyByNumber.get(ev.policy_number) || {};
+    const payload = {
+      trigger: ev.trigger,
+      previous_contract_code: ev.previous_contract_code,
+      ...(ev.trigger === "terminated" ? { contract_reason: ev.contract_reason } : {}),
+      ...(ev.trigger === "at risk" ? { risk_signal: ev.risk_signal } : {}),
+      carrier,
+      data_source_name: dataSourceName,
+      policy_number: ev.policy_number,
+      agent_first_name: p.agent_first_name ?? "",
+      agent_last_name: p.agent_last_name ?? "",
+      agent_number: p.agent_number ?? "",
+      product_type: p.product_type ?? "",
+      client_first_name: p.client_first_name ?? "",
+      client_last_name: p.client_last_name ?? "",
+      phone: p.phone ?? "",
+      state: p.state ?? "",
+      zip: p.zip ?? "",
+      plan_name: p.plan_name ?? "",
+      plan_premium: p.plan_premium ?? 0,
+      policy_effective_date: usDate((p.policy_effective_date as string) ?? null),
+      paid_to_date: usDate((p.paid_to_date as string) ?? null),
+      billing_mode: p.billing_mode ?? "",
+      billing_form: p.billing_form ?? "",
+      contract_code: p.contract_code ?? "",
+      agency: p.agency ?? "",
+    };
+    if (dry) {
+      console.log(`[lifecycle:dry-run] ${ev.trigger} ${ev.policy_number}`, JSON.stringify(payload));
+      continue;
+    }
+    try {
+      await fetch(LIFECYCLE_ZAP_HOOK, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (_) {
+      // Best-effort: never let a Zap failure break the import.
+    }
+  }
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -1036,10 +1117,14 @@ async function handleSync(
 
   // The agency-scoped leaderboard filters on agency_id, so resolve the
   // attributed agency name to its id at sync time.
-  const { data: agencyRows } = await supabase.from("agencies").select("id, name");
+  const { data: agencyRows } = await supabase.from("agencies").select("id, name, zaps_enabled");
   const agencyNameToId = new Map<string, string>();
+  // Agencies whose retention Zaps are switched on. Lifecycle events only fire
+  // for policies attributed to one of these (FYM-internal only at launch).
+  const zapsEnabledAgencyIds = new Set<string>();
   for (const a of agencyRows || []) {
     if (a.name) agencyNameToId.set(a.name, a.id);
+    if (a.zaps_enabled && a.id) zapsEnabledAgencyIds.add(a.id as string);
   }
 
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
@@ -1112,6 +1197,34 @@ async function handleSync(
   }
   const uniquePolicies = Array.from(policyDedup.values());
 
+  // --- Lifecycle evaluator: capture last-known state BEFORE the upsert ---
+  // The upsert overwrites contract_code in place, so we must read prior
+  // contract_code + at_risk_fired_at first to detect change vs presence.
+  // at_risk_fired_at is intentionally NOT in the upsert row set, so update
+  // preserves it; we manage it explicitly below.
+  const priorByNumber = new Map<string, PriorState>();
+  const policyNumbers = uniquePolicies.map((p) => p.policy_number as string);
+  for (let i = 0; i < policyNumbers.length; i += 500) {
+    const chunk = policyNumbers.slice(i, i + 500);
+    const { data: priorRows } = await supabase
+      .from("form_submissions")
+      .select("policy_number, contract_code, at_risk_fired_at")
+      .in("policy_number", chunk);
+    for (const r of priorRows || []) {
+      priorByNumber.set(r.policy_number as string, {
+        contract_code: (r.contract_code as string | null) ?? null,
+        at_risk_fired_at: (r.at_risk_fired_at as string | null) ?? null,
+      });
+    }
+  }
+  const { data: srcRow } = await supabase
+    .from("data_sources")
+    .select("name")
+    .eq("id", sourceId)
+    .maybeSingle();
+  const dataSourceName = (srcRow?.name as string | undefined) || carrier;
+  const nowMs = Date.now();
+
   let synced = 0;
   try {
     for (let i = 0; i < uniquePolicies.length; i += 500) {
@@ -1121,6 +1234,59 @@ async function handleSync(
         .upsert(batch, { onConflict: "policy_number", count: "exact" });
       if (upsertErr) throw upsertErr;
       synced += (count || batch.length);
+
+      // --- Evaluate + fire lifecycle events for this batch (best-effort) ---
+      try {
+        const batchByNumber = new Map<string, Record<string, unknown>>();
+        const events: LifecycleEvent[] = [];
+        const setFlag: string[] = [];
+        const clearFlag: string[] = [];
+        for (const row of batch) {
+          const pn = row.policy_number as string;
+          batchByNumber.set(pn, row);
+          // Gate: only agencies with zaps_enabled fire.
+          const agencyId = row.agency_id as string | null;
+          if (!agencyId || !zapsEnabledAgencyIds.has(agencyId)) continue;
+
+          const state: PolicyState = {
+            policy_number: pn,
+            contract_code: (row.contract_code as string | null) ?? null,
+            billing_mode: (row.billing_mode as string | null) ?? null,
+            billing_form: (row.billing_form as string | null) ?? null,
+            policy_effective_date: (row.policy_effective_date as string | null) ?? null,
+            paid_to_date: (row.paid_to_date as string | null) ?? null,
+            contract_reason: (row.contract_reason as string | null) ?? null,
+          };
+          const prior = priorByNumber.get(pn);
+          events.push(...computeLifecycleEvents(state, prior, nowMs));
+
+          const risk = evaluateAtRisk(state, prior, nowMs);
+          if (risk.fire && risk.event) events.push(risk.event);
+          if (risk.setFlag) setFlag.push(pn);
+          if (risk.clearFlag) clearFlag.push(pn);
+        }
+
+        if (events.length > 0) {
+          await fireLifecycleEvents(events, batchByNumber, carrier, dataSourceName);
+        }
+        // Persist at-risk fired state so the daily full-state pull doesn't
+        // re-blast. set => flag now; clear => recovered, allow future re-fire.
+        if (setFlag.length > 0) {
+          await supabase
+            .from("form_submissions")
+            .update({ at_risk_fired_at: new Date(nowMs).toISOString() })
+            .in("policy_number", setFlag);
+        }
+        if (clearFlag.length > 0) {
+          await supabase
+            .from("form_submissions")
+            .update({ at_risk_fired_at: null })
+            .in("policy_number", clearFlag);
+        }
+      } catch (evalErr) {
+        // Never let lifecycle evaluation break the import.
+        console.error("[lifecycle] evaluation error (non-fatal):", evalErr);
+      }
     }
   } catch (syncErr) {
     await supabase
