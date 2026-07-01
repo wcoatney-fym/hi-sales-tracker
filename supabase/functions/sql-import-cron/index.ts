@@ -92,6 +92,7 @@ async function fireLifecycleEvents(
       agency: p.agency ?? "",
       agent_first_name: p.agent_first_name ?? "",
       agent_last_name: p.agent_last_name ?? "",
+      agent_writing_number: p.agent_number ?? "",
       agent_npn: npnByWritingNumber.get(String(p.agent_number ?? "").toUpperCase()) ?? "",
       carrier,
       plan_name: p.plan_name ?? "",
