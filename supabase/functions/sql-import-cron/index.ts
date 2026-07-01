@@ -109,6 +109,9 @@ async function fireLifecycleEvents(
       state: p.state ?? "",
       zip: p.zip ?? "",
       agency: p.agency ?? "",
+      // Stable agency UUID for GHL routing (maps to contact.ancillary_agency__sorting).
+      // Names drift; the id is the reliable filter/sort key.
+      agency_id: p.agency_id ?? "",
       agent_first_name: p.agent_first_name ?? "",
       agent_last_name: p.agent_last_name ?? "",
       // GHL stores an "Agent Full Name" field (no last-name field), so provide a
