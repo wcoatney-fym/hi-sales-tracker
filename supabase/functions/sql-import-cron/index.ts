@@ -1102,6 +1102,10 @@ async function handleSync(
       billing_form: (md["Billing Form"] || "").trim() || null,
       billing_mode: (md["Billing Mode"] || "").trim() || null,
       contract_code: (md["Contract Code"] || "").trim() || null,
+      // UNL lifecycle/termination reason (mapped source column "Contract
+      // Reason", e.g. Submitted / Lapsed). Feeds the terminated outreach split
+      // and the `terminated` Zap payload. NULL when the source row has none.
+      contract_reason: (md["Contract Reason"] || "").trim() || null,
       source: "Data Source",
       source_upload_id: uploadId,
     });
