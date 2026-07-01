@@ -111,6 +111,9 @@ async function fireLifecycleEvents(
       agency: p.agency ?? "",
       agent_first_name: p.agent_first_name ?? "",
       agent_last_name: p.agent_last_name ?? "",
+      // GHL stores an "Agent Full Name" field (no last-name field), so provide a
+      // pre-joined full name in addition to the split parts.
+      agent_full_name: [p.agent_first_name, p.agent_last_name].filter(Boolean).join(" "),
       agent_writing_number: p.agent_number ?? "",
       agent_npn: npnByWritingNumber.get(String(p.agent_number ?? "").toUpperCase()) ?? "",
       carrier,
