@@ -1227,7 +1227,9 @@ async function handleSync(
       client_first_name: toProperCase(md["First Name"] || ""),
       client_last_name: toProperCase(md["Last Name"] || ""),
       phone: (md["Phone"] || "").trim(),
-      email: "",
+      // Client email from the UNL feed (source column name varies; try the
+      // common aliases). Persisted so the lifecycle Zap payload can carry it.
+      email: (md["Email"] || md["Email Address"] || md["Client Email"] || "").trim(),
       address: "",
       city: "",
       state: (md["State"] || "").trim(),
