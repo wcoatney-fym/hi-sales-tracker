@@ -900,6 +900,36 @@ export async function agentLogAtRiskActivity(sessionToken: string, policyId: str
   return data;
 }
 
+// Agent logs first contact on a handed-off at-risk policy (5-day SLA).
+export async function agentLogContact(sessionToken: string, policyId: string) {
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-log-contact`,
+    {
+      method: "POST",
+      headers: { ...baseHeaders, "X-Agent-Token": sessionToken },
+      body: JSON.stringify({ policyId }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to log contact");
+  return data;
+}
+
+// Agent marks a handed-off policy saved -> awaits manager approval.
+export async function agentMarkSaved(sessionToken: string, policyId: string, note?: string) {
+  const response = await fetch(
+    `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-mark-saved`,
+    {
+      method: "POST",
+      headers: { ...baseHeaders, "X-Agent-Token": sessionToken },
+      body: JSON.stringify({ policyId, ...(note ? { note } : {}) }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Failed to mark saved");
+  return data;
+}
+
 export async function agentGetDashboardStats(sessionToken: string) {
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/leaderboard-api?action=agent-dashboard-stats`,
@@ -1139,7 +1169,29 @@ export async function adminGetOnboardingStatus(token: string) {
 // Agency Manager View
 // ---------------------------------------------------------------------------
 
-export type ManagerDisposition = "working" | "secured" | "lost" | "follow_up";
+// v3 at-risk pipeline action-stages (persisted). Legacy values kept for
+// back-compat with any pre-v3 rows.
+export type ManagerDisposition =
+  | "responded"
+  | "manager_outreach"
+  | "agent_outreach"
+  | "agent_saved_pending"
+  | "saved"
+  | "lost"
+  | "working"
+  | "secured"
+  | "follow_up";
+
+// Manager-settable subset (agent_outreach / agent_saved_pending are set via
+// the handoff + agent-app actions, not mgr-set-disposition).
+export type ManagerSettableDisposition =
+  | "responded"
+  | "manager_outreach"
+  | "saved"
+  | "lost";
+
+// Computed pipeline owner returned by the worklist.
+export type AtRiskOwner = "system" | "manager" | "agent" | "closed";
 export type ThreadKind = "note" | "nudge" | "flag";
 export type ThreadAuthorRole = "manager" | "agent";
 
@@ -1183,6 +1235,17 @@ export interface ManagerWorklistPolicy {
   paid_to_date: string | null;
   policy_effective_date: string;
   disposition: ManagerDisposition | null;
+  // --- v3 computed pipeline fields (at-risk lane only) ---
+  stage?: string;
+  owner?: AtRiskOwner;
+  days_at_risk?: number;
+  days_to_terminate?: number;
+  is_heating_up?: boolean;
+  is_code_red?: boolean;
+  agent_overdue?: boolean;
+  agent_id?: string | null;
+  agent_outreach_at?: string | null;
+  agent_contacted_at?: string | null;
   // Client contact (available now from form_submissions).
   client_phone?: string | null;
   client_email?: string | null;
@@ -1289,6 +1352,31 @@ export async function mgrSetDisposition(
     ...(opts.note ? { note: opts.note } : {}),
     ...(opts.followUpAt ? { follow_up_at: opts.followUpAt } : {}),
   });
+}
+
+// Manager hands an at-risk policy to the writing agent (warm relationship
+// save). Stays on the manager's board; starts the 5-day agent SLA clock.
+export async function mgrHandoffToAgent(
+  token: string,
+  opts: { policyId: string; agentId?: string; note?: string }
+) {
+  return callApi("admin-api", {
+    action: "mgr-handoff-to-agent",
+    token,
+    policy_id: opts.policyId,
+    ...(opts.agentId ? { agent_id: opts.agentId } : {}),
+    ...(opts.note ? { note: opts.note } : {}),
+  });
+}
+
+// Manager approves an agent-claimed save → moves it into Saved.
+export async function mgrApproveSave(token: string, policyId: string) {
+  return callApi("admin-api", { action: "mgr-approve-save", token, policy_id: policyId });
+}
+
+// Per-agent Agent Quality rollup (handoffs + 5-day follow-up rate).
+export async function mgrGetAgentQuality(token: string) {
+  return callApi("admin-api", { action: "mgr-agent-quality", token });
 }
 
 // --- Agent-side notifications & threads (leaderboard-api, X-Agent-Token header) ---

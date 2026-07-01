@@ -17,6 +17,8 @@ import {
   agentGetBookSummary,
   agentGetAtRiskPolicies,
   agentLogAtRiskActivity,
+  agentLogContact,
+  agentMarkSaved,
   agentGetAttentionStates,
   agentUpdateAttentionState,
 } from "../../lib/api";
@@ -510,6 +512,7 @@ function ActivityModal({
   const [actionType, setActionType] = useState("called_client");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [pipelineAction, setPipelineAction] = useState<"contact" | "saved" | null>(null);
 
   const handleSave = async () => {
     setSaving(true);
@@ -520,6 +523,22 @@ function ActivityModal({
       // stay open
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Pipeline actions for a policy the manager handed to this agent: confirm
+  // contact (5-day SLA) and mark saved (-> manager approval). Best-effort: a
+  // policy not in agent_outreach simply won't be updated server-side.
+  const handlePipeline = async (kind: "contact" | "saved") => {
+    setPipelineAction(kind);
+    try {
+      if (kind === "contact") await agentLogContact(sessionToken, policyId);
+      else await agentMarkSaved(sessionToken, policyId, note);
+      onSaved();
+    } catch {
+      // stay open
+    } finally {
+      setPipelineAction(null);
     }
   };
 
@@ -556,6 +575,28 @@ function ActivityModal({
               className="w-full bg-navy border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-500 resize-none"
             />
           </div>
+          {/* Pipeline actions for manager-handed-off policies */}
+          <div className="flex gap-3">
+            <button
+              onClick={() => handlePipeline("contact")}
+              disabled={pipelineAction !== null}
+              className="flex-1 px-4 py-2 border border-sky-500/40 text-sky-300 rounded-lg text-sm font-medium hover:bg-sky-500/10 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              title="Confirm you reached out (satisfies the 5-day follow-up)"
+            >
+              {pipelineAction === "contact" && <Loader2 size={14} className="animate-spin" />}
+              Mark Contacted
+            </button>
+            <button
+              onClick={() => handlePipeline("saved")}
+              disabled={pipelineAction !== null}
+              className="flex-1 px-4 py-2 border border-emerald-500/40 text-emerald-300 rounded-lg text-sm font-medium hover:bg-emerald-500/10 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              title="Mark saved — your manager approves to confirm"
+            >
+              {pipelineAction === "saved" && <Loader2 size={14} className="animate-spin" />}
+              Mark Saved
+            </button>
+          </div>
+
           <div className="flex gap-3 pt-2">
             <button onClick={onClose} className="flex-1 px-4 py-2 border border-slate-600 rounded-lg text-slate-300 text-sm hover:bg-slate-800 transition-colors">
               Cancel

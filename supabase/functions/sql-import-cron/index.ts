@@ -1091,6 +1091,9 @@ async function handleSync(
       policy_effective_date: parseDate(md["Effective Date"] || ""),
       app_submit_date: parseDate(md["Submit Date"] || ""),
       paid_to_date: parseDate(md["Paid To Date"] || ""),
+      // Carrier-reported termination date from the UNL source (used to window
+      // the manager terminated win-back lane to the last 45 days).
+      terminated_date: parseDate(md["Term Date"] || md["TERM_DATE"] || ""),
       status,
       carrier,
       product_type: productType,

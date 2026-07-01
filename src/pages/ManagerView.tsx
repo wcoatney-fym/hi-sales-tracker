@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { LogOut, ShieldCheck, Gauge, AlertTriangle, Users } from "lucide-react";
+import { LogOut, ShieldCheck, Gauge, AlertTriangle, Users, GraduationCap } from "lucide-react";
 import { useManagerAuth } from "../hooks/useManagerAuth";
 import ManagerRetentionPanel from "../components/manager/ManagerRetentionPanel";
 import ManagerWorklistPanel from "../components/manager/ManagerWorklistPanel";
 import ManagerProductionPanel from "../components/manager/ManagerProductionPanel";
+import ManagerAgentQualityPanel from "../components/manager/ManagerAgentQualityPanel";
 
-type Tab = "retention" | "worklist" | "production";
+type Tab = "retention" | "worklist" | "coaching" | "production";
 
 const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: "retention", label: "Retention", icon: Gauge },
   { key: "worklist", label: "Pipeline", icon: AlertTriangle },
+  { key: "coaching", label: "Agent Quality", icon: GraduationCap },
   { key: "production", label: "Production", icon: Users },
 ];
 
@@ -29,7 +31,7 @@ export default function ManagerView() {
   };
 
   return (
-    <main className="max-w-4xl mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white">
+    <main className={`${activeTab === "worklist" ? "max-w-screen-2xl" : "max-w-4xl"} mx-auto px-4 sm:px-6 py-6 pb-24 lg:pb-6 text-white transition-[max-width]`}>
       {/* Header */}
       <div className="flex items-center justify-between gap-3 mb-5">
         <div className="flex items-center gap-3 min-w-0">
@@ -77,6 +79,7 @@ export default function ManagerView() {
         <ManagerRetentionPanel agencyId={manager.agencyId} agencyName={manager.agencyName} />
       )}
       {activeTab === "worklist" && <ManagerWorklistPanel token={token} />}
+      {activeTab === "coaching" && <ManagerAgentQualityPanel token={token} />}
       {activeTab === "production" && (
         <ManagerProductionPanel token={token} agencyName={manager.agencyName} />
       )}
