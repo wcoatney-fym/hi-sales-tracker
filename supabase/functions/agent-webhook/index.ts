@@ -41,6 +41,7 @@ Deno.serve(async (req: Request) => {
     const npn = (body.agent_npn || "").trim();
     const unlWritingNumber = (body.unl_writing_number || "").trim();
     const gtlWritingNumber = (body.gtl_writing_number || "").trim();
+    const agencyName = (body.agency || "").trim();
 
     if (!firstName || !lastName) {
       return jsonResponse({ error: "first_name and last_name are required" }, 400);
@@ -58,12 +59,25 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    let existing: { id: string; first_name: string; last_name: string; npn: string; unl_writing_number: string; gtl_writing_number: string } | null = null;
+    // Resolve the agency (by name or slug, case-insensitive) so the agent can be
+    // linked to it in the HIP portal directory. Without this the agent lands
+    // unassigned and never shows under its agency.
+    let agencyId: string | null = null;
+    if (notEmpty(agencyName)) {
+      const { data: agency } = await supabase
+        .from("agencies")
+        .select("id")
+        .or(`name.ilike.${agencyName},slug.ilike.${agencyName}`)
+        .maybeSingle();
+      agencyId = agency?.id ?? null;
+    }
+
+    let existing: { id: string; first_name: string; last_name: string; npn: string; unl_writing_number: string; gtl_writing_number: string; agency_id: string | null; agency_locked: boolean } | null = null;
 
     if (notEmpty(npn)) {
       const { data } = await supabase
         .from("agents")
-        .select("id, first_name, last_name, npn, unl_writing_number, gtl_writing_number")
+        .select("id, first_name, last_name, npn, unl_writing_number, gtl_writing_number, agency_id, agency_locked")
         .eq("npn", npn)
         .maybeSingle();
       existing = data;
@@ -72,7 +86,7 @@ Deno.serve(async (req: Request) => {
     if (!existing && notEmpty(unlWritingNumber)) {
       const { data } = await supabase
         .from("agents")
-        .select("id, first_name, last_name, npn, unl_writing_number, gtl_writing_number")
+        .select("id, first_name, last_name, npn, unl_writing_number, gtl_writing_number, agency_id, agency_locked")
         .eq("unl_writing_number", unlWritingNumber)
         .maybeSingle();
       existing = data;
@@ -81,7 +95,7 @@ Deno.serve(async (req: Request) => {
     if (!existing && notEmpty(gtlWritingNumber)) {
       const { data } = await supabase
         .from("agents")
-        .select("id, first_name, last_name, npn, unl_writing_number, gtl_writing_number")
+        .select("id, first_name, last_name, npn, unl_writing_number, gtl_writing_number, agency_id, agency_locked")
         .eq("gtl_writing_number", gtlWritingNumber)
         .maybeSingle();
       existing = data;
@@ -95,6 +109,13 @@ Deno.serve(async (req: Request) => {
       if (notEmpty(gtlWritingNumber) && !notEmpty(existing.gtl_writing_number)) updates.gtl_writing_number = gtlWritingNumber;
       if (notEmpty(firstName) && !notEmpty(existing.first_name)) updates.first_name = firstName;
       if (notEmpty(lastName) && !notEmpty(existing.last_name)) updates.last_name = lastName;
+
+      // Backfill the agency link when it resolved and the row isn't locked or
+      // already linked. Never override a locked or existing agency assignment.
+      if (agencyId && !existing.agency_id && !existing.agency_locked) {
+        updates.agency_id = agencyId;
+        updates.agency = agencyName;
+      }
 
       const { error } = await supabase
         .from("agents")
@@ -114,6 +135,8 @@ Deno.serve(async (req: Request) => {
         npn,
         unl_writing_number: unlWritingNumber,
         gtl_writing_number: gtlWritingNumber,
+        agency: agencyId ? agencyName : null,
+        agency_id: agencyId,
         source: "Contracting Portal",
       })
       .select("id")
