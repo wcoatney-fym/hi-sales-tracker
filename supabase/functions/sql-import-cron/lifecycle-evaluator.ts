@@ -83,22 +83,41 @@ export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean 
   return ptd <= eff + ONE_CYCLE_DAYS * DAY_MS;
 }
 
+// TEMPORARY: the `submission` event is currently owned by the intake form
+// (public-api -> Zapier hook up1e31i) which fires the moment an app is
+// submitted. Until the live UNL webhook replaces that intake form, having the
+// data-side evaluator ALSO fire `submission` on Contract Code -> P would
+// double-trigger the same policy. So submission is disabled here by default.
+//
+// Revisit when the UNL live feed cuts over: at that point the intake form goes
+// away and the evaluator becomes the single source for `submission` — flip
+// this to true (or pass { emitSubmission: true }).
+export const SUBMISSION_TRIGGER_ENABLED = false;
+
+export interface LifecycleOptions {
+  // Override the submission gate (defaults to SUBMISSION_TRIGGER_ENABLED).
+  emitSubmission?: boolean;
+}
+
 /**
  * Compute the lifecycle events fired by a single policy given its prior state.
  * Returns 0+ events. Pure — no side effects.
  *
  * Transition rules require a specific prior code, so a brand-new policy
- * (prior === undefined) only ever fires "submission" (when it lands as P) and
- * "at risk", never a false approved/terminated on first insert.
+ * (prior === undefined) never fires a false approved/terminated on first
+ * insert. `submission` is gated off by default (see SUBMISSION_TRIGGER_ENABLED)
+ * to avoid double-firing against the intake form.
  */
 export function computeLifecycleEvents(
   next: PolicyState,
   prior: PriorState | undefined,
   now: number = Date.now(),
+  opts: LifecycleOptions = {},
 ): LifecycleEvent[] {
   const events: LifecycleEvent[] = [];
   const prevCode = prior?.contract_code ?? null;
   const nextCode = (next.contract_code || "").trim().toUpperCase() || null;
+  const emitSubmission = opts.emitSubmission ?? SUBMISSION_TRIGGER_ENABLED;
 
   const base = {
     policy_number: next.policy_number,
@@ -107,8 +126,9 @@ export function computeLifecycleEvents(
     risk_signal: null as string | null,
   };
 
-  // 1. submission — Contract Code flips to P
-  if (nextCode === "P" && prevCode !== "P") {
+  // 1. submission — Contract Code flips to P.
+  // Disabled by default while the intake form still owns this event.
+  if (emitSubmission && nextCode === "P" && prevCode !== "P") {
     events.push({ ...base, trigger: "submission" });
   }
   // 2. approved — P -> A
