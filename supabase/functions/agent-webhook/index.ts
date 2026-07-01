@@ -22,26 +22,58 @@ function toProperCase(s: string): string {
   return s.replace(/\S+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
 }
 
-// Upsert a single confirmed agency_rosters entry (per carrier writing number).
-// agency_rosters is the authoritative source for agency membership in the HIP
-// portal: the agent directory + agency roster show only agents with a confirmed
-// roster entry, and "Unassigned Agents" is defined as active agents with none.
-// Setting agents.agency_id alone is NOT enough. Mirrors admin-api's
-// "agency-add-roster-entry" confirmed path. Idempotent per (agency, number, carrier).
+// Best-effort flag for a same-carrier writing-number conflict. Never throws so
+// it can't break the roster sync. The newest number stays active; the old one
+// is surfaced as an open audit issue for review.
 // deno-lint-ignore no-explicit-any
-async function upsertRosterEntry(supabase: any, params: {
-  agencyId: string; agentId: string; firstName: string; lastName: string;
-  npn: string; writingNumber: string; carrier: string;
+async function flagWritingNumberConflict(supabase: any, params: {
+  agentId: string; agencyId: string; name: string; carrier: string;
+  oldNumber: string; newNumber: string;
 }) {
-  const cleanNum = (params.writingNumber || "").trim().toUpperCase();
-  if (!cleanNum) return;
+  try {
+    await supabase.from("audit_issues").insert({
+      issue_type: "duplicate_writing_number",
+      severity: "warning",
+      title: `Duplicate ${params.carrier} writing number for ${params.name}`,
+      description: `Two ${params.carrier} writing numbers were received for this agent. The newest (${params.newNumber}) is active in the roster; the previous (${params.oldNumber}) was replaced. Review which is correct.`,
+      entity_ids: [params.agentId],
+      metadata: {
+        agency_id: params.agencyId,
+        carrier: params.carrier,
+        old_writing_number: params.oldNumber,
+        new_writing_number: params.newNumber,
+        source: "agent-webhook",
+      },
+      status: "open",
+    });
+  } catch (_e) {
+    // flagging is advisory; ignore failures
+  }
+}
 
-  const record = {
-    agency_id: params.agencyId,
+// Create/refresh the agent's confirmed roster membership as a SINGLE record per
+// agent+agency (agency_rosters). Additional carriers live in
+// agent_writing_numbers, so a two-carrier agent (UNL+GTL) has ONE roster record,
+// not two. Rules (per product decision 2026-07-01):
+//  - Contracting-portal writing numbers are authoritative live roster maintenance.
+//  - One record per agent even across carriers.
+//  - Only a SAME-carrier duplicate (two numbers for one carrier) is flagged; the
+//    newest number stays active, the old one is flagged for review.
+// deno-lint-ignore no-explicit-any
+async function syncAgencyRoster(supabase: any, params: {
+  agencyId: string; agencyName: string; agentId: string;
+  firstName: string; lastName: string; npn: string;
+  unlWritingNumber: string; gtlWritingNumber: string;
+}): Promise<boolean> {
+  const carriers: Array<[string, string]> = [];
+  if (notEmpty(params.unlWritingNumber)) carriers.push(["UNL", params.unlWritingNumber.trim().toUpperCase()]);
+  if (notEmpty(params.gtlWritingNumber)) carriers.push(["GTL", params.gtlWritingNumber.trim().toUpperCase()]);
+  if (carriers.length === 0) return false;
+
+  const name = `${toProperCase(params.firstName.trim())} ${toProperCase(params.lastName.trim())}`.trim();
+  const baseFields = {
     agent_first_name: toProperCase(params.firstName.trim()),
     agent_last_name: toProperCase(params.lastName.trim()),
-    writing_number: cleanNum,
-    carrier: params.carrier,
     npn: (params.npn || "").trim(),
     match_status: "confirmed",
     matched_agent_id: params.agentId,
@@ -50,46 +82,82 @@ async function upsertRosterEntry(supabase: any, params: {
     updated_at: new Date().toISOString(),
   };
 
-  const { data: existingEntry } = await supabase
+  // Single-record model: find the agent's existing active roster row (oldest wins
+  // as the canonical record), or create one from the first incoming carrier.
+  const { data: existingRosters } = await supabase
     .from("agency_rosters")
-    .select("id")
+    .select("id, carrier, writing_number")
     .eq("agency_id", params.agencyId)
-    .eq("writing_number", cleanNum)
-    .eq("carrier", params.carrier)
-    .maybeSingle();
+    .eq("matched_agent_id", params.agentId)
+    .eq("status", "active")
+    .order("created_at", { ascending: true });
 
-  if (existingEntry) {
-    await supabase.from("agency_rosters").update(record).eq("id", existingEntry.id);
+  let primary: { id: string; carrier: string; writing_number: string } | null =
+    (existingRosters && existingRosters[0]) || null;
+
+  if (!primary) {
+    const [pc, pn] = carriers[0];
+    const { data: created } = await supabase
+      .from("agency_rosters")
+      .insert({ agency_id: params.agencyId, carrier: pc, writing_number: pn, ...baseFields })
+      .select("id, carrier, writing_number")
+      .single();
+    primary = created;
   } else {
-    await supabase.from("agency_rosters").insert(record);
+    await supabase.from("agency_rosters").update(baseFields).eq("id", primary.id);
   }
-}
+  if (!primary) return false;
 
-// Create/refresh the agent's confirmed roster membership for the resolved agency
-// across every carrier writing number, and lock the agent to that agency (as the
-// portal's own confirmed-match path does).
-// deno-lint-ignore no-explicit-any
-async function syncAgencyRoster(supabase: any, params: {
-  agencyId: string; agencyName: string; agentId: string;
-  firstName: string; lastName: string; npn: string;
-  unlWritingNumber: string; gtlWritingNumber: string;
-}): Promise<boolean> {
-  let synced = false;
-  if (notEmpty(params.unlWritingNumber)) {
-    await upsertRosterEntry(supabase, { ...params, writingNumber: params.unlWritingNumber, carrier: "UNL" });
-    synced = true;
+  // Self-heal: collapse any pre-existing extra roster rows for this agent into the
+  // single-record model. Non-primary carriers move to agent_writing_numbers; the
+  // extra roster row is then removed. (Fixes historical double records.)
+  const extras = (existingRosters || []).slice(1);
+  for (const ex of extras) {
+    if (ex.carrier !== primary.carrier) {
+      const { data: awnRows } = await supabase
+        .from("agent_writing_numbers")
+        .select("id")
+        .eq("agent_id", params.agentId)
+        .eq("agency_id", params.agencyId)
+        .eq("carrier_name", ex.carrier);
+      if (!(awnRows && awnRows[0])) {
+        await supabase.from("agent_writing_numbers").insert({ agent_id: params.agentId, agency_id: params.agencyId, carrier_name: ex.carrier, writing_number: ex.writing_number });
+      }
+    }
+    await supabase.from("agency_rosters").delete().eq("id", ex.id);
   }
-  if (notEmpty(params.gtlWritingNumber)) {
-    await upsertRosterEntry(supabase, { ...params, writingNumber: params.gtlWritingNumber, carrier: "GTL" });
-    synced = true;
+
+  for (const [carrier, number] of carriers) {
+    if (carrier === primary.carrier) {
+      if (primary.writing_number !== number) {
+        await flagWritingNumberConflict(supabase, { agentId: params.agentId, agencyId: params.agencyId, name, carrier, oldNumber: primary.writing_number, newNumber: number });
+        await supabase.from("agency_rosters").update({ writing_number: number, updated_at: new Date().toISOString() }).eq("id", primary.id);
+        primary.writing_number = number;
+      }
+    } else {
+      // Secondary carrier -> agent_writing_numbers (keeps one roster record).
+      const { data: awnRows } = await supabase
+        .from("agent_writing_numbers")
+        .select("id, writing_number")
+        .eq("agent_id", params.agentId)
+        .eq("agency_id", params.agencyId)
+        .eq("carrier_name", carrier);
+      const existingAwn = awnRows && awnRows[0];
+      if (!existingAwn) {
+        await supabase.from("agent_writing_numbers").insert({ agent_id: params.agentId, agency_id: params.agencyId, carrier_name: carrier, writing_number: number });
+      } else if (existingAwn.writing_number !== number) {
+        await flagWritingNumberConflict(supabase, { agentId: params.agentId, agencyId: params.agencyId, name, carrier, oldNumber: existingAwn.writing_number, newNumber: number });
+        await supabase.from("agent_writing_numbers").update({ writing_number: number }).eq("id", existingAwn.id);
+      }
+    }
   }
-  if (synced) {
-    await supabase
-      .from("agents")
-      .update({ agency_id: params.agencyId, agency: params.agencyName, agency_locked: true, updated_at: new Date().toISOString() })
-      .eq("id", params.agentId);
-  }
-  return synced;
+
+  await supabase
+    .from("agents")
+    .update({ agency_id: params.agencyId, agency: params.agencyName, agency_locked: true, updated_at: new Date().toISOString() })
+    .eq("id", params.agentId);
+
+  return true;
 }
 
 Deno.serve(async (req: Request) => {
