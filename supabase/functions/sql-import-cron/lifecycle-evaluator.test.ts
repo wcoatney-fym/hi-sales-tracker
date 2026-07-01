@@ -77,28 +77,43 @@ Deno.test("no event when contract code is unchanged", () => {
 
 // ---- at-risk derivation ----
 
-Deno.test("at-risk: monthly DIR inside 60d with stale paid_to_date is at risk", () => {
-  assertEquals(deriveAtRisk(policy(), NOW), true);
+// ---- at-risk derivation: active + DIR + paid_to_date < today ----
+
+Deno.test("at-risk: active + DIR + paid_to_date in the past is at risk", () => {
+  assertEquals(deriveAtRisk(policy({ paid_to_date: "2026-06-01" }), NOW), true);
 });
 
-Deno.test("at-risk: paid_to_date advanced a cycle past effective is NOT at risk", () => {
+Deno.test("at-risk: paid_to_date today is NOT at risk (must be strictly past)", () => {
+  assertEquals(deriveAtRisk(policy({ paid_to_date: "2026-06-30" }), NOW), false);
+});
+
+Deno.test("at-risk: paid_to_date in the future is NOT at risk", () => {
   assertEquals(deriveAtRisk(policy({ paid_to_date: "2026-07-05" }), NOW), false);
 });
 
-Deno.test("at-risk: null paid_to_date is at risk", () => {
-  assertEquals(deriveAtRisk(policy({ paid_to_date: null }), NOW), true);
+Deno.test("at-risk: null paid_to_date is NOT at risk (not evaluable)", () => {
+  assertEquals(deriveAtRisk(policy({ paid_to_date: null }), NOW), false);
 });
 
-Deno.test("at-risk: quarterly (mode 3) is out of scope", () => {
-  assertEquals(deriveAtRisk(policy({ billing_mode: "3" }), NOW), false);
+Deno.test("at-risk: pending (P / submission status) never fires at-risk", () => {
+  assertEquals(deriveAtRisk(policy({ contract_code: "P" }), NOW), false);
+});
+
+Deno.test("at-risk: terminated / suspended are out of scope", () => {
+  assertEquals(deriveAtRisk(policy({ contract_code: "T" }), NOW), false);
+  assertEquals(deriveAtRisk(policy({ contract_code: "S" }), NOW), false);
+});
+
+Deno.test("at-risk: billing_mode no longer matters (quarterly DIR past-due is at risk)", () => {
+  assertEquals(deriveAtRisk(policy({ billing_mode: "3", paid_to_date: "2026-06-01" }), NOW), true);
 });
 
 Deno.test("at-risk: PAC (auto-draft) is out of scope", () => {
   assertEquals(deriveAtRisk(policy({ billing_form: "PAC" }), NOW), false);
 });
 
-Deno.test("at-risk: past the 60-day window is out of scope", () => {
-  assertEquals(deriveAtRisk(policy({ policy_effective_date: "2026-03-01" }), NOW), false);
+Deno.test("at-risk: effective date is irrelevant now (old policy past-due still at risk)", () => {
+  assertEquals(deriveAtRisk(policy({ policy_effective_date: "2026-03-01", paid_to_date: "2026-06-01" }), NOW), true);
 });
 
 // ---- at-risk flip-true / recovery ----
@@ -108,7 +123,7 @@ Deno.test("evaluateAtRisk fires + sets flag on flip-true", () => {
   assertEquals(d.fire, true);
   assertEquals(d.setFlag, true);
   assertEquals(d.event?.trigger, "at risk");
-  assertEquals(d.event?.risk_signal, "early-draft-not-held");
+  assertEquals(d.event?.risk_signal, "active-dir-paid-to-date-past-due");
 });
 
 Deno.test("evaluateAtRisk does NOT re-fire when already flagged", () => {
