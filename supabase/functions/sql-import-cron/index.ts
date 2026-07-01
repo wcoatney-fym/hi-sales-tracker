@@ -1046,6 +1046,41 @@ async function handleSync(
       // Reconciliation is best-effort; don't block completion
     }
 
+    // --- Intake<->policy matching: supersede + dedupe ---
+    // Charlie's original design: once a Data Source (UNL/Max's DB) record
+    // confirms an agent-submitted Intake Form for the same client, the Intake
+    // Form is marked 'superseded' so production/premium rollups count ONE
+    // policy, not two. The manual-upload path runs this inline; the automated
+    // SQL-import cron never did, so every intake that also landed in the daily
+    // file was double-counted. Re-wire it here so the daily path dedupes too.
+    // Best-effort: a matching failure must never block finalizing the import.
+    let recordsSuperseded = 0;
+    let duplicatesFlagged = 0;
+    try {
+      const { data: supersededResult } = await supabase.rpc(
+        "flag_superseded_by_data_source",
+      );
+      recordsSuperseded = supersededResult || 0;
+      const { data: dupResult } = await supabase.rpc(
+        "flag_duplicate_submissions",
+      );
+      duplicatesFlagged = dupResult || 0;
+      if (recordsSuperseded > 0 || duplicatesFlagged > 0) {
+        await supabase.from("upload_history_log").insert({
+          action: "intake_dedupe_complete",
+          source: "sql_import",
+          details: {
+            source_id: sourceId,
+            upload_id: uploadId,
+            records_superseded: recordsSuperseded,
+            duplicates_flagged: duplicatesFlagged,
+          },
+        });
+      }
+    } catch (_) {
+      // Dedupe is best-effort; don't block completion
+    }
+
     // Mark complete
     await supabase
       .from("source_uploads")
@@ -1060,12 +1095,12 @@ async function handleSync(
     await supabase.from("upload_history_log").insert({
       action: "auto_import_complete",
       source: "sql_import",
-      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted },
+      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted, records_superseded: recordsSuperseded, duplicates_flagged: duplicatesFlagged },
     });
 
     // Staging is intentionally retained: the admin "View" screen reads it, and the
     // next import purges prior uploads' rows at init (see purgeOldStagingRows).
-    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted });
+    return jsonResponse({ success: true, done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted, records_superseded: recordsSuperseded, duplicates_flagged: duplicatesFlagged });
   }
 
   const newLastId = batchRecs[batchRecs.length - 1].id;
