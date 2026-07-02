@@ -31,19 +31,11 @@ export default function AgentSection({
   onResultRef.current = onVerificationResult;
 
   useEffect(() => {
+    // Verification is carrier-agnostic: identify the agent by name only.
     const fn = formData.agentFirstName.trim();
     const ln = formData.agentLastName.trim();
-    const carrier = formData.carrier;
 
-    // Skip verification entirely for paused carriers — submission is blocked upstream.
-    if (PAUSED_CARRIERS.includes(carrier)) {
-      onResultRef.current(false, "", "");
-      setVerificationError("");
-      setVerifying(false);
-      return;
-    }
-
-    if (!fn || !ln || !carrier) {
+    if (!fn || !ln) {
       onResultRef.current(false, "", "");
       setVerificationError("");
       setVerifying(false);
@@ -57,7 +49,7 @@ export default function AgentSection({
     const timer = setTimeout(async () => {
       setVerifying(true);
       try {
-        const result = await verifyAgent(fn, ln, carrier);
+        const result = await verifyAgent(fn, ln);
         if (cancelled) return;
         if (result.found) {
           onResultRef.current(true, result.agentNumber, result.npn || "");
@@ -78,7 +70,7 @@ export default function AgentSection({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [formData.agentFirstName, formData.agentLastName, formData.carrier]);
+  }, [formData.agentFirstName, formData.agentLastName]);
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -197,7 +189,7 @@ export default function AgentSection({
             <span className="text-sm text-red-300">{verificationError}</span>
           </div>
           <p className="mt-3 text-sm text-red-300 ml-8">
-            Please message <span className="font-semibold">Charlie Mitchell</span> on Slack with your UNL/GTL writing numbers to get added to the system.
+            Please message <span className="font-semibold">Charlie Mitchell</span> on Slack with your writing numbers to get added to the system.
           </p>
         </div>
       )}
