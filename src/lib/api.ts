@@ -1384,9 +1384,14 @@ export async function mgrApproveSave(token: string, policyId: string) {
   return callApi("admin-api", { action: "mgr-approve-save", token, policy_id: policyId });
 }
 
-// Per-agent Agent Quality rollup (handoffs + 5-day follow-up rate).
+// Per-agent Agent Quality rollup (handoffs + 5-day follow-up rate + trend).
 export async function mgrGetAgentQuality(token: string) {
   return callApi("admin-api", { action: "mgr-agent-quality", token });
+}
+
+// Per-agent 90-day persistency (retention on business each agent wrote) + trend.
+export async function mgrGetAgentPersistency(token: string) {
+  return callApi("admin-api", { action: "mgr-agent-persistency", token });
 }
 
 // --- Agent-side notifications & threads (leaderboard-api, X-Agent-Token header) ---
