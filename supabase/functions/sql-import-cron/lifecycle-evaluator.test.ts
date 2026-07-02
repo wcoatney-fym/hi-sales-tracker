@@ -75,25 +75,25 @@ function policy(overrides: Partial<PolicyState> = {}): PolicyState {
 
 // ---- transitions ----
 
-Deno.test("submission is DISABLED by default (owned by intake form)", () => {
+Deno.test("submission fires by default on new P (enabled 2026-07-02)", () => {
   const evts = computeLifecycleEvents(policy({ contract_code: "P" }), undefined, NOW);
-  assertEquals(evts.length, 0);
-});
-
-Deno.test("submission fires only when explicitly enabled (post UNL cutover)", () => {
-  const evts = computeLifecycleEvents(
-    policy({ contract_code: "P" }),
-    undefined,
-    NOW,
-    { emitSubmission: true },
-  );
   assertEquals(evts.map((e) => e.trigger), ["submission"]);
   assertEquals(evts[0].previous_contract_code, null);
 });
 
-Deno.test("submission does NOT re-fire when already P (even if enabled)", () => {
+Deno.test("submission can still be force-disabled via opts", () => {
+  const evts = computeLifecycleEvents(
+    policy({ contract_code: "P" }),
+    undefined,
+    NOW,
+    { emitSubmission: false },
+  );
+  assertEquals(evts.length, 0);
+});
+
+Deno.test("submission does NOT re-fire when already P (daily full-state pull)", () => {
   const prior: PriorState = { contract_code: "P", at_risk_fired_at: null };
-  const evts = computeLifecycleEvents(policy({ contract_code: "P" }), prior, NOW, { emitSubmission: true });
+  const evts = computeLifecycleEvents(policy({ contract_code: "P" }), prior, NOW);
   assertEquals(evts.length, 0);
 });
 

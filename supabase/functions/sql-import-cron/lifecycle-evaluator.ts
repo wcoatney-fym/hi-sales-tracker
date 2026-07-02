@@ -10,9 +10,8 @@
 //   1. "submission" — Contract Code flips to P
 //   2. "approved"   — P -> A (transition)
 //   3. "terminated" — A -> T (transition); carries contract_reason for GHL branch
-//   4. "at risk"    — DERIVED (monthly + DIR, paid_to_date not advanced one
-//                     cycle past effective_date inside first 60d); push only on
-//                     flip-true, carries risk_signal.
+//   4. "at risk"    — DERIVED (active + DIR + paid_to_date < today); push only
+//                     on flip-true, cleared on recovery; carries risk_signal.
 //
 // This module is intentionally pure + dependency-free so it can be unit-tested
 // with `deno test` without touching Supabase or the network.
@@ -136,17 +135,21 @@ export function deriveAtRisk(p: PolicyState, now: number = Date.now()): boolean 
   return ptd < todayUtcMidnight(now);
 }
 
-// TEMPORARY: the `submission` event is currently owned by the intake form
-// (public-api -> Zapier hook up1e31i) which fires the moment an app is
-// submitted. Until the live UNL webhook replaces that intake form, having the
-// data-side evaluator ALSO fire `submission` on Contract Code -> P would
-// double-trigger the same policy. So submission is disabled here by default.
+// The `submission` event fires on Contract Code -> P (pending) from the daily
+// data-source pull. ENABLED (Charlie, 2026-07-02): the Activity tracker now owns
+// submission alongside approved/terminated/at-risk, pushing straight to GHL.
 //
-// LOCKED (Charlie, 2026-06-30): the pending/submission status is PAUSED. Do not
-// flip this to true (and do not pass { emitSubmission: true } from production)
-// without an explicit manual thumbs-up AND the live UNL webhook in place. Until
-// then the intake form remains the single source of the submission event.
-export const SUBMISSION_TRIGGER_ENABLED = false;
+// Re-blast safety: submission fires only on the P transition (prevCode !== P).
+// On the daily full-state pull, existing pending policies already carry a prior
+// contract_code of P, so only genuinely new pending policies fire — the book is
+// not re-blasted. Brand-new policies (no prior) with code P do fire once.
+//
+// NOTE (double-fire watch, Charlie 2026-07-02): the intake form still fires its
+// own submission to Zapier hook up1e31i at point-of-sale. For UNL the intake
+// form is paused (carrier gate) so the data source is the only submission
+// source; for GTL/other carriers still using the intake form, both can fire.
+// Accepted per Charlie's call to turn submission on; revisit at UNL cutover.
+export const SUBMISSION_TRIGGER_ENABLED = true;
 
 export interface LifecycleOptions {
   // Override the submission gate (defaults to SUBMISSION_TRIGGER_ENABLED).
