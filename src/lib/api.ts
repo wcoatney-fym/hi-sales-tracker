@@ -56,16 +56,11 @@ async function callApi(
   return data;
 }
 
-export async function verifyAgent(
-  firstName: string,
-  lastName: string,
-  carrier: string
-) {
+export async function verifyAgent(firstName: string, lastName: string) {
   return callApi("public-api", {
     action: "verify-agent",
     firstName,
     lastName,
-    carrier,
   });
 }
 

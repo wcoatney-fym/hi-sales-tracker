@@ -4,6 +4,9 @@ import FormField from "../ui/FormField";
 import { verifyAgent } from "../../lib/api";
 import type { IntakeFormData } from "../../types";
 
+// Carriers whose intake is temporarily paused (no live connection yet).
+export const PAUSED_CARRIERS = ["UNL"];
+
 interface AgentSectionProps {
   formData: IntakeFormData;
   updateField: (field: keyof IntakeFormData, value: string) => void;
@@ -23,15 +26,16 @@ export default function AgentSection({
 }: AgentSectionProps) {
   const [verifying, setVerifying] = useState(false);
   const [verificationError, setVerificationError] = useState("");
+  const carrierPaused = PAUSED_CARRIERS.includes(formData.carrier);
   const onResultRef = useRef(onVerificationResult);
   onResultRef.current = onVerificationResult;
 
   useEffect(() => {
+    // Verification is carrier-agnostic: identify the agent by name only.
     const fn = formData.agentFirstName.trim();
     const ln = formData.agentLastName.trim();
-    const carrier = formData.carrier;
 
-    if (!fn || !ln || !carrier) {
+    if (!fn || !ln) {
       onResultRef.current(false, "", "");
       setVerificationError("");
       setVerifying(false);
@@ -45,7 +49,7 @@ export default function AgentSection({
     const timer = setTimeout(async () => {
       setVerifying(true);
       try {
-        const result = await verifyAgent(fn, ln, carrier);
+        const result = await verifyAgent(fn, ln);
         if (cancelled) return;
         if (result.found) {
           onResultRef.current(true, result.agentNumber, result.npn || "");
@@ -66,7 +70,7 @@ export default function AgentSection({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [formData.agentFirstName, formData.agentLastName, formData.carrier]);
+  }, [formData.agentFirstName, formData.agentLastName]);
 
   return (
     <div className="animate-fade-in space-y-5">
@@ -143,8 +147,27 @@ export default function AgentSection({
           <option value="">Select a carrier</option>
           <option value="UNL">UNL</option>
           <option value="GTL">GTL</option>
+          <option value="AHL">AHL</option>
+          <option value="Manhattan">Manhattan</option>
+          <option value="Heartland">Heartland</option>
         </select>
       </FormField>
+
+      {carrierPaused && (
+        <div
+          className="p-4 bg-amber-500/10 rounded-lg border border-amber-500/30"
+          role="alert"
+        >
+          <div className="flex items-center gap-3">
+            <AlertCircle className="text-amber-400 flex-shrink-0" size={20} />
+            <span className="text-sm text-amber-300">
+              {formData.carrier} submissions are temporarily paused while we wire
+              up a live connection to {formData.carrier}. Please check back soon
+              — no need to submit this policy here for now.
+            </span>
+          </div>
+        </div>
+      )}
 
       {verifying && (
         <div
@@ -166,7 +189,7 @@ export default function AgentSection({
             <span className="text-sm text-red-300">{verificationError}</span>
           </div>
           <p className="mt-3 text-sm text-red-300 ml-8">
-            Please message <span className="font-semibold">Charlie Mitchell</span> on Slack with your UNL/GTL writing numbers to get added to the system.
+            Please message <span className="font-semibold">Charlie Mitchell</span> on Slack with your writing numbers to get added to the system.
           </p>
         </div>
       )}
@@ -206,7 +229,7 @@ export default function AgentSection({
           type="button"
           className="btn-primary"
           onClick={onNext}
-          disabled={!agentVerified || verifying}
+          disabled={!agentVerified || verifying || carrierPaused}
         >
           Continue
         </button>

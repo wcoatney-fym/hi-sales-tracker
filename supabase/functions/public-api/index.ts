@@ -30,21 +30,26 @@ Deno.serve(async (req: Request) => {
 
     switch (action) {
       case "verify-agent": {
-        const { firstName, lastName, carrier } = body;
+        // Carrier-agnostic: we don't hold writing-number rosters for every
+        // carrier, so verification identifies the AGENT by name (and pulls
+        // whatever writing number/agency we have on file), independent of the
+        // carrier selected on the form. Carrier is accepted but no longer
+        // filters the lookup. (2026-07-02, per Charlie.)
+        const { firstName, lastName } = body;
 
-        if (!firstName || !lastName || !carrier) {
+        if (!firstName || !lastName) {
           return jsonResponse({ error: "Missing required fields" }, 400);
         }
 
-        // Check agency_rosters first (agency-uploaded rosters)
+        // Check agency_rosters first (agency-uploaded rosters), any carrier
         const { data: agencyRosterMatch } = await supabase
           .from("agency_rosters")
           .select("writing_number, npn")
           .ilike("agent_first_name", firstName.trim())
           .ilike("agent_last_name", lastName.trim())
-          .eq("carrier", carrier)
           .eq("status", "active")
           .eq("match_status", "confirmed")
+          .not("writing_number", "is", null)
           .limit(1)
           .maybeSingle();
 
@@ -52,22 +57,21 @@ Deno.serve(async (req: Request) => {
           return jsonResponse({ found: true, agentNumber: agencyRosterMatch.writing_number, npn: agencyRosterMatch.npn || "" });
         }
 
-        // Check global carrier roster
-        const { data: activeUpload } = await supabase
+        // Check global carrier rosters (any active upload, any carrier)
+        const { data: activeUploads } = await supabase
           .from("roster_uploads")
           .select("id")
-          .eq("carrier", carrier)
-          .eq("is_active", true)
-          .maybeSingle();
+          .eq("is_active", true);
 
-        if (activeUpload) {
+        const uploadIds = (activeUploads || []).map((u) => u.id);
+        if (uploadIds.length > 0) {
           const { data, error } = await supabase
             .from("agent_rosters")
             .select("agent_number, npn")
             .ilike("first_name", firstName.trim())
             .ilike("last_name", lastName.trim())
-            .eq("carrier", carrier)
-            .eq("roster_upload_id", activeUpload.id)
+            .in("roster_upload_id", uploadIds)
+            .limit(1)
             .maybeSingle();
 
           if (error) throw error;
@@ -76,20 +80,21 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // Fall back to agents table
-        const writingCol = carrier === "UNL" ? "unl_writing_number" : "gtl_writing_number";
+        // Fall back to agents table: return whichever writing number is on file
         const { data: portalAgent, error: portalError } = await supabase
           .from("agents")
-          .select(`${writingCol}, npn`)
+          .select("unl_writing_number, gtl_writing_number, npn")
           .ilike("first_name", firstName.trim())
           .ilike("last_name", lastName.trim())
-          .not(writingCol, "eq", "")
           .maybeSingle();
 
         if (portalError) throw portalError;
 
-        if (portalAgent && portalAgent[writingCol]) {
-          return jsonResponse({ found: true, agentNumber: portalAgent[writingCol], npn: portalAgent.npn || "" });
+        if (portalAgent) {
+          const writingNumber = portalAgent.unl_writing_number || portalAgent.gtl_writing_number || "";
+          if (writingNumber) {
+            return jsonResponse({ found: true, agentNumber: writingNumber, npn: portalAgent.npn || "" });
+          }
         }
 
         return jsonResponse({ found: false });

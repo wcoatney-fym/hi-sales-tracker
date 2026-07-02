@@ -53,7 +53,7 @@ export default function LeadIntakeForm() {
     setVerifying(true);
     setVerifyError("");
     try {
-      const result = await verifyAgent(fn, ln, carrier);
+      const result = await verifyAgent(fn, ln);
       if (result.found) {
         setVerified(true);
         setAgentNumber(result.agentNumber as string);
