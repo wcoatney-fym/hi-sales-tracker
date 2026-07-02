@@ -16,7 +16,7 @@ import {
   adminCreateAgencyManager,
   adminResetAgencyManagerPassword,
   adminToggleAgencyManager,
-  adminGetAgencies,
+  adminListAgenciesDirectory,
   adminGetAgents,
 } from "../../lib/api";
 import type { AgencyManager } from "../../lib/api";
@@ -319,7 +319,7 @@ function AgencyFilterSelect({
   const [agencies, setAgencies] = useState<AgencyOption[]>([]);
 
   useEffect(() => {
-    adminGetAgencies(token)
+    adminListAgenciesDirectory(token)
       .then((res) => setAgencies(normalizeAgencies(res)))
       .catch(() => {});
   }, [token]);
@@ -365,7 +365,7 @@ function CreateManagerModal({
 
   useEffect(() => {
     if (isGlobalAdmin) {
-      adminGetAgencies(token).then((res) => setAgencies(normalizeAgencies(res))).catch(() => {});
+      adminListAgenciesDirectory(token).then((res) => setAgencies(normalizeAgencies(res))).catch(() => {});
     }
     adminGetAgents(token)
       .then((res) => setAgents((res.agents as AgentOption[]) || []))

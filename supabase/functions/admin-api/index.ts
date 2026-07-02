@@ -4959,6 +4959,27 @@ Deno.serve(async (req: Request) => {
       // Helpers: generate a readable unique-ish password
       // (manager management is used by agency_admin for own agency, global_admin for all)
 
+      case "list-agencies-directory": {
+        // Real agency rows (id, name, slug) from the agencies table.
+        // Distinct from get-agencies, which returns only distinct agency
+        // NAME strings from form_submissions (used by dashboard filters).
+        // Manager create/scoping needs the real agencies.id UUID.
+        if (session.role !== "global_admin" && session.role !== "agency_admin") {
+          return jsonResponse({ error: "Forbidden" }, 403);
+        }
+        let dq = supabase
+          .from("agencies")
+          .select("id, name, slug")
+          .eq("is_active", true)
+          .order("name", { ascending: true });
+        if (session.role === "agency_admin" && session.agency_id) {
+          dq = dq.eq("id", session.agency_id);
+        }
+        const { data: dirAgencies, error: dirErr } = await dq;
+        if (dirErr) throw dirErr;
+        return jsonResponse({ agencies: dirAgencies || [] });
+      }
+
       case "list-agency-managers": {
         if (session.role !== "global_admin" && session.role !== "agency_admin") {
           return jsonResponse({ error: "Forbidden" }, 403);
