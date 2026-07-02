@@ -250,6 +250,16 @@ export async function adminGetAgencies(token: string) {
   });
 }
 
+// Real agency rows ({ id, name, slug }) from the agencies table.
+// Use this anywhere you need a real agency id (e.g. creating/scoping
+// managers), not the distinct name strings that get-agencies returns.
+export async function adminListAgenciesDirectory(token: string) {
+  return callApi("admin-api", {
+    action: "list-agencies-directory",
+    token,
+  });
+}
+
 export async function adminGetPolicies(
   token: string,
   startDate: string,
