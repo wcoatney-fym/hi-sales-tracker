@@ -188,6 +188,65 @@ function daysBetween(fromIso: string | null, to = Date.now()): number | null {
   return Math.floor((to - t) / 86400000);
 }
 
+// ---- 90-day persistency (per-agent) --------------------------------------
+// Mirrors the validated agency-wide retention rule (memory/sales-tracker-schema):
+//   drafted_first  = paid_to_date >= effective + 1 month
+//   retained (monthly, billing_mode '1' or null) = paid_to_date >= effective + 3 months
+//   retained (non-monthly '3'/'6'/'12') = drafted_first (one draft pays >=90d)
+// Denominator = policies old enough to have had 3 draws (effective <= today-3mo)
+// AND that drafted their first premium. Rate = retained / drafted_first.
+type PersistPolicy = {
+  policy_effective_date?: string | null;
+  paid_to_date?: string | null;
+  billing_mode?: string | null;
+};
+
+function addMonthsIso(iso: string, months: number): number {
+  const d = new Date(iso);
+  d.setMonth(d.getMonth() + months);
+  return d.getTime();
+}
+
+function isMonthly(billingMode: string | null | undefined): boolean {
+  const m = (billingMode ?? "").trim();
+  return m === "" || m === "1"; // treat null/blank as monthly (conservative)
+}
+
+// Is this policy old enough to be counted (had the chance for 3 monthly draws)?
+function persistEligible(p: PersistPolicy, nowMs = Date.now()): boolean {
+  if (!p.policy_effective_date) return false;
+  const eff = new Date(p.policy_effective_date).getTime();
+  if (Number.isNaN(eff)) return false;
+  return addMonthsIso(p.policy_effective_date, 3) <= nowMs;
+}
+
+function draftedFirst(p: PersistPolicy): boolean {
+  if (!p.policy_effective_date || !p.paid_to_date) return false;
+  const ptd = new Date(p.paid_to_date).getTime();
+  if (Number.isNaN(ptd)) return false;
+  return ptd >= addMonthsIso(p.policy_effective_date, 1);
+}
+
+function retained90(p: PersistPolicy): boolean {
+  if (!draftedFirst(p)) return false;
+  if (!isMonthly(p.billing_mode)) return true; // one non-monthly draft pays >=90d
+  const ptd = new Date(p.paid_to_date as string).getTime();
+  return ptd >= addMonthsIso(p.policy_effective_date as string, 3);
+}
+
+// Roll a set of policies into {drafted_first, retained, pct}. Only eligible
+// (old-enough) policies count.
+function persistencyOf(policies: PersistPolicy[]): { drafted_first: number; retained: number; pct: number } {
+  let df = 0, ret = 0;
+  for (const p of policies) {
+    if (!persistEligible(p)) continue;
+    if (!draftedFirst(p)) continue;
+    df += 1;
+    if (retained90(p)) ret += 1;
+  }
+  return { drafted_first: df, retained: ret, pct: df ? Math.round((1000 * ret) / df) / 10 : 0 };
+}
+
 // Returns the action-stage (persisted), the computed urgency overlay, and
 // the current owner. Code Red / Heating Up are overlays: a policy keeps its
 // action-stage AND carries is_code_red so the board can bucket it regardless.
@@ -5370,7 +5429,105 @@ Deno.serve(async (req: Request) => {
           contacted_in_sla: v.contacted_in_sla,
           followup_rate_pct: v.handed_off ? Math.round((1000 * v.contacted_in_sla) / v.handed_off) / 10 : 0,
         })).sort((a, b) => a.followup_rate_pct - b.followup_rate_pct);
-        return jsonResponse({ agents, sla_days: AGENT_SLA_DAYS, agency_id: session.agency_id });
+
+        // Agency-wide 6-month trend: 5-day hit rate bucketed by the month the
+        // policy was dropped into the agent-outreach stage (agent_outreach_at).
+        const monthKey = (iso: string) => iso.slice(0, 7); // YYYY-MM
+        const now = new Date();
+        const trendMonths: string[] = [];
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          trendMonths.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+        }
+        const byMonth = new Map<string, { handed_off: number; contacted_in_sla: number }>();
+        for (const r of (rows || []) as DispRow[]) {
+          if (!r?.agent_outreach_at) continue;
+          const mk = monthKey(r.agent_outreach_at);
+          const agg = byMonth.get(mk) || { handed_off: 0, contacted_in_sla: 0 };
+          agg.handed_off += 1;
+          if (r?.agent_contacted_at) {
+            const diff = new Date(r.agent_contacted_at).getTime() - new Date(r.agent_outreach_at).getTime();
+            if (diff <= AGENT_SLA_DAYS * 86400000) agg.contacted_in_sla += 1;
+          }
+          byMonth.set(mk, agg);
+        }
+        const contact_trend = trendMonths.map((m) => {
+          const v = byMonth.get(m);
+          return {
+            month: m,
+            handed_off: v?.handed_off ?? 0,
+            rate_pct: v && v.handed_off ? Math.round((1000 * v.contacted_in_sla) / v.handed_off) / 10 : null,
+          };
+        });
+        return jsonResponse({ agents, sla_days: AGENT_SLA_DAYS, contact_trend, agency_id: session.agency_id });
+      }
+
+      // Per-agent 90-day persistency: retention on the business each agent wrote
+      // (agency-scoped), using the validated billing-mode-aware rule. Returns a
+      // current rollup per agent plus a 6-month effective-cohort trend, and an
+      // agency-wide rollup + trend for the header line.
+      case "mgr-agent-persistency": {
+        if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
+        const { data: rows, error: pErr } = await supabase
+          .from("form_submissions")
+          .select("agent_number, agent_first_name, agent_last_name, policy_effective_date, paid_to_date, billing_mode, product_type")
+          .eq("agency_id", session.agency_id)
+          .in("product_type", ["HI", "HHC"]);
+        if (pErr) throw pErr;
+        type FsRow = {
+          agent_number?: string | null; agent_first_name?: string | null; agent_last_name?: string | null;
+          policy_effective_date?: string | null; paid_to_date?: string | null; billing_mode?: string | null;
+        };
+        const all = (rows || []) as FsRow[];
+
+        // 6-month effective-cohort buckets (only cohorts old enough to be eligible).
+        const now = new Date();
+        const cohortMonths: string[] = [];
+        for (let i = 8; i >= 3; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          cohortMonths.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+        }
+        const trendFor = (list: FsRow[]) =>
+          cohortMonths.map((m) => {
+            const cohort = list.filter((p) => (p.policy_effective_date || "").slice(0, 7) === m);
+            const roll = persistencyOf(cohort);
+            return { month: m, drafted_first: roll.drafted_first, pct: roll.drafted_first ? roll.pct : null };
+          });
+
+        const byAgent = new Map<string, { name: string; rows: FsRow[] }>();
+        for (const r of all) {
+          const key = (r.agent_number || "").trim() || `${r.agent_first_name ?? ""} ${r.agent_last_name ?? ""}`.trim() || "unknown";
+          const entry = byAgent.get(key) || { name: `${r.agent_first_name ?? ""} ${r.agent_last_name ?? ""}`.trim() || "Unassigned", rows: [] };
+          entry.rows.push(r);
+          byAgent.set(key, entry);
+        }
+        const agents = [...byAgent.entries()].map(([key, v]) => {
+          const roll = persistencyOf(v.rows);
+          return {
+            agent_number: key === "unknown" ? null : key,
+            agent_name: v.name,
+            drafted_first: roll.drafted_first,
+            retained: roll.retained,
+            persistency_pct: roll.pct,
+            trend: trendFor(v.rows),
+          };
+        })
+          // Only surface agents with an eligible book; worst persistency first.
+          .filter((a) => a.drafted_first > 0)
+          .sort((a, b) => a.persistency_pct - b.persistency_pct);
+
+        const agencyRoll = persistencyOf(all);
+        return jsonResponse({
+          agents,
+          agency: {
+            drafted_first: agencyRoll.drafted_first,
+            retained: agencyRoll.retained,
+            persistency_pct: agencyRoll.pct,
+            trend: trendFor(all),
+          },
+          target_pct: 90,
+          agency_id: session.agency_id,
+        });
       }
 
       default:
