@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  AGENT_NPN_FIELD_ID,
   buildGhlContactBody,
   LOB_FIELD_IDS,
   lobKeyForPlanType,
@@ -30,6 +31,7 @@ function basePayload(overrides: Partial<LifecyclePayload> = {}): LifecyclePayloa
     policy_number: "TESTHI-APP-001",
     termination_date: "",
     contract_reason: "",
+    agent_npn: "18408252",
     carrier: "GTL",
     agent_first_name: "Tyler",
     agent_full_name: "Tyler Cole",
@@ -73,7 +75,9 @@ Deno.test("HIP approved writes the hip__ field group with correct ids", () => {
   const b = buildGhlContactBody(basePayload(), LOC);
   const m = cfMap(b);
   const ids = LOB_FIELD_IDS.hip;
-  assertEquals(b.customFields.length, 15);
+  // 15 LOB fields + 1 global agent_npn.
+  assertEquals(b.customFields.length, 16);
+  assertEquals(m.get(AGENT_NPN_FIELD_ID), "18408252");
   assertEquals(m.get(ids.plan_name), "Hospital Indemnity Plus");
   assertEquals(m.get(ids.plan_premium), "45");
   assertEquals(m.get(ids.client_status), "active");
@@ -111,10 +115,20 @@ Deno.test("terminated carries mapped reason label + date into hhc group", () => 
   assertEquals(m.get(ids.client_status), "terminated");
 });
 
-Deno.test("Unknown plan type upserts contact with no LOB custom fields", () => {
+Deno.test("Unknown plan type still writes agent_npn (only the global field)", () => {
   const b = buildGhlContactBody(basePayload({ plan_type: "Unknown" }), LOC);
-  assertEquals(b.customFields.length, 0);
+  assertEquals(b.customFields.length, 1);
+  assertEquals(b.customFields[0].id, AGENT_NPN_FIELD_ID);
+  assertEquals(b.customFields[0].value, "18408252");
   assertEquals(b.firstName, "Marcus");
+});
+
+Deno.test("agent_npn is always included across every LOB", () => {
+  for (const pt of ["HIP", "HHC", "Life", "DV", "Cancer", "Unknown"] as const) {
+    const b = buildGhlContactBody(basePayload({ plan_type: pt }), LOC);
+    const npn = b.customFields.find((f) => f.id === AGENT_NPN_FIELD_ID);
+    assertEquals(npn?.value, "18408252", `${pt} carries agent_npn`);
+  }
 });
 
 Deno.test("null/undefined values become empty strings", () => {
