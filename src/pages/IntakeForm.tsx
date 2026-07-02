@@ -6,6 +6,7 @@ import ProductTypeSection from "../components/form/ProductTypeSection";
 import ClientSection from "../components/form/ClientSection";
 import PolicySection from "../components/form/PolicySection";
 import { submitForm } from "../lib/api";
+import { PAUSED_CARRIERS } from "../components/form/AgentSection";
 import type { IntakeFormData } from "../types";
 
 function getTodayISO(): string {
@@ -78,6 +79,8 @@ export default function IntakeForm() {
       if (!formData.agentLastName.trim())
         newErrors.agentLastName = "Last name is required";
       if (!formData.carrier) newErrors.carrier = "Please select a carrier";
+      else if (PAUSED_CARRIERS.includes(formData.carrier))
+        newErrors.carrier = `${formData.carrier} submissions are temporarily paused.`;
       if (!agentVerified)
         newErrors.agent = "Agent must be verified before proceeding";
     }
