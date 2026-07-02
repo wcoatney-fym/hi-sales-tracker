@@ -39,6 +39,11 @@ export type LobFieldAttr =
   | "terminated_reason"
   | "termination_date";
 
+// Global (non-LOB) custom field for the writing agent's NPN. ALWAYS written on
+// every push regardless of product — all GHL automations key on NPN
+// (Charlie, 2026-07-02). Field: contact.agent_npn.
+export const AGENT_NPN_FIELD_ID = "uEFOApsD4JKXsXH3T9E4";
+
 export const LOB_FIELD_IDS: Record<LobKey, Record<LobFieldAttr, string>> = {
   hip: {
     plan_name: "0wkHYd9Jfr1mtttt56kf",
@@ -170,6 +175,7 @@ export interface LifecyclePayload {
   policy_number?: unknown;
   termination_date?: unknown;
   contract_reason?: unknown; // mapped label, goes to {lob}__terminated_reason
+  agent_npn?: unknown; // writing agent NPN -> global contact.agent_npn field
   carrier?: unknown;
   agent_first_name?: unknown;
   agent_full_name?: unknown;
@@ -223,6 +229,10 @@ export function buildGhlContactBody(
 ): GhlContactBody {
   const lob = lobKeyForPlanType(p.plan_type);
   const customFields: GhlCustomField[] = [];
+
+  // Agent NPN is global (not LOB-scoped) and ALWAYS included — GHL automations
+  // hinge on it (Charlie, 2026-07-02).
+  customFields.push({ id: AGENT_NPN_FIELD_ID, value: str(p.agent_npn) });
 
   if (lob) {
     const ids = LOB_FIELD_IDS[lob];
