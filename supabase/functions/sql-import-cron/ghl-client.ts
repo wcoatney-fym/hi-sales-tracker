@@ -44,6 +44,17 @@ export type LobFieldAttr =
 // (Charlie, 2026-07-02). Field: contact.agent_npn.
 export const AGENT_NPN_FIELD_ID = "uEFOApsD4JKXsXH3T9E4";
 
+// Product tag applied to the contact so GHL can segment by line of business
+// (Charlie, 2026-07-02). Uses the existing GHL tag taxonomy (`<product> | sold
+// client`). Unknown plan type gets no product tag.
+export const PRODUCT_TAG: Record<LobKey, string> = {
+  hip: "hip | sold client",
+  hhc: "hhc | sold client",
+  life: "life | sold client",
+  dv: "dv | sold client",
+  cancer: "cancer stroke | sold client",
+};
+
 export const LOB_FIELD_IDS: Record<LobKey, Record<LobFieldAttr, string>> = {
   hip: {
     plan_name: "0wkHYd9Jfr1mtttt56kf",
@@ -256,6 +267,9 @@ export function buildGhlContactBody(
     put("termination_date", str(p.termination_date));
   }
 
+  const tags = ["lifecycle", `trigger-${p.trigger}`];
+  if (lob) tags.push(PRODUCT_TAG[lob]);
+
   return {
     locationId,
     firstName: str(p.client_first_name),
@@ -267,7 +281,7 @@ export function buildGhlContactBody(
     state: str(p.state),
     postalCode: str(p.zip),
     source: "activity-tracker-lifecycle",
-    tags: ["lifecycle", `trigger-${p.trigger}`],
+    tags,
     customFields,
   };
 }
