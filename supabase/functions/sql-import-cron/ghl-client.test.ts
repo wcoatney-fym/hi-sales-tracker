@@ -4,6 +4,7 @@ import {
   buildGhlContactBody,
   LOB_FIELD_IDS,
   lobKeyForPlanType,
+  PRODUCT_TAG,
   type LifecyclePayload,
 } from "./ghl-client.ts";
 
@@ -68,7 +69,7 @@ Deno.test("standard contact fields map straight through", () => {
   assertEquals(b.state, "FL");
   assertEquals(b.postalCode, "33601");
   assertEquals(b.source, "activity-tracker-lifecycle");
-  assertEquals(b.tags, ["lifecycle", "trigger-approved"]);
+  assertEquals(b.tags, ["lifecycle", "trigger-approved", "hip | sold client"]);
 });
 
 Deno.test("HIP approved writes the hip__ field group with correct ids", () => {
@@ -93,7 +94,31 @@ Deno.test("at risk boolean true -> Yes", () => {
   const b = buildGhlContactBody(basePayload({ at_risk_status: true, trigger: "at risk" }), LOC);
   const m = cfMap(b);
   assertEquals(m.get(LOB_FIELD_IDS.hip.at_risk_status), "Yes");
-  assertEquals(b.tags, ["lifecycle", "trigger-at risk"]);
+  assertEquals(b.tags, ["lifecycle", "trigger-at risk", "hip | sold client"]);
+});
+
+Deno.test("product tag applied per LOB; Unknown gets none", () => {
+  const cases: Array<[LifecyclePayload["plan_type"], string | null]> = [
+    ["HIP", "hip | sold client"],
+    ["HHC", "hhc | sold client"],
+    ["Life", "life | sold client"],
+    ["DV", "dv | sold client"],
+    ["Cancer", "cancer stroke | sold client"],
+    ["Unknown", null],
+  ];
+  for (const [pt, tag] of cases) {
+    const b = buildGhlContactBody(basePayload({ plan_type: pt }), LOC);
+    if (tag === null) {
+      assertEquals(b.tags, ["lifecycle", "trigger-approved"], `${pt} no product tag`);
+    } else {
+      assertEquals(b.tags.includes(tag), true, `${pt} has product tag`);
+      assertEquals(b.tags.length, 3, `${pt} tag count`);
+    }
+  }
+});
+
+Deno.test("PRODUCT_TAG covers all LOB keys", () => {
+  assertEquals(Object.keys(PRODUCT_TAG).sort(), ["cancer", "dv", "hhc", "hip", "life"]);
 });
 
 Deno.test("terminated carries mapped reason label + date into hhc group", () => {
