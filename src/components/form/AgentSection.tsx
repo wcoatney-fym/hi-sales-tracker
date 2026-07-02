@@ -4,6 +4,9 @@ import FormField from "../ui/FormField";
 import { verifyAgent } from "../../lib/api";
 import type { IntakeFormData } from "../../types";
 
+// Carriers whose intake is temporarily paused (no live connection yet).
+export const PAUSED_CARRIERS = ["UNL"];
+
 interface AgentSectionProps {
   formData: IntakeFormData;
   updateField: (field: keyof IntakeFormData, value: string) => void;
@@ -23,6 +26,7 @@ export default function AgentSection({
 }: AgentSectionProps) {
   const [verifying, setVerifying] = useState(false);
   const [verificationError, setVerificationError] = useState("");
+  const carrierPaused = PAUSED_CARRIERS.includes(formData.carrier);
   const onResultRef = useRef(onVerificationResult);
   onResultRef.current = onVerificationResult;
 
@@ -30,6 +34,14 @@ export default function AgentSection({
     const fn = formData.agentFirstName.trim();
     const ln = formData.agentLastName.trim();
     const carrier = formData.carrier;
+
+    // Skip verification entirely for paused carriers — submission is blocked upstream.
+    if (PAUSED_CARRIERS.includes(carrier)) {
+      onResultRef.current(false, "", "");
+      setVerificationError("");
+      setVerifying(false);
+      return;
+    }
 
     if (!fn || !ln || !carrier) {
       onResultRef.current(false, "", "");
@@ -143,8 +155,27 @@ export default function AgentSection({
           <option value="">Select a carrier</option>
           <option value="UNL">UNL</option>
           <option value="GTL">GTL</option>
+          <option value="AHL">AHL</option>
+          <option value="Manhattan">Manhattan</option>
+          <option value="Heartland">Heartland</option>
         </select>
       </FormField>
+
+      {carrierPaused && (
+        <div
+          className="p-4 bg-amber-500/10 rounded-lg border border-amber-500/30"
+          role="alert"
+        >
+          <div className="flex items-center gap-3">
+            <AlertCircle className="text-amber-400 flex-shrink-0" size={20} />
+            <span className="text-sm text-amber-300">
+              {formData.carrier} submissions are temporarily paused while we wire
+              up a live connection to {formData.carrier}. Please check back soon
+              — no need to submit this policy here for now.
+            </span>
+          </div>
+        </div>
+      )}
 
       {verifying && (
         <div
@@ -206,7 +237,7 @@ export default function AgentSection({
           type="button"
           className="btn-primary"
           onClick={onNext}
-          disabled={!agentVerified || verifying}
+          disabled={!agentVerified || verifying || carrierPaused}
         >
           Continue
         </button>
