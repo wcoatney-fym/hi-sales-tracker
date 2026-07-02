@@ -10,12 +10,28 @@ import {
   type PolicyState,
   type PriorState,
 } from "./lifecycle-evaluator.ts";
+import {
+  buildGhlContactBody,
+  loadGhlConfig,
+  pushContactToGhl,
+  type LifecyclePayload,
+} from "./ghl-client.ts";
 
-// GHL/Zapier catch hook for the 4 locked retention lifecycle events. Fire is
-// gated per-agency on agencies.zaps_enabled and is fully best-effort — a Zap
-// failure must never block or fail the daily import.
+// Retention lifecycle now pushes DIRECT to GHL (LeadConnector v2 contacts/upsert)
+// instead of the Zapier hop (Charlie, 2026-07-02). Fire is gated per-agency on
+// agencies.zaps_enabled and is fully best-effort — a GHL failure must never
+// block or fail the daily import. The legacy Zap hook is retained only as an
+// optional fallback behind LIFECYCLE_USE_ZAP="true".
 const LIFECYCLE_ZAP_HOOK =
   "https://hooks.zapier.com/hooks/catch/25274165/43n0alz/";
+
+function lifecycleUseZap(): boolean {
+  try {
+    return (Deno.env.get("LIFECYCLE_USE_ZAP") || "").toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
 
 // Set LIFECYCLE_ZAP_DRY_RUN="true" as a function secret to evaluate + log
 // events without POSTing to Zapier (safe rollout / verification mode).
@@ -63,6 +79,8 @@ async function fireLifecycleEvents(
   npnByWritingNumber: Map<string, string>,
 ): Promise<void> {
   const dry = lifecycleDryRun();
+  const ghlConfig = loadGhlConfig();
+  const useZap = lifecycleUseZap();
   const auditRows: Record<string, unknown>[] = [];
   const audit = (
     ev: LifecycleEvent,
@@ -140,24 +158,42 @@ async function fireLifecycleEvents(
       audit(ev, p, { ok: true, http_status: null, error: null });
       continue;
     }
-    try {
-      const resp = await fetch(LIFECYCLE_ZAP_HOOK, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      audit(ev, p, {
-        ok: resp.ok,
-        http_status: resp.status,
-        error: resp.ok ? null : `HTTP ${resp.status}`,
-      });
-    } catch (err) {
-      // Best-effort: never let a Zap failure break the import.
-      audit(ev, p, {
-        ok: false,
-        http_status: null,
-        error: err instanceof Error ? err.message : "fetch failed",
-      });
+
+    // Primary path: direct GHL contacts/upsert. Dormant (skipped) if creds unset.
+    if (ghlConfig) {
+      const body = buildGhlContactBody(payload as unknown as LifecyclePayload, ghlConfig.locationId);
+      const r = await pushContactToGhl(ghlConfig, body);
+      audit(ev, p, r);
+    } else if (!useZap) {
+      // No GHL creds and Zap fallback off => log-only so nothing is lost silently.
+      console.warn(`[lifecycle] no GHL config; skipped ${ev.trigger} ${ev.policy_number}`);
+      audit(ev, p, { ok: false, http_status: null, error: "no GHL config" });
+    }
+
+    // Optional legacy Zap fallback (LIFECYCLE_USE_ZAP="true").
+    if (useZap) {
+      try {
+        const resp = await fetch(LIFECYCLE_ZAP_HOOK, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!ghlConfig) {
+          audit(ev, p, {
+            ok: resp.ok,
+            http_status: resp.status,
+            error: resp.ok ? null : `HTTP ${resp.status}`,
+          });
+        }
+      } catch (err) {
+        if (!ghlConfig) {
+          audit(ev, p, {
+            ok: false,
+            http_status: null,
+            error: err instanceof Error ? err.message : "fetch failed",
+          });
+        }
+      }
     }
   }
   // Persist the audit trail (best-effort; chunked to stay under payload limits).
