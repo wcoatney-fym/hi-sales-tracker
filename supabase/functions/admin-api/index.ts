@@ -3506,6 +3506,21 @@ Deno.serve(async (req: Request) => {
 
         let matchedCount = 0;
         let createdCount = 0;
+
+        // Existing roster entries for this agency, keyed by writing number, so a
+        // re-upload MERGES (updates in place) instead of appending duplicates.
+        const { data: existingEntries } = await supabase
+          .from("agency_rosters")
+          .select("id, writing_number, status")
+          .eq("agency_id", uploadAgencyId);
+        const existingByWn = new Map<string, { id: string; status: string }>();
+        for (const e of existingEntries || []) {
+          existingByWn.set((e.writing_number || "").toUpperCase(), { id: e.id, status: e.status });
+        }
+        // Guard against duplicate writing numbers within the same uploaded file.
+        const seenInUpload = new Set<string>();
+        let updatedCount = 0;
+
         const entries: Array<{
           agency_id: string;
           agent_first_name: string;
@@ -3576,6 +3591,40 @@ Deno.serve(async (req: Request) => {
             }
           }
 
+          if (seenInUpload.has(writingNumber)) continue;
+          seenInUpload.add(writingNumber);
+
+          const existing = existingByWn.get(writingNumber);
+          if (existing) {
+            // Merge into the existing roster row: refresh name/npn/carrier/match,
+            // reactivate if it had been terminated, and re-home it to this upload.
+            const { error: mergeErr } = await supabase
+              .from("agency_rosters")
+              .update({
+                agent_first_name: toProperCase(firstName),
+                agent_last_name: toProperCase(lastName),
+                carrier,
+                npn,
+                match_status: "confirmed",
+                matched_agent_id: matchedAgentId,
+                upload_id: upload.id,
+                status: "active",
+                terminated_at: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", existing.id)
+              .eq("agency_id", uploadAgencyId);
+            if (mergeErr) throw mergeErr;
+            updatedCount++;
+            if (matchedAgentId) {
+              await supabase
+                .from("agents")
+                .update({ agency: rosterAgencyName, agency_id: uploadAgencyId, agency_locked: true })
+                .eq("id", matchedAgentId);
+            }
+            continue;
+          }
+
           entries.push({
             agency_id: uploadAgencyId,
             agent_first_name: toProperCase(firstName),
@@ -3589,7 +3638,7 @@ Deno.serve(async (req: Request) => {
           });
         }
 
-        // Insert roster entries
+        // Insert brand-new roster entries (merged ones were updated in place above)
         if (entries.length > 0) {
           const { error: insertErr } = await supabase
             .from("agency_rosters")
@@ -3615,9 +3664,10 @@ Deno.serve(async (req: Request) => {
 
         return jsonResponse({
           upload_id: upload.id,
-          total: entries.length,
+          total: entries.length + updatedCount,
           matched: matchedCount,
           created: createdCount,
+          updated: updatedCount,
           fuzzy: 0,
           unmatched: 0,
         });
@@ -3744,6 +3794,88 @@ Deno.serve(async (req: Request) => {
         }
 
         return jsonResponse(entry);
+      }
+
+      case "agency-edit-roster-entry": {
+        const {
+          rosterId: editRosterId,
+          firstName: editFirst,
+          lastName: editLast,
+          writingNumber: editNum,
+          npn: editNpn,
+          carrier: editCarrier,
+          overrideAgencyId: editOverride,
+        } = body;
+        const editAgencyId = (session.role === "global_admin" && editOverride) ? editOverride : session.agency_id;
+        if (!editAgencyId) {
+          return jsonResponse({ error: "Agency context required" }, 403);
+        }
+        if (!editRosterId) return jsonResponse({ error: "rosterId required" }, 400);
+        if (!editFirst || !editLast || !editNum) {
+          return jsonResponse({ error: "First name, last name, and writing number are required" }, 400);
+        }
+
+        const cleanEditNum = editNum.trim().toUpperCase();
+        const cleanEditCarrier = (editCarrier || "UNL").trim().toUpperCase();
+
+        // Guard: don't let an edit collide with another roster row's writing number
+        // in the same agency (writing number is the merge key on re-upload).
+        const { data: clash } = await supabase
+          .from("agency_rosters")
+          .select("id")
+          .eq("agency_id", editAgencyId)
+          .eq("writing_number", cleanEditNum)
+          .neq("id", editRosterId)
+          .maybeSingle();
+        if (clash) {
+          return jsonResponse({ error: "Another roster entry already uses that writing number" }, 409);
+        }
+
+        // Re-run matching against the new writing number.
+        const { data: editMatchAgent } = await supabase
+          .from("agents")
+          .select("id, first_name, last_name, unl_writing_number, gtl_writing_number")
+          .or(`unl_writing_number.ilike.${cleanEditNum},gtl_writing_number.ilike.${cleanEditNum}`)
+          .maybeSingle();
+
+        let editMatchStatus = "unmatched";
+        let editMatchedAgentId: string | null = null;
+        if (editMatchAgent) {
+          const nameMatches =
+            editMatchAgent.first_name.toLowerCase() === editFirst.trim().toLowerCase() &&
+            editMatchAgent.last_name.toLowerCase() === editLast.trim().toLowerCase();
+          editMatchStatus = nameMatches ? "confirmed" : "fuzzy";
+          editMatchedAgentId = editMatchAgent.id;
+        }
+
+        const { data: editedEntry, error: editErr } = await supabase
+          .from("agency_rosters")
+          .update({
+            agent_first_name: toProperCase(editFirst.trim()),
+            agent_last_name: toProperCase(editLast.trim()),
+            writing_number: cleanEditNum,
+            carrier: cleanEditCarrier,
+            npn: (editNpn || "").trim(),
+            match_status: editMatchStatus,
+            matched_agent_id: editMatchedAgentId,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", editRosterId)
+          .eq("agency_id", editAgencyId)
+          .select()
+          .maybeSingle();
+        if (editErr) throw editErr;
+        if (!editedEntry) return jsonResponse({ error: "Roster entry not found" }, 404);
+
+        // Keep the linked agent record in sync when the match is confirmed.
+        if (editMatchStatus === "confirmed" && editMatchedAgentId) {
+          await supabase
+            .from("agents")
+            .update({ agency_id: editAgencyId, agency_locked: true })
+            .eq("id", editMatchedAgentId);
+        }
+
+        return jsonResponse(editedEntry);
       }
 
       case "agency-terminate-roster-entry": {

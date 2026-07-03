@@ -1053,6 +1053,29 @@ export async function agencyAddRosterEntry(token: string, firstName: string, las
   return callApi("admin-api", { action: "agency-add-roster-entry", token, firstName, lastName, writingNumber, npn, carrier, overrideAgencyId });
 }
 
+export async function agencyEditRosterEntry(
+  token: string,
+  rosterId: string,
+  firstName: string,
+  lastName: string,
+  writingNumber: string,
+  npn: string,
+  carrier?: string,
+  overrideAgencyId?: string
+) {
+  return callApi("admin-api", {
+    action: "agency-edit-roster-entry",
+    token,
+    rosterId,
+    firstName,
+    lastName,
+    writingNumber,
+    npn,
+    carrier,
+    overrideAgencyId,
+  });
+}
+
 export async function agencyTerminateRosterEntry(token: string, rosterId: string, overrideAgencyId?: string) {
   return callApi("admin-api", { action: "agency-terminate-roster-entry", token, rosterId, overrideAgencyId });
 }
