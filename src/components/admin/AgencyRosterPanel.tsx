@@ -8,6 +8,7 @@ import {
   XCircle,
   RotateCcw,
   Plus,
+  Pencil,
   Trash2,
   ChevronDown,
   ChevronRight,
@@ -20,6 +21,7 @@ import {
   agencyGetRoster,
   agencyUploadRoster,
   agencyAddRosterEntry,
+  agencyEditRosterEntry,
   agencyTerminateRosterEntry,
   agencyReactivateRosterEntry,
   agencySetManager,
@@ -71,10 +73,11 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "terminated">("all");
   const [showUpload, setShowUpload] = useState(false);
   const [showAddAgent, setShowAddAgent] = useState(false);
+  const [editEntry, setEditEntry] = useState<RosterEntry | null>(null);
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ id: string; type: "terminate" | "reactivate" } | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState<{ total: number; matched: number; fuzzy: number; unmatched: number } | null>(null);
+  const [uploadResult, setUploadResult] = useState<{ total: number; matched: number; created?: number; updated?: number; fuzzy: number; unmatched: number } | null>(null);
 
   const fetchRoster = useCallback(async () => {
     setLoading(true);
@@ -242,9 +245,9 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
               <p className="text-emerald-400">Matched</p>
               <p className="text-emerald-300 font-semibold">{uploadResult.matched}</p>
             </div>
-            <div className="bg-amber-900/20 border border-amber-700/30 rounded p-2">
-              <p className="text-amber-400">Fuzzy (Needs Review)</p>
-              <p className="text-amber-300 font-semibold">{uploadResult.fuzzy}</p>
+            <div className="bg-sky-900/20 border border-sky-700/30 rounded p-2">
+              <p className="text-sky-400">Updated (Merged)</p>
+              <p className="text-sky-300 font-semibold">{uploadResult.updated ?? 0}</p>
             </div>
             <div className="bg-slate-700/50 rounded p-2">
               <p className="text-slate-400">Unmatched</p>
@@ -325,6 +328,7 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
                       isExpanded={isExpanded}
                       agentWns={agentWns}
                       onToggleExpand={() => setExpandedAgent(isExpanded ? null : entry.id)}
+                      onEdit={() => setEditEntry(entry)}
                       onTerminate={() => setConfirmAction({ id: entry.id, type: "terminate" })}
                       onReactivate={() => setConfirmAction({ id: entry.id, type: "reactivate" })}
                       onToggleManager={() => handleToggleManager(entry)}
@@ -347,6 +351,17 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
           token={token}
           onClose={() => setShowAddAgent(false)}
           onSuccess={() => { setShowAddAgent(false); fetchRoster(); }}
+          overrideAgencyId={overrideAgencyId || undefined}
+        />
+      )}
+
+      {/* Edit Agent Modal */}
+      {editEntry && (
+        <EditAgentModal
+          token={token}
+          entry={editEntry}
+          onClose={() => setEditEntry(null)}
+          onSuccess={() => { setEditEntry(null); fetchRoster(); }}
           overrideAgencyId={overrideAgencyId || undefined}
         />
       )}
@@ -405,6 +420,7 @@ function RosterRow({
   isExpanded,
   agentWns,
   onToggleExpand,
+  onEdit,
   onTerminate,
   onReactivate,
   onToggleManager,
@@ -417,6 +433,7 @@ function RosterRow({
   isExpanded: boolean;
   agentWns: WritingNumber[];
   onToggleExpand: () => void;
+  onEdit: () => void;
   onTerminate: () => void;
   onReactivate: () => void;
   onToggleManager: () => void;
@@ -486,6 +503,13 @@ function RosterRow({
               className={`p-1 rounded transition-colors ${entry.is_agency_manager ? "text-sky-400 hover:text-sky-300" : "text-slate-500 hover:text-slate-300"}`}
             >
               <Shield size={13} />
+            </button>
+            <button
+              onClick={onEdit}
+              title="Edit agent"
+              className="p-1 text-slate-500 hover:text-sky-400 rounded transition-colors"
+            >
+              <Pencil size={13} />
             </button>
             {entry.status === "active" ? (
               <button onClick={onTerminate} title="Terminate" className="p-1 text-slate-500 hover:text-rose-400 rounded transition-colors">
@@ -589,6 +613,123 @@ function RosterRow({
         </tr>
       )}
     </>
+  );
+}
+
+function EditAgentModal({
+  token,
+  entry,
+  onClose,
+  onSuccess,
+  overrideAgencyId,
+}: {
+  token: string;
+  entry: RosterEntry;
+  onClose: () => void;
+  onSuccess: () => void;
+  overrideAgencyId?: string;
+}) {
+  const [firstName, setFirstName] = useState(entry.agent_first_name || "");
+  const [lastName, setLastName] = useState(entry.agent_last_name || "");
+  const [writingNumber, setWritingNumber] = useState(entry.writing_number || "");
+  const [npn, setNpn] = useState(entry.npn || "");
+  const [carrier, setCarrier] = useState(entry.carrier || "UNL");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!firstName || !lastName || !writingNumber) {
+      setError("First name, last name, and writing number are required");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await agencyEditRosterEntry(token, entry.id, firstName, lastName, writingNumber, npn, carrier, overrideAgencyId);
+      onSuccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update agent");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-md w-full">
+        <h3 className="text-white font-semibold mb-4">Edit Agent</h3>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">First Name *</label>
+              <input
+                type="text"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-slate-700/50 border border-slate-600/50 rounded-lg text-white focus:outline-none focus:border-sky-500/50"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">Last Name *</label>
+              <input
+                type="text"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-slate-700/50 border border-slate-600/50 rounded-lg text-white focus:outline-none focus:border-sky-500/50"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">UNL Writing Number *</label>
+            <input
+              type="text"
+              value={writingNumber}
+              onChange={(e) => setWritingNumber(e.target.value)}
+              className="w-full px-3 py-2 text-sm bg-slate-700/50 border border-slate-600/50 rounded-lg text-white font-mono focus:outline-none focus:border-sky-500/50"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">NPN</label>
+              <input
+                type="text"
+                value={npn}
+                onChange={(e) => setNpn(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-slate-700/50 border border-slate-600/50 rounded-lg text-white focus:outline-none focus:border-sky-500/50"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] text-slate-400 uppercase tracking-wider mb-1">Carrier</label>
+              <select
+                value={carrier}
+                onChange={(e) => setCarrier(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-slate-700/50 border border-slate-600/50 rounded-lg text-white focus:outline-none focus:border-sky-500/50"
+              >
+                <option value="UNL">UNL</option>
+                <option value="GTL">GTL</option>
+              </select>
+            </div>
+          </div>
+          {error && <p className="text-xs text-rose-400">{error}</p>}
+          <div className="flex items-center gap-2 pt-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex-1 py-2 text-sm font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-lg disabled:opacity-50 transition-colors"
+            >
+              {saving ? "Saving..." : "Save Changes"}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 py-2 text-sm font-medium text-slate-300 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
