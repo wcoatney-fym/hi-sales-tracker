@@ -129,10 +129,11 @@ to lose the home health coverage you signed up for over a missed payment - it on
 couple minutes to fix. Reply SAVE and I'll handle it today.
 ```
 
-**`new | sprint - voicemail follow up | send day 3`**
+**`new | sprint - checking in | send day 3`**
 ```
-Hi {{contact.first_name}}, just left you a voicemail. Your {{contact.hhc__carrier_name}} plan is
-still active but needs the payment updated to stay that way. Reply SAVE and we'll knock it out.
+Hi {{contact.first_name}}, {{contact.all_templates__agent_first_name}} here checking in on your
+{{contact.hhc__carrier_name}} plan. It's still active but needs the payment updated to stay that
+way. Reply SAVE and we'll knock it out.
 ```
 
 **`new | sprint - what changed | send day 5`**
