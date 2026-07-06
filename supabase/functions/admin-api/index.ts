@@ -171,6 +171,10 @@ const AT_RISK_TOTAL_DAYS = 45;   // policy auto-terminates at day 45
 const HEATING_UP_DAY = 30;       // early escalation tier
 const CODE_RED_DAY = 38;         // <7 days left — drop everything
 const AGENT_SLA_DAYS = 5;        // agent must make contact within 5 days
+// Terminated (win-back) lane: how many days past the carrier Term Date a
+// policy drops into the Code Red column. Mirrors the at-risk 38/45 ratio —
+// last stretch before it ages out of the TERMINATED_WINDOW_DAYS win-back lane.
+const TERM_CODE_RED_DAY = 38;
 
 type DispRow = {
   disposition?: string | null;
@@ -247,6 +251,30 @@ function persistencyOf(policies: PersistPolicy[]): { drafted_first: number; reta
   return { drafted_first: df, retained: ret, pct: df ? Math.round((1000 * ret) / df) / 10 : 0 };
 }
 
+// Terminated (win-back) lane stage: same action-stage normalization as the
+// at-risk lane, but urgency is driven by days since the carrier Term Date.
+// Past TERM_CODE_RED_DAY (and not saved/lost) the policy drops into the Code
+// Red column and stays there until a manager marks it Saved or Lost.
+function computeTerminatedStage(terminatedDate: string | null, disp: DispRow) {
+  const ageDays = daysBetween(terminatedDate) ?? 0;
+  const d = (disp?.disposition as string | null) ?? null;
+  let stage: string;
+  if (d === "saved" || d === "secured") stage = "saved";
+  else if (d === "lost") stage = "lost";
+  else if (d === "agent_saved_pending") stage = "agent_saved_pending";
+  else if (d === "agent_outreach") stage = "agent_outreach";
+  else if (d === "manager_outreach" || d === "working" || d === "follow_up") stage = "manager_outreach";
+  else if (d === "responded") stage = "responded";
+  else stage = "new";
+  const terminal = stage === "saved" || stage === "lost";
+  const isCodeRed = !terminal && ageDays >= TERM_CODE_RED_DAY;
+  return {
+    stage: isCodeRed ? "code_red" : stage,
+    is_code_red: isCodeRed,
+    days_since_terminated: ageDays,
+  };
+}
+
 // Returns the action-stage (persisted), the computed urgency overlay, and
 // the current owner. Code Red / Heating Up are overlays: a policy keeps its
 // action-stage AND carries is_code_red so the board can bucket it regardless.
@@ -288,8 +316,15 @@ function computeAtRiskStage(paidToDate: string | null, disp: DispRow) {
     agentDays !== null &&
     agentDays > AGENT_SLA_DAYS;
 
+  // Code Red is now a real column (right before Pending), data-driven: once a
+  // policy passes the Code Red day and hasn't been saved/lost, it drops into
+  // the Code Red bucket and stays there until a manager marks it Saved or
+  // Lost. `owner` and `agent_overdue` above are computed from the underlying
+  // action-stage, so agent handoff + the 5-day SLA keep working beneath it.
+  const displayStage = isCodeRed ? "code_red" : stage;
+
   return {
-    stage,
+    stage: displayStage,
     owner,
     days_at_risk: ageDays,
     days_to_terminate: daysToTerminate,
@@ -5409,9 +5444,13 @@ Deno.serve(async (req: Request) => {
         const termDispByPolicy = new Map(
           (termDisps || []).map((d: { policy_id: string }) => [d.policy_id, d])
         );
-        const worklist = (termPolicies || []).map((p: Record<string, unknown>) =>
-          shapeWorklistRow(p, termDispByPolicy.get(p.id as string) || null)
-        );
+        const worklist = (termPolicies || []).map((p: Record<string, unknown>) => {
+          const disp = termDispByPolicy.get(p.id as string) || null;
+          return {
+            ...shapeWorklistRow(p, disp),
+            ...computeTerminatedStage((p.terminated_date as string | null) ?? null, disp as DispRow),
+          };
+        });
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
