@@ -24,6 +24,7 @@ type Stage =
   | "responded"
   | "manager_outreach"
   | "agent_outreach"
+  | "code_red"
   | "agent_saved_pending"
   | "saved"
   | "lost";
@@ -33,6 +34,7 @@ const STAGES: { key: Stage; label: string; accent: string; dot: string }[] = [
   { key: "responded", label: "Responded", accent: "border-sky-500/40", dot: "bg-sky-400" },
   { key: "manager_outreach", label: "Manager", accent: "border-amber-500/40", dot: "bg-amber-400" },
   { key: "agent_outreach", label: "Agent", accent: "border-violet-500/40", dot: "bg-violet-400" },
+  { key: "code_red", label: "Code Red", accent: "border-red-600/70", dot: "bg-red-500" },
   { key: "agent_saved_pending", label: "Pending", accent: "border-teal-500/40", dot: "bg-teal-400" },
   { key: "saved", label: "Saved", accent: "border-emerald-500/40", dot: "bg-emerald-400" },
   { key: "lost", label: "Lost", accent: "border-rose-500/40", dot: "bg-rose-400" },
@@ -48,7 +50,7 @@ function daysLapsed(paidToDate: string | null): number | null {
 function stageOf(p: ManagerWorklistPolicy): Stage {
   // Prefer the backend-computed stage; fall back to disposition for safety.
   const s = (p as { stage?: string }).stage || p.disposition || "new";
-  const valid: Stage[] = ["new", "responded", "manager_outreach", "agent_outreach", "agent_saved_pending", "saved", "lost"];
+  const valid: Stage[] = ["new", "responded", "manager_outreach", "agent_outreach", "code_red", "agent_saved_pending", "saved", "lost"];
   return (valid.includes(s as Stage) ? s : "new") as Stage;
 }
 
@@ -109,7 +111,7 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
   // Stages a manager can drop a card into, and the action each drop performs.
   // 'new' (system/auto) and 'agent_saved_pending' (agent-set) are not manual
   // drop targets.
-  const DROPPABLE: Stage[] = ["responded", "manager_outreach", "agent_outreach", "saved", "lost"];
+  const DROPPABLE: Stage[] = ["responded", "manager_outreach", "agent_outreach", "code_red", "saved", "lost"];
 
   const moveToStage = async (policy: ManagerWorklistPolicy, target: Stage) => {
     const current = stageOf(policy);

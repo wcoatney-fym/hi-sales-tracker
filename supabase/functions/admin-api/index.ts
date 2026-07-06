@@ -264,6 +264,10 @@ function computeAtRiskStage(paidToDate: string | null, disp: DispRow) {
   // drops into Lost even before the next data refresh flips it to terminated.
   // A confirmed save (above) still wins.
   else if (ageDays0 >= AT_RISK_TOTAL_DAYS) stage = "lost";
+  // Code Red is a persisted, GHL-owned stage (GHL runs the day-35 timer +
+  // exemptions and pushes it in via the webhook; a manager can also set it
+  // here, which syncs back to GHL). We just reflect the persisted value.
+  else if (d === "code_red") stage = "code_red";
   else if (d === "agent_saved_pending") stage = "agent_saved_pending";
   else if (d === "agent_outreach") stage = "agent_outreach";
   else if (d === "manager_outreach" || d === "working" || d === "follow_up") stage = "manager_outreach";
@@ -5491,7 +5495,7 @@ Deno.serve(async (req: Request) => {
         if (!policy_id || !disposition) return jsonResponse({ error: "policy_id and disposition are required" }, 400);
         // v3 stages a manager may set directly. Agent-only states
         // (agent_outreach, agent_saved_pending) go through their own actions.
-        const MGR_SETTABLE = ["responded", "manager_outreach", "saved", "lost", "working", "secured", "follow_up"];
+        const MGR_SETTABLE = ["responded", "manager_outreach", "code_red", "saved", "lost", "working", "secured", "follow_up"];
         if (!MGR_SETTABLE.includes(disposition)) {
           return jsonResponse({ error: "invalid disposition" }, 400);
         }
