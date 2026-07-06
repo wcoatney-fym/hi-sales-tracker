@@ -111,7 +111,7 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
   // Stages a manager can drop a card into, and the action each drop performs.
   // 'new' (system/auto) and 'agent_saved_pending' (agent-set) are not manual
   // drop targets.
-  const DROPPABLE: Stage[] = ["responded", "manager_outreach", "agent_outreach", "saved", "lost"];
+  const DROPPABLE: Stage[] = ["responded", "manager_outreach", "agent_outreach", "code_red", "saved", "lost"];
 
   const moveToStage = async (policy: ManagerWorklistPolicy, target: Stage) => {
     const current = stageOf(policy);

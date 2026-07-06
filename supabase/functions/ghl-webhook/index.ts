@@ -19,7 +19,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
   Canonical shared stages (match the GHL pipeline stage names/ids):
     new | responded | manager_outreach | agent_outreach |
-    agent_saved_pending | saved | lost
+    code_red | agent_saved_pending | saved | lost
 
   Auth: x-api-key header must match GHL_WEBHOOK_KEY (Supabase function secret).
 */
@@ -54,6 +54,9 @@ const CANONICAL_STAGES = new Set([
   "responded",
   "manager_outreach",
   "agent_outreach",
+  // Code Red is owned by GHL (day-35 timer + exemptions run there and post the
+  // move here); mirrored into the tracker pipeline right before Pending.
+  "code_red",
   "agent_saved_pending",
   "saved",
   "lost",

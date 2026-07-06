@@ -1203,6 +1203,7 @@ export type ManagerDisposition =
   | "responded"
   | "manager_outreach"
   | "agent_outreach"
+  | "code_red"
   | "agent_saved_pending"
   | "saved"
   | "lost"
@@ -1215,6 +1216,7 @@ export type ManagerDisposition =
 export type ManagerSettableDisposition =
   | "responded"
   | "manager_outreach"
+  | "code_red"
   | "saved"
   | "lost";
 
