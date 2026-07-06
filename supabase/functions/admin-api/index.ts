@@ -3767,6 +3767,36 @@ Deno.serve(async (req: Request) => {
             existingAgent.last_name.toLowerCase() === arLast.trim().toLowerCase();
           matchStatus = nameMatches ? "confirmed" : "fuzzy";
           matchedAgentId = existingAgent.id;
+        } else {
+          // No existing agent for this writing number. The agency vouches for
+          // the roster entry, so create a login-capable `agents` row (mirrors the
+          // bulk roster upload). Without this the agent has no `agents` record and
+          // agent-login returns "Invalid credentials" -- the WiseChoice lockout bug.
+          const { data: addAgencyRow } = await supabase
+            .from("agencies")
+            .select("name")
+            .eq("id", addAgencyId)
+            .maybeSingle();
+          const writingCol = cleanCarrier === "GTL" ? "gtl_writing_number" : "unl_writing_number";
+          const { data: newAgent } = await supabase
+            .from("agents")
+            .insert({
+              first_name: toProperCase(arFirst.trim()),
+              last_name: toProperCase(arLast.trim()),
+              npn: (arNpn || "").trim(),
+              [writingCol]: cleanNum,
+              source: "Roster",
+              agency: addAgencyRow?.name || null,
+              agency_id: addAgencyId,
+              agency_locked: true,
+              status: "active",
+            })
+            .select("id")
+            .single();
+          if (newAgent) {
+            matchStatus = "confirmed";
+            matchedAgentId = newAgent.id;
+          }
         }
 
         const { data: entry, error: entryErr } = await supabase
@@ -3846,6 +3876,35 @@ Deno.serve(async (req: Request) => {
             editMatchAgent.last_name.toLowerCase() === editLast.trim().toLowerCase();
           editMatchStatus = nameMatches ? "confirmed" : "fuzzy";
           editMatchedAgentId = editMatchAgent.id;
+        } else {
+          // Same rule as add: no agent for this writing number means the agent
+          // cannot log in. Create a login-capable `agents` row so the edited
+          // roster entry resolves to a real, authenticatable agent.
+          const { data: editAgencyRow } = await supabase
+            .from("agencies")
+            .select("name")
+            .eq("id", editAgencyId)
+            .maybeSingle();
+          const editWritingCol = cleanEditCarrier === "GTL" ? "gtl_writing_number" : "unl_writing_number";
+          const { data: editNewAgent } = await supabase
+            .from("agents")
+            .insert({
+              first_name: toProperCase(editFirst.trim()),
+              last_name: toProperCase(editLast.trim()),
+              npn: (editNpn || "").trim(),
+              [editWritingCol]: cleanEditNum,
+              source: "Roster",
+              agency: editAgencyRow?.name || null,
+              agency_id: editAgencyId,
+              agency_locked: true,
+              status: "active",
+            })
+            .select("id")
+            .single();
+          if (editNewAgent) {
+            editMatchStatus = "confirmed";
+            editMatchedAgentId = editNewAgent.id;
+          }
         }
 
         const { data: editedEntry, error: editErr } = await supabase
