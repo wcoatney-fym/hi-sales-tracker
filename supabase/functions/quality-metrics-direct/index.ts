@@ -64,13 +64,18 @@ Deno.serve(async (req: Request) => {
       if (!agencyName) return jsonResponse({ error: "Unknown agency_id" }, 404);
     }
 
+    // Max's managed DB presents a private "Project CA" (Aiven/Linode-style) that
+    // Deno's default trust store doesn't know. Pin it via PROD_DB_CA_CERT so we
+    // verify against the real CA (vs. disabling verification). Falls back to plain
+    // "require" only if no CA is configured.
+    const caCert = Deno.env.get("PROD_DB_CA_CERT");
     sql = postgres({
       host: cleanHost(Deno.env.get("PROD_DB_HOST")!),
       port: Number((Deno.env.get("PROD_DB_PORT") || "").replace(/\D/g, "")),
       database: Deno.env.get("PROD_DB_NAME")!,
       username: Deno.env.get("PROD_DB_USER")!,
       password: Deno.env.get("PROD_DB_PASSWORD")!,
-      ssl: "require",
+      ssl: caCert ? { ca: caCert } : "require",
       max: 1,
       idle_timeout: 5,
       connect_timeout: 15,
