@@ -85,7 +85,8 @@ Deno.serve(async (req: Request) => {
           issue_date,
           app_recvd_date,
           paid_to_date,
-          term_date
+          term_date,
+          billing_mode
         FROM typed.unl_fym_policy_latest_load
         WHERE (
           ${agencyName}::text IS NULL
@@ -94,6 +95,23 @@ Deno.serve(async (req: Request) => {
         )
       )
       SELECT json_build_object(
+        -- HEADLINE: 90-day retention (north-star). Of policies that drafted a 1st
+        -- premium, the share that also retained through the 3rd draft. Billing-mode
+        -- rule: monthly (1) requires paid_to_date >= effective + 3 months; any
+        -- non-monthly single successful draft (3/6/12) already covers 90+ days.
+        -- Only policies old enough to have run the gauntlet (issued >= 3 months ago).
+        'retention_90d', (
+          SELECT json_build_object(
+            'drafted_first', count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'),
+            'retained', count(*) FILTER (WHERE (billing_mode = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                            OR (billing_mode <> 1 AND paid_to_date >= issue_date + interval '1 month')),
+            'retention_pct', round(100.0 * count(*) FILTER (WHERE (billing_mode = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                                              OR (billing_mode <> 1 AND paid_to_date >= issue_date + interval '1 month'))
+              / nullif(count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'), 0), 1)
+          )
+          FROM scoped
+          WHERE issue_date <= CURRENT_DATE - interval '3 months'
+        ),
         'placement', (
           SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.month), '[]'::json)
           FROM (
