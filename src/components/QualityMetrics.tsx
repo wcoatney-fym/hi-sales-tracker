@@ -111,11 +111,8 @@ export default function QualityMetrics({
     (async () => {
       try {
         // Option A: computed live on Max's production DB (single source of truth).
-        // NOTE: direct fn scopes by single agencyId; multi-agency (agencyNames)
-        // is a follow-up. agencyName is unused here (kept for prop back-compat).
-        void agencyName;
-        void agencyNames;
-        const data = await getQualityMetricsDirect(agencyId);
+        // Scoped by writing number server-side (agencyId | agencyName | agencyNames).
+        const data = await getQualityMetricsDirect(agencyId, agencyName, agencyNames);
         if (cancelled) return;
         setRetention((data.retention_90d as Retention90d) || null);
         setPlacement((data.placement as PlacementRow[]) || []);

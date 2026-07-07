@@ -44,24 +44,36 @@ Deno.serve(async (req: Request) => {
   try {
     const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const agencyId: string | null = body.p_agency_id ?? null;
+    const agencyName: string | null = body.p_agency_name ?? null;
+    const agencyNames: string[] | null = Array.isArray(body.p_agency_names) && body.p_agency_names.length
+      ? body.p_agency_names
+      : null;
 
-    // Resolve agency uuid -> the depth-02 hierarchy name Max's data uses.
-    // (Cross-DB join done in app code: agencies live in Supabase, policies in Max's DB.)
-    let agencyName: string | null = null;
-    if (agencyId) {
+    // Resolve the requested scope -> a set of agency WRITING NUMBERS via the
+    // agency_writing_numbers map (stable key; immune to display-name drift).
+    // null => whole book. Membership is keyed on writing_number in SQL below.
+    let targetWns: string[] | null = null;
+    if (agencyId || agencyName || agencyNames) {
       const supabase = createClient(
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
       );
-      const { data, error } = await supabase
-        .from("agencies")
-        .select("name")
-        .eq("id", agencyId)
-        .maybeSingle();
+      let q = supabase
+        .from("agency_writing_numbers")
+        .select("writing_number, agencies!inner(id, name)");
+      if (agencyId) {
+        q = q.eq("agency_id", agencyId);
+      } else if (agencyNames) {
+        q = q.in("agencies.name", agencyNames);
+      } else if (agencyName) {
+        q = q.eq("agencies.name", agencyName);
+      }
+      const { data, error } = await q;
       if (error) throw error;
-      // Max stores hierarchy names upper-cased; match that for jsonb containment.
-      agencyName = data?.name ? String(data.name).trim().toUpperCase() : null;
-      if (!agencyName) return jsonResponse({ error: "Unknown agency_id" }, 404);
+      targetWns = (data || []).map((r: { writing_number: string }) => r.writing_number);
+      if (targetWns.length === 0) {
+        return jsonResponse({ error: "No matching agency / writing number for scope" }, 404);
+      }
     }
 
     // Max's managed DB presents a private "Project CA" (Aiven/Linode-style) that
@@ -82,8 +94,14 @@ Deno.serve(async (req: Request) => {
     });
 
     // Single round-trip: placement (last 3 complete months) + persistency
-    // (3/6/9/13-month cohorts), computed on Max's typed table with the column
-    // remap inline. agencyName null => whole book.
+    // (3/6/9/13-month cohorts) + 90-day retention, computed on Max's typed table
+    // with the column remap inline. targetWns null => whole book.
+    //
+    // Membership key: a policy's owning agency = the shallowest sub-agency (depth-02)
+    // org node's writing_number; if none, the depth-01 (FYM) writing_number
+    // (= direct-to-FYM). This rolls downlines up into their depth-02 parent, matching
+    // how the tracker buckets. Compare that against the requested writing numbers.
+    const targetWnsArr = targetWns; // string[] | null
     const rows = await sql`
       WITH scoped AS (
         SELECT
@@ -94,9 +112,18 @@ Deno.serve(async (req: Request) => {
           billing_mode
         FROM typed.unl_fym_policy_latest_load
         WHERE (
-          ${agencyName}::text IS NULL
-          OR roster_hierarchy_json @> jsonb_build_array(
-               jsonb_build_object('name', ${agencyName}::text, 'depth', '02'))
+          ${targetWnsArr}::text[] IS NULL
+          OR COALESCE(
+               (SELECT e->>'writing_number'
+                  FROM jsonb_array_elements(roster_hierarchy_json) e
+                  WHERE e->>'depth' = '02'
+                    AND COALESCE((e->>'is_person')::boolean, false) = false
+                  LIMIT 1),
+               (SELECT e->>'writing_number'
+                  FROM jsonb_array_elements(roster_hierarchy_json) e
+                  WHERE e->>'depth' = '01'
+                  LIMIT 1)
+             ) = ANY(${targetWnsArr}::text[])
         )
       )
       SELECT json_build_object(

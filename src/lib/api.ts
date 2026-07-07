@@ -1475,6 +1475,14 @@ export async function adminCompleteOnboarding(token: string) {
 // directly on Max's production DB via the quality-metrics-direct edge function.
 // Same shape as the get_quality_metrics RPC, plus _elapsed_ms / _source for the
 // speed comparison. p_agency_id is optional (omit for whole-book).
-export async function getQualityMetricsDirect(agencyId?: string | null) {
-  return callApi("quality-metrics-direct", { p_agency_id: agencyId ?? null });
+export async function getQualityMetricsDirect(
+  agencyId?: string | null,
+  agencyName?: string | null,
+  agencyNames?: string[] | null,
+) {
+  return callApi("quality-metrics-direct", {
+    p_agency_id: agencyId ?? null,
+    p_agency_name: agencyName ?? null,
+    p_agency_names: agencyNames && agencyNames.length ? agencyNames : null,
+  });
 }
