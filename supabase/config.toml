@@ -24,3 +24,11 @@ verify_jwt = false
 # the x-api-key check is the gate.
 [functions.ghl-webhook]
 verify_jwt = false
+
+# quality-metrics-direct (Option A prototype): queries Max's production DB
+# directly for book quality. Called by the admin UI with the service-role key
+# (verify_jwt=false keeps the gateway from rejecting the service-role call the
+# same way the other data functions are configured). Read-only; lock down /
+# add auth before promoting past prototype.
+[functions.quality-metrics-direct]
+verify_jwt = false

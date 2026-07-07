@@ -1470,3 +1470,11 @@ export async function adminCompleteOnboarding(token: string) {
   return callApi("admin-api", { action: "admin-complete-onboarding", token });
 }
 
+
+// Option A prototype: fetch book-quality (placement + persistency) computed
+// directly on Max's production DB via the quality-metrics-direct edge function.
+// Same shape as the get_quality_metrics RPC, plus _elapsed_ms / _source for the
+// speed comparison. p_agency_id is optional (omit for whole-book).
+export async function getQualityMetricsDirect(agencyId?: string | null) {
+  return callApi("quality-metrics-direct", { p_agency_id: agencyId ?? null });
+}
