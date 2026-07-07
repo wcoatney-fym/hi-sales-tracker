@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { authorizeAgencyAccess } from "../_shared/agencyAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -210,44 +211,8 @@ function computeTalkTimeStreak(dailyMinutes: Record<string, number>): number {
 }
 
 
-// True when the token belongs to a session allowed to view this agency's data:
-// an admin session scoped to the agency (global admins, with no agency_id, may
-// view any — and are the only ones allowed when agencyId is null/overall), or
-// an agent session whose agent belongs to the agency.
-// deno-lint-ignore no-explicit-any
-async function authorizeAgencyAccess(
-  supabase: any,
-  accessToken: string,
-  agencyId: string | null,
-): Promise<boolean> {
-  if (!accessToken) return false;
-  const nowIso = new Date().toISOString();
-  const { data: adminSession } = await supabase
-    .from("admin_sessions")
-    .select("agency_id")
-    .eq("token", accessToken)
-    .gt("expires_at", nowIso)
-    .maybeSingle();
-  if (adminSession) {
-    return !adminSession.agency_id || (agencyId !== null && adminSession.agency_id === agencyId);
-  }
-  if (!agencyId) return false;
-  const { data: agentSession } = await supabase
-    .from("agent_sessions")
-    .select("agent_id")
-    .eq("token", accessToken)
-    .gt("expires_at", nowIso)
-    .maybeSingle();
-  if (agentSession) {
-    const { data: sessionAgent } = await supabase
-      .from("agents")
-      .select("agency_id")
-      .eq("id", agentSession.agent_id)
-      .maybeSingle();
-    return !!sessionAgent && sessionAgent.agency_id === agencyId;
-  }
-  return false;
-}
+// authorizeAgencyAccess now lives in ../_shared/agencyAuth.ts (shared with quality-metrics-direct).
+
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
