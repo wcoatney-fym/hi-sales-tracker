@@ -14,6 +14,7 @@
 
 import postgres from "npm:postgres@3.4.4";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { authorizeAgencyAccess } from "../_shared/agencyAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -49,18 +50,24 @@ Deno.serve(async (req: Request) => {
       ? body.p_agency_names
       : null;
 
-    // Resolve the requested scope -> a set of agency WRITING NUMBERS via the
+    // Auth: require a session token (admin | agent), same as the RPC path.
+    const token: string = body.token || req.headers.get("X-Agent-Token") || "";
+    if (!token) return jsonResponse({ error: "Authentication required" }, 401);
+
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    );
+
+    // Resolve the requested scope -> agency rows (id + writing number) via the
     // agency_writing_numbers map (stable key; immune to display-name drift).
-    // null => whole book. Membership is keyed on writing_number in SQL below.
+    // No scope => whole book. Membership is keyed on writing_number in SQL below.
     let targetWns: string[] | null = null;
+    let targetIds: string[] = [];
     if (agencyId || agencyName || agencyNames) {
-      const supabase = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-      );
       let q = supabase
         .from("agency_writing_numbers")
-        .select("writing_number, agencies!inner(id, name)");
+        .select("writing_number, agency_id, agencies!inner(id, name)");
       if (agencyId) {
         q = q.eq("agency_id", agencyId);
       } else if (agencyNames) {
@@ -71,8 +78,24 @@ Deno.serve(async (req: Request) => {
       const { data, error } = await q;
       if (error) throw error;
       targetWns = (data || []).map((r: { writing_number: string }) => r.writing_number);
+      targetIds = (data || []).map((r: { agency_id: string }) => r.agency_id);
       if (targetWns.length === 0) {
         return jsonResponse({ error: "No matching agency / writing number for scope" }, 404);
+      }
+    }
+
+    // Authorize the caller for the requested scope (mirrors leaderboard-api):
+    // whole-book requires a global admin; scoped requires access to EVERY agency
+    // in the request.
+    if (targetIds.length === 0) {
+      if (!(await authorizeAgencyAccess(supabase, token, null))) {
+        return jsonResponse({ error: "Not authorized" }, 403);
+      }
+    } else {
+      for (const id of targetIds) {
+        if (!(await authorizeAgencyAccess(supabase, token, id))) {
+          return jsonResponse({ error: "Not authorized" }, 403);
+        }
       }
     }
 
