@@ -275,9 +275,9 @@ export default function ManagerWorklistPanel({ token }: ManagerWorklistPanelProp
             : "No at-risk policies right now. Nice and clean."}
         </div>
       ) : (
-        // Kanban: horizontal-scroll columns on mobile, all 7 stages as a full-
+        // Kanban: horizontal-scroll columns on mobile, all 8 stages as a full-
         // width grid on desktop (one screen). Drag a card between columns.
-        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide snap-x lg:grid lg:grid-cols-7 lg:gap-2.5 lg:overflow-visible">
+        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide snap-x lg:grid lg:grid-cols-8 lg:gap-2.5 lg:overflow-visible">
           {STAGES.map((stage) => {
             const cards = byStage(stage.key);
             const isDroppable = DROPPABLE.includes(stage.key);
