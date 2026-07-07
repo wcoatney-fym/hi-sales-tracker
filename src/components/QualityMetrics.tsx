@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { getQualityMetrics } from "../lib/api";
+import { getQualityMetricsDirect } from "../lib/api";
+
+interface Retention90d {
+  drafted_first: number;
+  retained: number;
+  retention_pct: number | null;
+}
 
 interface PlacementRow {
   month: string;
@@ -28,7 +34,7 @@ function bandColor(pct: number | null): string {
 
 // Semicircular gauge (0-100%) with a needle at `value`, a 90% target tick,
 // and the current number called out in the center.
-function PersistencyGauge({ value }: { value: number | null }) {
+function PersistencyGauge({ value, label = "90-day persistency" }: { value: number | null; label?: string }) {
   const pct = value === null || value === undefined ? null : Math.max(0, Math.min(100, value));
   const cx = 100;
   const cy = 100;
@@ -76,7 +82,7 @@ function PersistencyGauge({ value }: { value: number | null }) {
         {pct === null ? "—" : `${pct}%`}
       </text>
       <text x={cx} y={cy - 10} textAnchor="middle" fontSize="9" fill="#94a3b8">
-        90-day persistency
+        {label}
       </text>
     </svg>
   );
@@ -95,6 +101,7 @@ export default function QualityMetrics({
   agencyName?: string | null;
   agencyNames?: string[] | null;
 }) {
+  const [retention, setRetention] = useState<Retention90d | null>(null);
   const [placement, setPlacement] = useState<PlacementRow[]>([]);
   const [persistency, setPersistency] = useState<PersistencyRow[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -103,8 +110,14 @@ export default function QualityMetrics({
     let cancelled = false;
     (async () => {
       try {
-        const data = await getQualityMetrics(agencyId, agencyName, agencyNames);
+        // Option A: computed live on Max's production DB (single source of truth).
+        // NOTE: direct fn scopes by single agencyId; multi-agency (agencyNames)
+        // is a follow-up. agencyName is unused here (kept for prop back-compat).
+        void agencyName;
+        void agencyNames;
+        const data = await getQualityMetricsDirect(agencyId);
         if (cancelled) return;
+        setRetention((data.retention_90d as Retention90d) || null);
         setPlacement((data.placement as PlacementRow[]) || []);
         setPersistency((data.persistency as PersistencyRow[]) || []);
         setLoaded(true);
@@ -117,7 +130,7 @@ export default function QualityMetrics({
     };
   }, [agencyId, agencyName, agencyNames]);
 
-  if (!loaded || (placement.length === 0 && persistency.every((p) => !p.went_active))) return null;
+  if (!loaded || (!retention && placement.length === 0 && persistency.every((p) => !p.went_active))) return null;
 
   const fmtPct = (v: number | null) => (v === null || v === undefined ? "—" : `${v}%`);
   const monthLabel = (ym: string) => {
@@ -132,19 +145,25 @@ export default function QualityMetrics({
     <div className="bg-navy rounded-xl border border-slate-700/50 p-5 mt-6">
       <h3 className="text-sm font-semibold text-white mb-1">Book Quality</h3>
       <p className="text-xs text-slate-400 mb-4">
-        Placement: of apps that have reached their effective date, the share that drafted their first
-        premium (future-dated policies are excluded until their start date). Persistency: of policies
-        that went active, the share still active today.
+        90-day retention (north-star): of policies that drafted a 1st premium, the share that also
+        retained through the 3rd draft (a single successful draft on non-monthly billing counts as
+        retained). Placement: of apps that have reached their effective date, the share that drafted
+        their first premium. Live from production.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <div className="flex flex-col">
-          <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">90-Day Persistency</h4>
-          <PersistencyGauge value={current ? current.persistency_pct : null} />
+          <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">90-Day Retention</h4>
+          <PersistencyGauge value={retention ? retention.retention_pct : null} label="90-day retention" />
           <p className="text-[11px] text-slate-400 text-center mt-1">
-            {current && current.went_active
-              ? `${current.still_active}/${current.went_active} policies from ${monthLabel(current.cohort_month)} still active`
+            {retention && retention.drafted_first
+              ? `${retention.retained}/${retention.drafted_first} policies retained through the 3rd draft`
               : "Not enough seasoned policies yet"}
           </p>
+          {current && current.went_active ? (
+            <p className="text-[10px] text-slate-500 text-center mt-1">
+              Cohort survival (still active today): {fmtPct(current.persistency_pct)} · {current.still_active}/{current.went_active} from {monthLabel(current.cohort_month)}
+            </p>
+          ) : null}
         </div>
         <div>
           <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">Placement (last 3 months)</h4>
