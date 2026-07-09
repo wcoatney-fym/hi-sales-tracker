@@ -4471,11 +4471,11 @@ Deno.serve(async (req: Request) => {
         const agencyIds = (creds || []).map((c: { agency_id: string }) => c.agency_id).filter(Boolean);
         const { data: agencyRows } = await supabase
           .from("agencies")
-          .select("id, name, slug, zaps_enabled")
+          .select("id, name, slug, ghl_api_enabled")
           .in("id", agencyIds);
 
         const agencyMap = Object.fromEntries(
-          (agencyRows || []).map((a: { id: string; name: string; slug: string; zaps_enabled: boolean }) => [a.id, a])
+          (agencyRows || []).map((a: { id: string; name: string; slug: string; ghl_api_enabled: boolean }) => [a.id, a])
         );
 
         const credentials = (creds || []).map((c: { id: string; email_domain: string; password: string; agency_id: string; session_duration_days: number; last_login_at: string | null; login_count: number | null }) => ({
@@ -4485,7 +4485,7 @@ Deno.serve(async (req: Request) => {
           agency_id: c.agency_id,
           agency_name: agencyMap[c.agency_id]?.name || "Unknown",
           agency_slug: agencyMap[c.agency_id]?.slug || "",
-          zaps_enabled: agencyMap[c.agency_id]?.zaps_enabled ?? false,
+          ghl_api_enabled: agencyMap[c.agency_id]?.ghl_api_enabled ?? false,
           session_duration_days: c.session_duration_days,
           last_login_at: c.last_login_at ?? null,
           login_count: c.login_count ?? 0,
@@ -4507,11 +4507,11 @@ Deno.serve(async (req: Request) => {
 
         const { error: zapErr } = await supabase
           .from("agencies")
-          .update({ zaps_enabled: enabled })
+          .update({ ghl_api_enabled: enabled })
           .eq("id", agencyId);
 
         if (zapErr) throw zapErr;
-        return jsonResponse({ success: true, agencyId, zaps_enabled: enabled });
+        return jsonResponse({ success: true, agencyId, ghl_api_enabled: enabled });
       }
 
       case "update-agency-credential": {
