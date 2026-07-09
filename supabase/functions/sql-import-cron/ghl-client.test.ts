@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  AGENCY_FIELD_ID,
   AGENT_NPN_FIELD_ID,
   buildGhlContactBody,
   LOB_FIELD_IDS,
@@ -33,6 +34,7 @@ function basePayload(overrides: Partial<LifecyclePayload> = {}): LifecyclePayloa
     termination_date: "",
     contract_reason: "",
     agent_npn: "18408252",
+    agency: "FYM",
     carrier: "GTL",
     agent_first_name: "Tyler",
     agent_full_name: "Tyler Cole",
@@ -69,16 +71,18 @@ Deno.test("standard contact fields map straight through", () => {
   assertEquals(b.state, "FL");
   assertEquals(b.postalCode, "33601");
   assertEquals(b.source, "activity-tracker-lifecycle");
-  assertEquals(b.tags, ["lifecycle", "trigger-approved", "hip | sold client"]);
+  // Tags: exactly one product tag, no trigger-* or lifecycle tags (Charlie, 2026-07-09).
+  assertEquals(b.tags, ["hip | sold client"]);
 });
 
 Deno.test("HIP approved writes the hip__ field group with correct ids", () => {
   const b = buildGhlContactBody(basePayload(), LOC);
   const m = cfMap(b);
   const ids = LOB_FIELD_IDS.hip;
-  // 15 LOB fields + 1 global agent_npn.
-  assertEquals(b.customFields.length, 16);
+  // 15 LOB fields + agent_npn + agency = 17 custom fields.
+  assertEquals(b.customFields.length, 17);
   assertEquals(m.get(AGENT_NPN_FIELD_ID), "18408252");
+  assertEquals(m.get(AGENCY_FIELD_ID), "FYM");
   assertEquals(m.get(ids.plan_name), "Hospital Indemnity Plus");
   assertEquals(m.get(ids.plan_premium), "45");
   assertEquals(m.get(ids.client_status), "active");
@@ -94,7 +98,7 @@ Deno.test("at risk boolean true -> Yes", () => {
   const b = buildGhlContactBody(basePayload({ at_risk_status: true, trigger: "at risk" }), LOC);
   const m = cfMap(b);
   assertEquals(m.get(LOB_FIELD_IDS.hip.at_risk_status), "Yes");
-  assertEquals(b.tags, ["lifecycle", "trigger-at risk", "hip | sold client"]);
+  assertEquals(b.tags, ["hip | sold client"]);
 });
 
 Deno.test("product tag applied per LOB; Unknown gets none", () => {
@@ -109,10 +113,11 @@ Deno.test("product tag applied per LOB; Unknown gets none", () => {
   for (const [pt, tag] of cases) {
     const b = buildGhlContactBody(basePayload({ plan_type: pt }), LOC);
     if (tag === null) {
-      assertEquals(b.tags, ["lifecycle", "trigger-approved"], `${pt} no product tag`);
+      // Unknown: no tags at all (Charlie, 2026-07-09: only one product tag, no lifecycle/trigger tags).
+      assertEquals(b.tags, [], `${pt} no product tag`);
     } else {
       assertEquals(b.tags.includes(tag), true, `${pt} has product tag`);
-      assertEquals(b.tags.length, 3, `${pt} tag count`);
+      assertEquals(b.tags.length, 1, `${pt} tag count`);
     }
   }
 });
@@ -140,11 +145,13 @@ Deno.test("terminated carries mapped reason label + date into hhc group", () => 
   assertEquals(m.get(ids.client_status), "terminated");
 });
 
-Deno.test("Unknown plan type still writes agent_npn (only the global field)", () => {
+Deno.test("Unknown plan type still writes agent_npn + agency (global fields only)", () => {
   const b = buildGhlContactBody(basePayload({ plan_type: "Unknown" }), LOC);
-  assertEquals(b.customFields.length, 1);
-  assertEquals(b.customFields[0].id, AGENT_NPN_FIELD_ID);
-  assertEquals(b.customFields[0].value, "18408252");
+  // 2 global fields: agent_npn + agency. No LOB fields for Unknown.
+  assertEquals(b.customFields.length, 2);
+  const m = cfMap(b);
+  assertEquals(m.get(AGENT_NPN_FIELD_ID), "18408252");
+  assertEquals(m.get(AGENCY_FIELD_ID), "FYM");
   assertEquals(b.firstName, "Marcus");
 });
 

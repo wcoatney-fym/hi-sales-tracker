@@ -1,9 +1,9 @@
 // Direct GHL (LeadConnector v2) contact push for the retention lifecycle.
 //
-// Replaces the Zapier hop (Charlie, 2026-07-02): the Activity-tracker evaluator
-// now writes lifecycle state straight into the GHL contact via the v2
-// contacts/upsert endpoint. Upsert dedupes on email/phone within the location,
-// so it updates the intake-created contact in place rather than duplicating.
+// Each lifecycle event CREATES A NEW contact in the Sunfire location (POST
+// /contacts/). Duplicates are intentional — Sunfire keeps a running audit log
+// of every state the policy passed through. Dedupe happens downstream when
+// Sunfire pushes the contact to the agency subaccount (Charlie, 2026-07-03).
 //
 // GHL stores the policy state in per-line-of-business custom fields
 // (contact.{lob}__{attr}). We select the field group from the policy's derived
@@ -43,6 +43,10 @@ export type LobFieldAttr =
 // every push regardless of product — all GHL automations key on NPN
 // (Charlie, 2026-07-02). Field: contact.agent_npn.
 export const AGENT_NPN_FIELD_ID = "uEFOApsD4JKXsXH3T9E4";
+
+// Global custom field for the sub-agency name. Maps to
+// contact.ancillary_agency__sorting (Charlie, 2026-07-09).
+export const AGENCY_FIELD_ID = "qSHUIp3GfPWHRGbPh1CM";
 
 // Product tag applied to the contact so GHL can segment by line of business
 // (Charlie, 2026-07-02). Uses the existing GHL tag taxonomy (`<product> | sold
@@ -187,6 +191,7 @@ export interface LifecyclePayload {
   termination_date?: unknown;
   contract_reason?: unknown; // mapped label, goes to {lob}__terminated_reason
   agent_npn?: unknown; // writing agent NPN -> global contact.agent_npn field
+  agency?: unknown;    // sub-agency name -> global contact.ancillary_agency__sorting
   carrier?: unknown;
   agent_first_name?: unknown;
   agent_full_name?: unknown;
@@ -228,7 +233,7 @@ function yesNo(v: unknown): string {
 }
 
 /**
- * Build the GHL contacts/upsert body from a flat lifecycle payload. Pure.
+ * Build the GHL contacts/create body from a flat lifecycle payload. Pure.
  *
  * Standard contact fields come from the client/agent columns; the policy state
  * is written to the LOB-specific custom fields selected by plan_type. Unknown
@@ -244,6 +249,10 @@ export function buildGhlContactBody(
   // Agent NPN is global (not LOB-scoped) and ALWAYS included — GHL automations
   // hinge on it (Charlie, 2026-07-02).
   customFields.push({ id: AGENT_NPN_FIELD_ID, value: str(p.agent_npn) });
+
+  // Sub-agency name (ancillary_agency__sorting). Always included on every push
+  // so GHL can route/filter by agency regardless of LOB (Charlie, 2026-07-09).
+  customFields.push({ id: AGENCY_FIELD_ID, value: str(p.agency) });
 
   if (lob) {
     const ids = LOB_FIELD_IDS[lob];
@@ -267,7 +276,8 @@ export function buildGhlContactBody(
     put("termination_date", str(p.termination_date));
   }
 
-  const tags = ["lifecycle", `trigger-${p.trigger}`];
+  // Tag: exactly one product tag per LOB. No trigger-* tags (Charlie, 2026-07-09).
+  const tags: string[] = [];
   if (lob) tags.push(PRODUCT_TAG[lob]);
 
   return {
@@ -321,7 +331,9 @@ export async function pushContactToGhl(
   body: GhlContactBody,
 ): Promise<GhlPushResult> {
   try {
-    const resp = await fetch(`${cfg.apiBase}/contacts/upsert`, {
+    // POST /contacts/ creates a new record every time (intentional — Sunfire
+    // keeps a full audit log; deduplication happens in the subaccount layer).
+    const resp = await fetch(`${cfg.apiBase}/contacts/`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${cfg.token}`,

@@ -17,27 +17,14 @@ import {
   type LifecyclePayload,
 } from "./ghl-client.ts";
 
-// Retention lifecycle now pushes DIRECT to GHL (LeadConnector v2 contacts/upsert)
-// instead of the Zapier hop (Charlie, 2026-07-02). Fire is gated per-agency on
-// agencies.zaps_enabled and is fully best-effort — a GHL failure must never
-// block or fail the daily import. The legacy Zap hook is retained only as an
-// optional fallback behind LIFECYCLE_USE_ZAP="true".
-const LIFECYCLE_ZAP_HOOK =
-  "https://hooks.zapier.com/hooks/catch/25274165/43n0alz/";
+// Retention lifecycle pushes DIRECT to GHL (LeadConnector v2 contacts/create).
+// Gated per-agency on agencies.zaps_enabled — best-effort, never blocks import.
+// Zap path removed 2026-07-09 (Charlie: Zap feature deprecated).
 
-function lifecycleUseZap(): boolean {
-  try {
-    return (Deno.env.get("LIFECYCLE_USE_ZAP") || "").toLowerCase() === "true";
-  } catch {
-    return false;
-  }
-}
-
-// Set LIFECYCLE_ZAP_DRY_RUN="true" as a function secret to evaluate + log
-// events without POSTing to Zapier (safe rollout / verification mode).
+// Set LIFECYCLE_DRY_RUN="true" to evaluate + log events without pushing to GHL.
 function lifecycleDryRun(): boolean {
   try {
-    return (Deno.env.get("LIFECYCLE_ZAP_DRY_RUN") || "").toLowerCase() === "true";
+    return (Deno.env.get("LIFECYCLE_DRY_RUN") || "").toLowerCase() === "true";
   } catch {
     return false;
   }
@@ -80,7 +67,6 @@ async function fireLifecycleEvents(
 ): Promise<void> {
   const dry = lifecycleDryRun();
   const ghlConfig = loadGhlConfig();
-  const useZap = lifecycleUseZap();
   const auditRows: Record<string, unknown>[] = [];
   const audit = (
     ev: LifecycleEvent,
@@ -114,10 +100,7 @@ async function fireLifecycleEvents(
       policy_effective_date: (p.policy_effective_date as string | null) ?? null,
       paid_to_date: (p.paid_to_date as string | null) ?? null,
     });
-    // EXACT Zap payload contract (Charlie, 2026-06-30; +address/city/state/zip
-    // 2026-07-01). These fields ONLY — GHL branches on `trigger`; every event
-    // carries the full flat set. Do not add fields here without sign-off (keeps
-    // the Zapier field map stable).
+    // Lifecycle payload — full flat set, every event.
     const payload = {
       client_first_name: p.client_first_name ?? "",
       client_last_name: p.client_last_name ?? "",
@@ -127,10 +110,8 @@ async function fireLifecycleEvents(
       city: p.city ?? "",
       state: p.state ?? "",
       zip: p.zip ?? "",
+      // Sub-agency name maps to contact.ancillary_agency__sorting (Charlie, 2026-07-09).
       agency: p.agency ?? "",
-      // Stable agency UUID for GHL routing (maps to contact.ancillary_agency__sorting).
-      // Names drift; the id is the reliable filter/sort key.
-      agency_id: p.agency_id ?? "",
       agent_first_name: p.agent_first_name ?? "",
       agent_last_name: p.agent_last_name ?? "",
       // GHL stores an "Agent Full Name" field (no last-name field), so provide a
@@ -159,41 +140,14 @@ async function fireLifecycleEvents(
       continue;
     }
 
-    // Primary path: direct GHL contacts/upsert. Dormant (skipped) if creds unset.
+    // Direct GHL contacts/create. Dormant (skipped) if creds unset.
     if (ghlConfig) {
       const body = buildGhlContactBody(payload as unknown as LifecyclePayload, ghlConfig.locationId);
       const r = await pushContactToGhl(ghlConfig, body);
       audit(ev, p, r);
-    } else if (!useZap) {
-      // No GHL creds and Zap fallback off => log-only so nothing is lost silently.
+    } else {
       console.warn(`[lifecycle] no GHL config; skipped ${ev.trigger} ${ev.policy_number}`);
       audit(ev, p, { ok: false, http_status: null, error: "no GHL config" });
-    }
-
-    // Optional legacy Zap fallback (LIFECYCLE_USE_ZAP="true").
-    if (useZap) {
-      try {
-        const resp = await fetch(LIFECYCLE_ZAP_HOOK, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!ghlConfig) {
-          audit(ev, p, {
-            ok: resp.ok,
-            http_status: resp.status,
-            error: resp.ok ? null : `HTTP ${resp.status}`,
-          });
-        }
-      } catch (err) {
-        if (!ghlConfig) {
-          audit(ev, p, {
-            ok: false,
-            http_status: null,
-            error: err instanceof Error ? err.message : "fetch failed",
-          });
-        }
-      }
     }
   }
   // Persist the audit trail (best-effort; chunked to stay under payload limits).
@@ -1258,14 +1212,31 @@ async function handleSync(
     .select("unl_writing_number, agency, npn")
     .range(0, 9999);
   const agencyLookup = new Map<string, string>();
-  // NPN is not a form_submissions column — it lives on agents, keyed by UNL
-  // writing number. Resolve it here so the Zap payload can carry agent_npn.
+  // Primary NPN source: agents table, keyed by UNL writing number.
   const agentNpnLookup = new Map<string, string>();
   for (const a of agentsList || []) {
     if (a.unl_writing_number) {
       const wn = a.unl_writing_number.toUpperCase();
       agencyLookup.set(wn, a.agency || "");
       if (a.npn) agentNpnLookup.set(wn, a.npn as string);
+    }
+  }
+
+  // Fallback NPN source: agency_rosters (admin-uploaded per-agency roster).
+  // Fills in any writing number not found in the agents table.
+  const { data: rosterNpnList } = await supabase
+    .from("agency_rosters")
+    .select("writing_number, npn")
+    .eq("status", "active")
+    .not("npn", "is", null)
+    .neq("npn", "");
+  for (const r of rosterNpnList || []) {
+    if (r.writing_number && r.npn) {
+      const wn = (r.writing_number as string).toUpperCase();
+      // Only fill gaps — agents table takes priority.
+      if (!agentNpnLookup.has(wn)) {
+        agentNpnLookup.set(wn, r.npn as string);
+      }
     }
   }
 
