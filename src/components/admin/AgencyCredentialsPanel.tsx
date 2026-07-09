@@ -15,7 +15,7 @@ interface Credential {
   agency_id: string;
   agency_name: string;
   agency_slug: string;
-  zaps_enabled: boolean;
+  ghl_api_enabled: boolean;
   session_duration_days: number;
   last_login_at: string | null;
   login_count: number;
@@ -104,13 +104,13 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
   };
 
   const handleToggleZaps = async (cred: Credential) => {
-    const next = !cred.zaps_enabled;
+    const next = !cred.ghl_api_enabled;
     if (next && !confirm(`Turn on the GHL API for ${cred.agency_name}? Live data + status changes (approved / terminated / at-risk) will push to this agency's GHL account.`)) return;
     setTogglingZapId(cred.id);
     try {
       await adminSetAgencyZapsEnabled(token, cred.agency_id, next);
       setCredentials((prev) =>
-        prev.map((c) => (c.id === cred.id ? { ...c, zaps_enabled: next } : c))
+        prev.map((c) => (c.id === cred.id ? { ...c, ghl_api_enabled: next } : c))
       );
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to update Zap toggle");
@@ -227,11 +227,11 @@ function AgencyCredentialsPanel({ token }: AgencyCredentialsPanelProps) {
                   <button
                     onClick={() => handleToggleZaps(cred)}
                     disabled={togglingZapId === cred.id}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 ${cred.zaps_enabled ? "text-green-400 bg-green-400/10 hover:bg-green-400/20" : "text-slate-400 bg-slate-800 hover:bg-slate-700"}`}
-                    title={cred.zaps_enabled ? "GHL API ON \u2014 pushing live data/status changes for this agency (click to disable)" : "GHL API OFF \u2014 click to enable live push"}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 ${cred.ghl_api_enabled ? "text-green-400 bg-green-400/10 hover:bg-green-400/20" : "text-slate-400 bg-slate-800 hover:bg-slate-700"}`}
+                    title={cred.ghl_api_enabled ? "GHL API ON \u2014 pushing live data/status changes for this agency (click to disable)" : "GHL API OFF \u2014 click to enable live push"}
                   >
-                    {togglingZapId === cred.id ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} className={cred.zaps_enabled ? "fill-green-400" : ""} />}
-                    GHL API {cred.zaps_enabled ? "On" : "Off"}
+                    {togglingZapId === cred.id ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} className={cred.ghl_api_enabled ? "fill-green-400" : ""} />}
+                    GHL API {cred.ghl_api_enabled ? "On" : "Off"}
                   </button>
                   <button
                     onClick={() => navigate(`/admin/dashboard/${cred.agency_slug}`, { state: { agencyName: cred.agency_name, agencyId: cred.agency_id } })}

@@ -32,3 +32,8 @@ verify_jwt = false
 # add auth before promoting past prototype.
 [functions.quality-metrics-direct]
 verify_jwt = false
+
+# lifecycle-direct: cron-triggered, authenticates via X-Cron-Secret (same as
+# sql-import-cron). No user JWT supplied by pg_cron.
+[functions.lifecycle-direct]
+verify_jwt = false

@@ -19,7 +19,7 @@ import {
 
 // Retention lifecycle now pushes DIRECT to GHL (LeadConnector v2 contacts/upsert)
 // instead of the Zapier hop (Charlie, 2026-07-02). Fire is gated per-agency on
-// agencies.zaps_enabled and is fully best-effort — a GHL failure must never
+// agencies.ghl_api_enabled and is fully best-effort — a GHL failure must never
 // block or fail the daily import. The legacy Zap hook is retained only as an
 // optional fallback behind LIFECYCLE_USE_ZAP="true".
 const LIFECYCLE_ZAP_HOOK =
@@ -1283,14 +1283,14 @@ async function handleSync(
 
   // The agency-scoped leaderboard filters on agency_id, so resolve the
   // attributed agency name to its id at sync time.
-  const { data: agencyRows } = await supabase.from("agencies").select("id, name, zaps_enabled");
+  const { data: agencyRows } = await supabase.from("agencies").select("id, name, ghl_api_enabled");
   const agencyNameToId = new Map<string, string>();
   // Agencies whose retention Zaps are switched on. Lifecycle events only fire
   // for policies attributed to one of these (FYM-internal only at launch).
   const zapsEnabledAgencyIds = new Set<string>();
   for (const a of agencyRows || []) {
     if (a.name) agencyNameToId.set(a.name, a.id);
-    if (a.zaps_enabled && a.id) zapsEnabledAgencyIds.add(a.id as string);
+    if (a.ghl_api_enabled && a.id) zapsEnabledAgencyIds.add(a.id as string);
   }
 
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
@@ -1414,7 +1414,7 @@ async function handleSync(
         for (const row of batch) {
           const pn = row.policy_number as string;
           batchByNumber.set(pn, row);
-          // Gate: only agencies with zaps_enabled fire.
+          // Gate: only agencies with ghl_api_enabled fire.
           const agencyId = row.agency_id as string | null;
           if (!agencyId || !zapsEnabledAgencyIds.has(agencyId)) continue;
 
