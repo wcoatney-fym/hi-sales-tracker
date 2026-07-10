@@ -182,8 +182,8 @@ Deno.serve(async (req: Request) => {
   const supabaseUrl  = Deno.env.get("SUPABASE_URL")!;
   // Use new-format secret key (sb_secret_...) — legacy SUPABASE_SERVICE_ROLE_KEY JWT
   // was disabled on this project 2026-06-16. Fall back to legacy key if secret key absent.
-  const serviceKey   = Deno.env.get("SUPABASE_SECRET_KEY") ||
-                       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const serviceKey   = Deno.env.get("SB_SECRET_KEY") ||
+                       Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
   console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_HIP_PORTAL")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
   const supabase     = createClient(supabaseUrl, serviceKey);
