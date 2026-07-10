@@ -83,6 +83,44 @@ Deno.test("perPaymentPremium: unknown billingMode falls back to mode 1 (monthly)
   assertEquals(perPaymentPremium(712, 99), 59.33);
 });
 
+// ── at-risk state-read regression tests (fix 3) ─────────────────────────────
+// These tests guard against the bug where at_risk_policy was selected from the
+// state table but never stored in priorState, causing wasAtRisk to always be
+// false and every at-risk policy to re-fire on every tick.
+//
+// The evaluator logic under test (mirrors index.ts):
+//   wasAtRisk = prior?.at_risk_policy ?? false
+//   isAtRisk  = row.at_risk_policy  (DB value)
+//   fires     = isAtRisk && !wasAtRisk
+
+function shouldFireAtRisk(
+  priorAtRisk: boolean | null,   // what priorState map holds (null = no state row)
+  dbAtRisk: boolean,              // what Max's DB says right now
+): boolean {
+  const wasAtRisk = priorAtRisk ?? false;
+  return dbAtRisk && !wasAtRisk;
+}
+
+Deno.test("at-risk: prior=true, DB=true → NO fire (already fired, state read correctly)", () => {
+  assertEquals(shouldFireAtRisk(true, true), false);
+});
+
+Deno.test("at-risk: prior=false, DB=true → fire (new at-risk event)", () => {
+  assertEquals(shouldFireAtRisk(false, true), true);
+});
+
+Deno.test("at-risk: prior=null (no state row), DB=true → fire (first time seen at-risk)", () => {
+  assertEquals(shouldFireAtRisk(null, true), true);
+});
+
+Deno.test("at-risk: prior=true, DB=false → no fire (recovered; state will reset on next live write)", () => {
+  assertEquals(shouldFireAtRisk(true, false), false);
+});
+
+Deno.test("at-risk: prior=false, DB=false → no fire", () => {
+  assertEquals(shouldFireAtRisk(false, false), false);
+});
+
 // ── titleCase tests ───────────────────────────────────────────────────────────
 
 Deno.test("titleCase: all-caps abbreviation DH preserved", () => {

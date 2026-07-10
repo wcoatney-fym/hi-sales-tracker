@@ -398,12 +398,13 @@ Deno.serve(async (req: Request) => {
     .from("lifecycle_policy_state")
     .select("policy_number, cntrct_code, at_risk_policy, paid_to_date, agency_id");
 
-  const priorState = new Map<string, PriorState & { agency_id: string | null }>();
+  const priorState = new Map<string, PriorState & { agency_id: string | null; at_risk_policy: boolean }>();
   for (const r of priorRows ?? []) {
     priorState.set(r.policy_number as string, {
-      contract_code: r.cntrct_code as string | null,
-      at_risk_fired_at: null, // not needed: we use the at_risk_policy boolean directly
-      agency_id: r.agency_id as string | null,
+      contract_code:    r.cntrct_code as string | null,
+      at_risk_fired_at: null,
+      agency_id:        r.agency_id as string | null,
+      at_risk_policy:   (r.at_risk_policy as boolean) ?? false, // persisted from prior live fire
     });
   }
 
@@ -516,7 +517,7 @@ Deno.serve(async (req: Request) => {
     );
 
     // at-risk evaluation: use the DB-supplied boolean (Max computes it).
-    const wasAtRisk = (prior as unknown as { at_risk_policy?: boolean } | null)?.at_risk_policy ?? false;
+    const wasAtRisk = prior?.at_risk_policy ?? false;
     const isAtRisk  = row.at_risk_policy;
     if (isAtRisk && !wasAtRisk && (row.cntrct_code ?? "").trim() === "A") {
       events.push({
@@ -618,14 +619,21 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 6. Persist state + audit in bulk (best-effort) ───────────────────────
-  try {
-    for (let i = 0; i < stateUpserts.length; i += 500) {
-      await supabase
-        .from("lifecycle_policy_state")
-        .upsert(stateUpserts.slice(i, i + 500), { onConflict: "policy_number" });
+  // State upserts are SKIPPED on dry runs. Dry runs must not mark events as seen —
+  // doing so silently consumes real lifecycle events, causing them to never fire
+  // when dry-run is disabled. Only live fires advance state.
+  if (!dry) {
+    try {
+      for (let i = 0; i < stateUpserts.length; i += 500) {
+        await supabase
+          .from("lifecycle_policy_state")
+          .upsert(stateUpserts.slice(i, i + 500), { onConflict: "policy_number" });
+      }
+    } catch (e) {
+      console.error("[lifecycle-direct] state upsert failed (non-fatal):", e);
     }
-  } catch (e) {
-    console.error("[lifecycle-direct] state upsert failed (non-fatal):", e);
+  } else {
+    console.log(`[lifecycle-direct] dry-run: skipping state upserts for ${stateUpserts.length} rows`);
   }
 
   try {
@@ -637,7 +645,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
