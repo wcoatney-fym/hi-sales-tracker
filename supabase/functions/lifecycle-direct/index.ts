@@ -662,9 +662,9 @@ Deno.serve(async (req: Request) => {
     console.error("[lifecycle-direct] audit log write failed (non-fatal):", e);
   }
 
+  await writeCronRun({ fired, skipped });
   return new Response(
     JSON.stringify({ ok: true, fired, skipped, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
-  await writeCronRun({ fired, skipped });
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
