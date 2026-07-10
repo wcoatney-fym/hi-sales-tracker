@@ -55,6 +55,16 @@ Deno.test("usDate: invalid string returns empty string", () => {
   assertEquals(usDate("not-a-date"), "");
 });
 
+Deno.test("usDate: empty object {} returns empty string (not 'undefined/undefined')", () => {
+  // Postgres unknown-typed columns may arrive as {} when the driver can't
+  // parse the value. Must not produce "NaN/NaN/NaN" or "undefined/undefined".
+  assertEquals(usDate({} as unknown), "");
+});
+
+Deno.test("usDate: empty string returns empty string", () => {
+  assertEquals(usDate(""), "");
+});
+
 // ── perPaymentPremium tests ───────────────────────────────────────────────────
 // Rule: per_payment = annual x (mode / 12)
 // mode = months per payment period (1=monthly, 3=quarterly, 6=semi-annual, 12=annual)
