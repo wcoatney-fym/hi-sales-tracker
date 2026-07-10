@@ -184,11 +184,12 @@ interface ProdRow {
   policy_nbr: string;
   first_name: string;
   last_name: string;
+  phone_nbr: string | null;          // bigint cast to text in SELECT
   cntrct_code: string | null;
   cntrct_reason: string | null;
-  issue_date: string | null;
-  paid_to_date: string | null;
-  term_date: string | null;
+  issue_date: unknown;               // Postgres date — arrives as Date object
+  paid_to_date: unknown;
+  term_date: unknown;
   billing_mode: number | null;
   annual_premium: number | null;
   plan_code: string | null;
@@ -274,17 +275,7 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // ── 2b. Build phone lookup from form_submissions ──────────────────────────
-  // Max's DB has no contact info; form_submissions has phone from the intake form.
-  const phoneByPolicy = new Map<string, string>();
-  const { data: contactRows } = await supabase
-    .from("form_submissions")
-    .select("policy_number, phone")
-    .not("phone", "is", null)
-    .neq("phone", "");
-  for (const c of contactRows ?? []) {
-    if (c.policy_number && c.phone) phoneByPolicy.set(c.policy_number as string, c.phone as string);
-  }
+  // Phone comes directly from phone_nbr on Max's DB (bigint cast to text in SELECT).
 
   // ── 2b. Agent writing-number lookup (form_submissions) for agencies whose
   // hierarchy carries no person node (e.g. DH Insurance Group). Used as NPN fallback.
@@ -336,6 +327,7 @@ Deno.serve(async (req: Request) => {
       TRIM(policy_nbr)            AS policy_nbr,
       TRIM(first_name)            AS first_name,
       TRIM(last_name)             AS last_name,
+      TRIM(phone_nbr::text)        AS phone_nbr,
       TRIM(cntrct_code)           AS cntrct_code,
       TRIM(cntrct_reason)         AS cntrct_reason,
       issue_date, paid_to_date, term_date, billing_mode, annual_premium,
@@ -347,6 +339,7 @@ Deno.serve(async (req: Request) => {
       TRIM(policy_nbr)            AS policy_nbr,
       TRIM(first_name)            AS first_name,
       TRIM(last_name)             AS last_name,
+      TRIM(phone_nbr::text)        AS phone_nbr,
       TRIM(cntrct_code)           AS cntrct_code,
       TRIM(cntrct_reason)         AS cntrct_reason,
       issue_date, paid_to_date, term_date, billing_mode, annual_premium,
@@ -452,6 +445,7 @@ Deno.serve(async (req: Request) => {
     const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
     const npn = npnByWritingNumber.get(agent.writingNumber)
              ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
+    if (singlePolicy) console.log(`[npn-trace] pn=${pn} agentWn=${agent.writingNumber} fallbackWn=${fallbackWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size} agentNumMapSize=${agentNumberByPolicy.size} agentNumEntry=${agentNumberByPolicy.get(pn)}`);
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
     const monthly  = monthlyPremium(row.annual_premium, row.billing_mode);
@@ -461,7 +455,7 @@ Deno.serve(async (req: Request) => {
       const payload: LifecyclePayload = {
         client_first_name:    titleCase((row.first_name ?? "").trim()),
         client_last_name:     titleCase((row.last_name  ?? "").trim()),
-        phone:                phoneByPolicy.get(pn) ?? "",
+        phone:                (row.phone_nbr ?? "").trim(),
         email:                "",
         address:              "",
         city:                 "",
