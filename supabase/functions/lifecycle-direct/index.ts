@@ -423,7 +423,7 @@ Deno.serve(async (req: Request) => {
       } else {
         console.warn(`[lifecycle-direct] no GHL config; skipped ${ev.trigger} ${pn}`);
         auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
-        fired++;
+        // do NOT increment fired — no GHL config means nothing was pushed
       }
     }
   }
@@ -448,7 +448,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length }),
+    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
