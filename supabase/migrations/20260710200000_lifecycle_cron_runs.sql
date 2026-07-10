@@ -21,11 +21,9 @@ SELECT cron.schedule(
   $$ DELETE FROM public.lifecycle_cron_runs WHERE ticked_at < now() - interval '90 days' $$
 );
 
--- RLS: service role writes, anon can read (for dashboard queries)
+-- RLS: service role only. No anon reads — this table exposes deploy SHAs
+-- and operational cadence that should not be publicly queryable.
 ALTER TABLE public.lifecycle_cron_runs ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "service role full access" ON public.lifecycle_cron_runs
   FOR ALL USING (auth.role() = 'service_role');
-
-CREATE POLICY "anon read" ON public.lifecycle_cron_runs
-  FOR SELECT USING (true);
