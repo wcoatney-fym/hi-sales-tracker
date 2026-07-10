@@ -1,17 +1,22 @@
 -- Dead-man's switch: alert #crm-openclaw if no scheduled lifecycle-direct
 -- tick has landed in lifecycle_cron_runs for >30 minutes.
--- Runs every 30 minutes. Uses pg_net to POST to the lifecycle-direct function
--- with a special ?deadman_check=1 param, which is handled by a separate
--- Supabase Edge Function (lifecycle-alert) or inline check.
+-- Runs every 30 minutes via pg_cron.
 --
--- Implementation: simpler to query directly in pg_cron and fire a Slack
--- webhook if the condition is met. Slack webhook URL stored in vault.
+-- Residual risk (documented): this job runs on the same pg_cron scheduler
+-- it monitors. A full scheduler outage alerts nothing. External uptime
+-- monitoring is the eventual fix for that gap.
+--
+-- Unhandled exceptions in lifecycle-direct (e.g., Max's DB timeout) cause
+-- the function to exit before writeCronRun() is called — no row is written,
+-- the gap grows, and the dead-man fires. This is intentional: a crashed tick
+-- looks identical to a missing tick from the dead-man's perspective, which is
+-- the correct and conservative behavior.
 
 SELECT cron.schedule(
   'lifecycle-direct-deadman',
   '*/30 * * * *',
-  $$
-  DO $$
+  $cron_cmd$
+  DO $inner$
   DECLARE
     last_tick timestamptz;
     slack_url text;
@@ -39,6 +44,6 @@ SELECT cron.schedule(
       END IF;
     END IF;
   END;
-  $$ LANGUAGE plpgsql;
-  $$
+  $inner$ LANGUAGE plpgsql;
+  $cron_cmd$
 );
