@@ -251,7 +251,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 2. Build NPN lookup (agents table primary, agency_rosters fallback) ──
-  const npnByWritingNumber = new Map<string, string>();
+  const npnByWritingNumber  = new Map<string, string>();
+  const nameByWritingNumber = new Map<string, { first: string; full: string }>();
 
   const { data: agentsList } = await supabase
     .from("agents")
@@ -264,7 +265,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: rosterList } = await supabase
     .from("agency_rosters")
-    .select("writing_number, npn")
+    .select("writing_number, npn, agent_first_name, agent_last_name")
     .eq("status", "active")
     .not("npn", "is", null)
     .neq("npn", "");
@@ -272,6 +273,11 @@ Deno.serve(async (req: Request) => {
     const wn = (r.writing_number as string ?? "").trim().toUpperCase();
     if (wn && r.npn && !npnByWritingNumber.has(wn)) {
       npnByWritingNumber.set(wn, r.npn as string);
+    }
+    if (wn && (r.agent_first_name || r.agent_last_name)) {
+      const first = titleCase(String(r.agent_first_name ?? ""));
+      const last  = titleCase(String(r.agent_last_name  ?? ""));
+      nameByWritingNumber.set(wn, { first, full: `${first} ${last}`.trim() });
     }
   }
 
@@ -458,6 +464,12 @@ Deno.serve(async (req: Request) => {
     const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
     const npn = npnByWritingNumber.get(agent.writingNumber)
              ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
+    // When hierarchy has no person node (e.g. DH — all org nodes), resolve agent
+    // name from the roster using the fallback writing number.
+    const resolvedWn   = npn && fallbackWn ? fallbackWn : agent.writingNumber;
+    const rosterName   = nameByWritingNumber.get(resolvedWn);
+    const agentFirst   = rosterName?.first ?? agent.firstName;
+    const agentFull    = rosterName?.full  ?? agent.fullName;
     if (singlePolicy) console.log(`[npn-trace] pn=${pn} agentWn=${agent.writingNumber} fallbackWn=${fallbackWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size} agentNumMapSize=${agentNumberByPolicy.size} agentNumEntry=${agentNumberByPolicy.get(pn)}`);
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
@@ -489,9 +501,9 @@ Deno.serve(async (req: Request) => {
         agent_npn:            npn,
         agency:               agencyName,
         carrier:              "United American",
-        agent_first_name:     agent.firstName,
-        agent_full_name:      agent.fullName,
-        agent_writing_number: agent.writingNumber,
+        agent_first_name:     agentFirst,
+        agent_full_name:      agentFull,
+        agent_writing_number: resolvedWn,
         trigger:              ev.trigger,
       };
 
