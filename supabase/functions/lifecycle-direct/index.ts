@@ -285,15 +285,22 @@ Deno.serve(async (req: Request) => {
     .map((a) => (a.name as string).toLowerCase()) ?? [];
   const agentNumberByPolicy = new Map<string, string>();
   if (enabledAgencyNames.length > 0) {
-    const { data: agentNumRows } = await supabase
-      .from("form_submissions")
-      .select("policy_number, agent_number, agency")
-      .not("agent_number", "is", null)
-      .neq("agent_number", "");
-    for (const r of agentNumRows ?? []) {
-      const agencyLower = (r.agency as string ?? "").toLowerCase();
-      if (enabledAgencyNames.some((n) => agencyLower.includes(n.split(" ")[0])) && r.policy_number && r.agent_number)
-        agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+    // Fetch agent_number only for GHL-enabled agencies, using exact agency name matches
+    // from the agencies table. This keeps us under PostgREST's 1000-row page limit.
+    const enabledAgencyNamesOriginal = agencyRows
+      ?.filter((a) => a.ghl_api_enabled)
+      .map((a) => a.name as string) ?? [];
+    for (const agencyName of enabledAgencyNamesOriginal) {
+      const { data: agentNumRows } = await supabase
+        .from("form_submissions")
+        .select("policy_number, agent_number")
+        .ilike("agency", agencyName)
+        .not("agent_number", "is", null)
+        .neq("agent_number", "");
+      for (const r of agentNumRows ?? []) {
+        if (r.policy_number && r.agent_number)
+          agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+      }
     }
   }
 
