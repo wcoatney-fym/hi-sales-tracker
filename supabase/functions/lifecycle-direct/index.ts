@@ -252,6 +252,22 @@ Deno.serve(async (req: Request) => {
   const ghlConfig = loadGhlConfig();
   const nowMs = Date.now();
 
+  // Helper: write a lifecycle_cron_runs row on every exit path.
+  // Called before every return so cron_auth is recorded even when the
+  // confirmation gate fires or an error short-circuits the main loop.
+  // Best-effort — failure must not affect the caller's response.
+  async function writeCronRun(opts: { fired?: number; skipped?: number }) {
+    await supabase.from("lifecycle_cron_runs").insert({
+      cron_auth:  isScheduledCron,
+      dry,
+      fired:      opts.fired   ?? 0,
+      skipped:    opts.skipped ?? 0,
+      deploy_sha: deployedSha,
+    }).then(() => { /* best-effort */ }).catch((e: Error) => {
+      console.error("[lifecycle-direct] cron_runs insert failed (non-fatal):", e.message);
+    });
+  }
+
   // Deploy identity — set at deploy time via: supabase secrets set DEPLOY_LIFECYCLE_SHA=<git-sha>
   // Included in every response so dry-run previews can be verified against the repo.
   const deployedSha = Deno.env.get("DEPLOY_LIFECYCLE_SHA") ?? "unknown";
@@ -284,6 +300,7 @@ Deno.serve(async (req: Request) => {
       const confirmParam = singlePolicy
         ? `?single_policy=${singlePolicy}&confirm=${token}`
         : `?confirm=${token}`;
+      await writeCronRun({ fired: 0, skipped: 0 });
       return new Response(
         JSON.stringify({
           status: "awaiting_confirmation",
@@ -306,6 +323,7 @@ Deno.serve(async (req: Request) => {
       .gte("expires_at", new Date().toISOString())
       .maybeSingle();
     if (!tokenRow) {
+      await writeCronRun({ fired: 0, skipped: 0 });
       return new Response(
         JSON.stringify({ error: "Invalid or expired confirmation token", deploy_sha: deployedSha }),
         { status: 403, headers: { "Content-Type": "application/json" } },
@@ -646,6 +664,7 @@ Deno.serve(async (req: Request) => {
 
   return new Response(
     JSON.stringify({ ok: true, fired, skipped, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+  await writeCronRun({ fired, skipped });
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
