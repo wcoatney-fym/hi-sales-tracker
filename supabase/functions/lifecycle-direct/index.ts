@@ -89,15 +89,26 @@ function billingModeLabel(code: number | string | null): string {
 }
 
 /**
- * Return the per-period premium from the annual amount.
- * billing_mode is the number of payments per year (1=annual, 3=quarterly,
- * 6=semi-annual, 12=monthly). Divides annual by periods and rounds to 2dp.
+ * Return the per-payment premium from the annual amount.
+ *
+ * billing_mode encodes MONTHS PER PAYMENT PERIOD (months between drafts):
+ *   1  = Monthly     (draft every 1 month)  → per_payment = annual × 1/12
+ *   3  = Quarterly   (draft every 3 months) → per_payment = annual × 3/12
+ *   6  = Semi-Annual (draft every 6 months) → per_payment = annual × 6/12
+ *   12 = Annual      (draft every 12 months)→ per_payment = annual × 12/12
+ *
+ * Formula: per_payment = annual × (mode / 12)
+ * Validated against Max's DB paid_to_date gaps and Clarareesa Peay (mode 1,
+ * annual 712 → 59.33) and Jeffrey Garrett (mode 12, annual 164 → 164.00).
  */
-function monthlyPremium(annual: number | null, billingMode: number | null): number {
+function perPaymentPremium(annual: number | null, billingMode: number | null, policyNbr?: string): number {
   if (!annual) return 0;
-  const periods = Number(billingMode ?? 12);
-  const divisor = [1, 3, 6, 12].includes(periods) ? periods : 12;
-  return Math.round((annual / divisor) * 100) / 100;
+  const mode = Number(billingMode ?? 1);
+  if (![1, 3, 6, 12].includes(mode)) {
+    console.warn(`[lifecycle-direct] unexpected billing_mode=${billingMode} on policy ${policyNbr ?? "unknown"} — defaulting to monthly (mode 1)`);
+  }
+  const months = [1, 3, 6, 12].includes(mode) ? mode : 1;
+  return Math.round(annual * (months / 12) * 100) / 100;
 }
 
 // Plan-code → human-readable name (mirrors planCodes.ts).
@@ -216,7 +227,20 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200 });
   }
 
+  // Cron authentication: the pg_cron scheduled job must send X-Cron-Secret
+  // (validated against vault) AND X-Cron-Key (static secret set only in cron
+  // config, never in manual requests). Presence of a valid X-Cron-Key marks
+  // the invocation as scheduled-cron, which exempts it from the confirmation
+  // token gate below. Manual invocations (no X-Cron-Key) are never exempt.
   const cronSecret = req.headers.get("X-Cron-Secret") ?? "";
+  const cronKey    = req.headers.get("X-Cron-Key")    ?? "";
+  const expectedCronKey = Deno.env.get("LIFECYCLE_CRON_KEY") ?? "";
+  const isScheduledCron = expectedCronKey.length > 0 && cronKey === expectedCronKey;
+
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200 });
+  }
+
   if (cronSecret) {
     const { data: vault } = await supabase.rpc("get_cron_import_secret");
     if (!vault || vault !== cronSecret) {
@@ -228,9 +252,68 @@ Deno.serve(async (req: Request) => {
   const ghlConfig = loadGhlConfig();
   const nowMs = Date.now();
 
+  // Deploy identity — set at deploy time via: supabase secrets set DEPLOY_LIFECYCLE_SHA=<git-sha>
+  // Included in every response so dry-run previews can be verified against the repo.
+  const deployedSha = Deno.env.get("DEPLOY_LIFECYCLE_SHA") ?? "unknown";
+
   // Single-policy test filter: ?single_policy=20H6XXXXXX
+  // Live (non-dry) single-policy fires require a confirmation token to prevent accidental invocation.
+  // First call returns status="awaiting_confirmation" + a token. Second call with ?confirm=<token> fires.
+  // Tokens are single-use, stored in Supabase, expire after 5 minutes.
   let singlePolicy: string | null = null;
-  try { singlePolicy = new URL(req.url).searchParams.get("single_policy"); } catch { /* ignore */ }
+  let confirmToken: string | null = null;
+  try {
+    const params = new URL(req.url).searchParams;
+    singlePolicy  = params.get("single_policy");
+    confirmToken  = params.get("confirm");
+  } catch { /* ignore */ }
+
+  // Confirmation gate: ALL manual live fires require a confirmation token.
+  // Only the pg_cron scheduled run (authenticated via X-Cron-Key) is exempt.
+  // This applies to both single_policy and full-batch manual invocations.
+  const isManualLiveFire = !dry && !isScheduledCron;
+  if (isManualLiveFire) {
+    if (!confirmToken) {
+      // Generate a 6-char token, store in Supabase with 5-min TTL, return awaiting state
+      const token = Math.random().toString(36).slice(2, 8).toUpperCase();
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      const scopeLabel = singlePolicy ?? "__batch__";
+      await supabase.from("lifecycle_confirm_tokens").insert({
+        token, policy_number: scopeLabel, expires_at: expiresAt, used: false,
+      }).then(() => {/* best-effort */});
+      const confirmParam = singlePolicy
+        ? `?single_policy=${singlePolicy}&confirm=${token}`
+        : `?confirm=${token}`;
+      return new Response(
+        JSON.stringify({
+          status: "awaiting_confirmation",
+          deploy_sha: deployedSha,
+          scope: scopeLabel,
+          message: `Post this token in the ops thread and wait for explicit go. Then confirm with: ${confirmParam} (expires 5 min)`,
+          token,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    // Validate token
+    const tokenScope = singlePolicy ?? "__batch__";
+    const { data: tokenRow } = await supabase
+      .from("lifecycle_confirm_tokens")
+      .select("*")
+      .eq("token", confirmToken)
+      .eq("policy_number", tokenScope)
+      .eq("used", false)
+      .gte("expires_at", new Date().toISOString())
+      .maybeSingle();
+    if (!tokenRow) {
+      return new Response(
+        JSON.stringify({ error: "Invalid or expired confirmation token", deploy_sha: deployedSha }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    // Mark used immediately
+    await supabase.from("lifecycle_confirm_tokens").update({ used: true }).eq("token", confirmToken);
+  }
 
   // ── 1. Load agency gate ──────────────────────────────────────────────────
   const { data: agencyRows } = await supabase
@@ -473,7 +556,7 @@ Deno.serve(async (req: Request) => {
     if (singlePolicy) console.log(`[npn-trace] pn=${pn} agentWn=${agent.writingNumber} fallbackWn=${fallbackWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size} agentNumMapSize=${agentNumberByPolicy.size} agentNumEntry=${agentNumberByPolicy.get(pn)}`);
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
-    const monthly  = monthlyPremium(row.annual_premium, row.billing_mode);
+    const monthly  = perPaymentPremium(row.annual_premium, row.billing_mode, pn);
     const atRiskStatus = row.at_risk_policy;
 
     for (const ev of events) {
@@ -500,7 +583,10 @@ Deno.serve(async (req: Request) => {
         contract_reason:      contractReasonLabel(row.cntrct_reason ?? null),
         agent_npn:            npn,
         agency:               agencyName,
-        carrier:              "United American",
+        // TEMPORARY: carrier is not yet a column in Max's DB (raw.unl_fym_policy_latest_load).
+        // This feed is UNL (United National Life). Wire to carrier_name column when Max adds it.
+        // TODO: replace constant when carrier_name column is available.
+        carrier:              "UNL",
         agent_first_name:     agentFirst,
         agent_full_name:      agentFull,
         agent_writing_number: resolvedWn,
@@ -551,7 +637,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, dry, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
