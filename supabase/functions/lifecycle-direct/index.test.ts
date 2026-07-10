@@ -16,11 +16,13 @@ function usDate(d: unknown): string {
   return `${mm}/${dd}/${yyyy}`;
 }
 
-function monthlyPremium(annual: number | null, billingMode: number | null): number {
+// billing_mode = months per payment period
+// per_payment = annual x (mode / 12)
+function perPaymentPremium(annual: number | null, billingMode: number | null): number {
   if (!annual) return 0;
-  const periods = Number(billingMode ?? 12);
-  const divisor = [1, 3, 6, 12].includes(periods) ? periods : 12;
-  return Math.round((annual / divisor) * 100) / 100;
+  const mode = Number(billingMode ?? 1);
+  const months = [1, 3, 6, 12].includes(mode) ? mode : 1;
+  return Math.round(annual * (months / 12) * 100) / 100;
 }
 
 function titleCase(s: string): string {
@@ -53,30 +55,32 @@ Deno.test("usDate: invalid string returns empty string", () => {
   assertEquals(usDate("not-a-date"), "");
 });
 
-// ── monthlyPremium tests ──────────────────────────────────────────────────────
+// ── perPaymentPremium tests ───────────────────────────────────────────────────
+// Rule: per_payment = annual x (mode / 12)
+// mode = months per payment period (1=monthly, 3=quarterly, 6=semi-annual, 12=annual)
 
-Deno.test("monthlyPremium: quarterly (3) — 597.48 / 3 = 199.16", () => {
-  assertEquals(monthlyPremium(597.48, 3), 199.16);
+Deno.test("perPaymentPremium: mode 1 (monthly) - Clarareesa Peay: 712 x 1/12 = 59.33", () => {
+  assertEquals(perPaymentPremium(712, 1), 59.33);
 });
 
-Deno.test("monthlyPremium: monthly (12) — 596.28 / 12 = 49.69", () => {
-  assertEquals(monthlyPremium(596.28, 12), 49.69);
+Deno.test("perPaymentPremium: mode 3 (quarterly) - Karen Cauthen: 597.54 x 3/12 = 149.39", () => {
+  assertEquals(perPaymentPremium(597.54, 3), 149.39);
 });
 
-Deno.test("monthlyPremium: annual (1) — 596.28 / 1 = 596.28", () => {
-  assertEquals(monthlyPremium(596.28, 1), 596.28);
+Deno.test("perPaymentPremium: mode 6 (semi-annual) - 372.90 x 6/12 = 186.45", () => {
+  assertEquals(perPaymentPremium(372.90, 6), 186.45);
 });
 
-Deno.test("monthlyPremium: semi-annual (6) — 596.28 / 6 = 99.38", () => {
-  assertEquals(monthlyPremium(596.28, 6), 99.38);
+Deno.test("perPaymentPremium: mode 12 (annual) - Jeffrey Garrett: 164 x 12/12 = 164", () => {
+  assertEquals(perPaymentPremium(164, 12), 164);
 });
 
-Deno.test("monthlyPremium: null annual returns 0", () => {
-  assertEquals(monthlyPremium(null, 12), 0);
+Deno.test("perPaymentPremium: null annual returns 0", () => {
+  assertEquals(perPaymentPremium(null, 3), 0);
 });
 
-Deno.test("monthlyPremium: unknown billingMode falls back to 12", () => {
-  assertEquals(monthlyPremium(596.28, 99), 49.69);
+Deno.test("perPaymentPremium: unknown billingMode falls back to mode 1 (monthly)", () => {
+  assertEquals(perPaymentPremium(712, 99), 59.33);
 });
 
 // ── titleCase tests ───────────────────────────────────────────────────────────
