@@ -1,11 +1,17 @@
--- Upsert the lifecycle_cron_key in Supabase Vault so pg_cron can read it.
--- Value must match the LIFECYCLE_CRON_KEY function secret.
--- This migration is re-runnable: updates if exists, creates if not.
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM vault.secrets WHERE name = 'lifecycle_cron_key') THEN
-    UPDATE vault.secrets SET secret = '4043b25b1eaa06a00e5f260e660331a3fb197196b6f0777625cd3226c57d8dce' WHERE name = 'lifecycle_cron_key';
-  ELSE
-    PERFORM vault.create_secret('4043b25b1eaa06a00e5f260e660331a3fb197196b6f0777625cd3226c57d8dce', 'lifecycle_cron_key');
-  END IF;
-END$$;
+-- Upsert the lifecycle_cron_key in Supabase Vault so the pg_cron job can read it.
+--
+-- The plaintext value must match the LIFECYCLE_CRON_KEY function secret.
+-- The X-Cron-Key header sent by pg_cron is read from vault.decrypted_secrets;
+-- the edge function compares it against Deno.env.get("LIFECYCLE_CRON_KEY").
+-- Both must hold the same value or isScheduledCron=false and the cron tick
+-- hits the confirmation gate and stalls.
+--
+-- SECURITY: The actual secret value is NOT stored in this migration file.
+-- It was applied directly via the Supabase CLI on 2026-07-10 and lives only
+-- in the Supabase Vault (encrypted at rest) and in the function secrets store.
+-- To rotate: run `supabase secrets set LIFECYCLE_CRON_KEY=<new>` and then
+-- UPDATE vault.secrets SET secret='<new>' WHERE name='lifecycle_cron_key'.
+--
+-- This migration is a schema marker only — the vault entry was already applied.
+-- Re-running this is a no-op (the DO block is intentionally empty here).
+DO $$ BEGIN NULL; END $$;
