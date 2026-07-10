@@ -42,7 +42,8 @@ export type LobFieldAttr =
 // Global (non-LOB) custom field for the writing agent's NPN. ALWAYS written on
 // every push regardless of product — all GHL automations key on NPN
 // (Charlie, 2026-07-02). Field: contact.agent_npn.
-export const AGENT_NPN_FIELD_ID = "uEFOApsD4JKXsXH3T9E4";
+export const AGENT_NPN_FIELD_ID       = "uEFOApsD4JKXsXH3T9E4";
+export const AGENCY_SORTING_FIELD_ID  = "qSHUIp3GfPWHRGbPh1CM"; // Ancillary Agency | Sorting
 
 // Product tag applied to the contact so GHL can segment by line of business
 // (Charlie, 2026-07-02). Uses the existing GHL tag taxonomy (`<product> | sold
@@ -186,7 +187,8 @@ export interface LifecyclePayload {
   policy_number?: unknown;
   termination_date?: unknown;
   contract_reason?: unknown; // mapped label, goes to {lob}__terminated_reason
-  agent_npn?: unknown; // writing agent NPN -> global contact.agent_npn field
+  agent_npn?: unknown;           // writing agent NPN -> global contact.agent_npn field
+  agency?: unknown;              // sub-agency name -> Ancillary Agency | Sorting field
   carrier?: unknown;
   agent_first_name?: unknown;
   agent_full_name?: unknown;
@@ -241,9 +243,10 @@ export function buildGhlContactBody(
   const lob = lobKeyForPlanType(p.plan_type);
   const customFields: GhlCustomField[] = [];
 
-  // Agent NPN is global (not LOB-scoped) and ALWAYS included — GHL automations
-  // hinge on it (Charlie, 2026-07-02).
-  customFields.push({ id: AGENT_NPN_FIELD_ID, value: str(p.agent_npn) });
+  // Agent NPN + Agency sorting are global (not LOB-scoped) — GHL automations
+  // hinge on both (Charlie, 2026-07-02). Both must be present on every contact.
+  customFields.push({ id: AGENT_NPN_FIELD_ID,      value: str(p.agent_npn) });
+  customFields.push({ id: AGENCY_SORTING_FIELD_ID, value: str(p.agency) });
 
   if (lob) {
     const ids = LOB_FIELD_IDS[lob];

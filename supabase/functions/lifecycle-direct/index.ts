@@ -63,10 +63,19 @@ function cleanHost(raw: string): string {
   return raw.replace(/^https?:\/\//, "").replace(/\/$/, "").split(":")[0];
 }
 
-function usDate(d: string | null | undefined): string {
-  if (!d) return "";
-  const [y, m, day] = String(d).split("-");
-  return y ? `${m}/${day}/${y}` : "";
+/**
+ * Format a date value from Postgres (may arrive as Date object, ISO string, or
+ * YYYY-MM-DD string) into MM/DD/YYYY for GHL custom fields.
+ */
+function usDate(d: unknown): string {
+  if (d === null || d === undefined || d === "") return "";
+  // Postgres driver returns Date objects for date columns
+  const dt = d instanceof Date ? d : new Date(String(d));
+  if (isNaN(dt.getTime())) return "";
+  const mm  = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd  = String(dt.getUTCDate()).padStart(2, "0");
+  const yyyy = String(dt.getUTCFullYear());
+  return `${mm}/${dd}/${yyyy}`;
 }
 
 function billingModeLabel(code: number | string | null): string {
@@ -79,9 +88,16 @@ function billingModeLabel(code: number | string | null): string {
   }
 }
 
+/**
+ * Return the per-period premium from the annual amount.
+ * billing_mode is the number of payments per year (1=annual, 3=quarterly,
+ * 6=semi-annual, 12=monthly). Divides annual by periods and rounds to 2dp.
+ */
 function monthlyPremium(annual: number | null, billingMode: number | null): number {
   if (!annual) return 0;
-  return Math.round((annual / 12) * 100) / 100;
+  const periods = Number(billingMode ?? 12);
+  const divisor = [1, 3, 6, 12].includes(periods) ? periods : 12;
+  return Math.round((annual / divisor) * 100) / 100;
 }
 
 // Plan-code → human-readable name (mirrors planCodes.ts).
@@ -120,6 +136,19 @@ interface HierarchyNode {
   writing_number: string;
 }
 
+/**
+ * Title-case a name string. Preserves all-caps tokens that are 1-3 chars
+ * (e.g. DH, LLC, II, III) so abbreviations aren’t mangled to "Dh" / "Llc".
+ */
+function titleCase(s: string): string {
+  return s.split(/\s+/).filter(Boolean).map((w) => {
+    const upper = w.toUpperCase();
+    // Keep all-caps abbreviations (1-3 chars) as-is
+    if (upper === w && w.length <= 3) return upper;
+    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  }).join(" ");
+}
+
 function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   fullName: string;
   firstName: string;
@@ -130,13 +159,10 @@ function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   }
   const persons = hierarchy.filter((n) => n.is_person);
   const node = persons.length > 0 ? persons[persons.length - 1] : hierarchy[hierarchy.length - 1];
-  const parts = (node.name ?? "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+  const fullName = titleCase(node.name ?? "");
   return {
-    fullName: parts.join(" "),
-    firstName: parts[0] ?? "",
+    fullName,
+    firstName: fullName.split(" ")[0] ?? "",
     writingNumber: (node.writing_number ?? "").trim().toUpperCase(),
   };
 }
@@ -146,11 +172,7 @@ function agencyFromHierarchy(hierarchy: HierarchyNode[] | null): string {
   if (!hierarchy) return "";
   const depth2 = hierarchy.filter((n) => n.depth === "02" && !n.is_person);
   if (depth2.length === 0) return "";
-  return (depth2[0].name ?? "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(" ");
+  return titleCase(depth2[0].name ?? "");
 }
 
 function isDryRun(): boolean {
@@ -309,29 +331,52 @@ Deno.serve(async (req: Request) => {
   let prodRows: ProdRow[] = [];
   try {
     await sql.unsafe("SET statement_timeout = '120s'");
-    prodRows = await sql.unsafe(`
-      SELECT
-        TRIM(policy_nbr)            AS policy_nbr,
-        TRIM(first_name)            AS first_name,
-        TRIM(last_name)             AS last_name,
-        TRIM(cntrct_code)           AS cntrct_code,
-        TRIM(cntrct_reason)         AS cntrct_reason,
-        issue_date,
-        paid_to_date,
-        term_date,
-        billing_mode,
-        annual_premium,
-        TRIM(plan_code)             AS plan_code,
-        TRIM(billing_form)          AS billing_form,
-        at_risk_policy,
-        roster_hierarchy_json,
-        _dlt_load_id
-      FROM typed.unl_fym_policy_latest_load
-      WHERE plan_code ILIKE '%HI%'
-         OR plan_code ILIKE '%HHC%'
-         OR plan_code ILIKE '%GHI%'
-         OR plan_code ILIKE '%HIP%'
-    `) as ProdRow[];
+    const PLAN_FILTER = `plan_code ILIKE '%HI%' OR plan_code ILIKE '%HHC%' OR plan_code ILIKE '%GHI%' OR plan_code ILIKE '%HIP%'`;
+    const SELECT_LATEST = `
+      TRIM(policy_nbr)            AS policy_nbr,
+      TRIM(first_name)            AS first_name,
+      TRIM(last_name)             AS last_name,
+      TRIM(cntrct_code)           AS cntrct_code,
+      TRIM(cntrct_reason)         AS cntrct_reason,
+      issue_date, paid_to_date, term_date, billing_mode, annual_premium,
+      TRIM(plan_code)             AS plan_code,
+      TRIM(billing_form)          AS billing_form,
+      at_risk_policy, roster_hierarchy_json, _dlt_load_id
+    `;
+    const SELECT_FALLBACK = `
+      TRIM(policy_nbr)            AS policy_nbr,
+      TRIM(first_name)            AS first_name,
+      TRIM(last_name)             AS last_name,
+      TRIM(cntrct_code)           AS cntrct_code,
+      TRIM(cntrct_reason)         AS cntrct_reason,
+      issue_date, paid_to_date, term_date, billing_mode, annual_premium,
+      TRIM(plan_code)             AS plan_code,
+      TRIM(billing_form)          AS billing_form,
+      at_risk_policy, _dlt_load_id,
+      jsonb_build_array(
+        jsonb_build_object('depth','01','name',TRIM(mga_name),'writing_number',TRIM(mga),'is_person',false),
+        jsonb_build_object('depth','02','name',TRIM(ga_name),'writing_number',TRIM(ga),'is_person',false)
+      ) AS roster_hierarchy_json
+    `;
+    prodRows = await sql.unsafe(
+      `SELECT ${SELECT_LATEST} FROM typed.unl_fym_policy_latest_load WHERE ${PLAN_FILTER}`
+    ) as ProdRow[];
+    // Fallback: if latest_load is empty (new file landed but DLT ingest not yet run),
+    // query the previous fully-ingested file directly so daily crons aren't skipped.
+    if (prodRows.length === 0) {
+      console.log("[lifecycle-direct] latest_load empty — falling back to prev file");
+      prodRows = await sql.unsafe(`
+        WITH prev_file AS (
+          SELECT _source_file FROM typed.unl_fym_policy
+          GROUP BY _source_file ORDER BY MAX(_dlt_load_id) DESC LIMIT 1
+        )
+        SELECT ${SELECT_FALLBACK}
+        FROM typed.unl_fym_policy p
+        JOIN prev_file pf ON pf._source_file = p._source_file
+        WHERE ${PLAN_FILTER}
+      `) as ProdRow[];
+      console.log("[lifecycle-direct] fallback returned " + prodRows.length + " rows");
+    }
   } finally {
     try { await sql.end(); } catch { /* ignore */ }
   }
@@ -413,8 +458,8 @@ Deno.serve(async (req: Request) => {
 
     for (const ev of events) {
       const payload: LifecyclePayload = {
-        client_first_name:    (row.first_name ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        client_last_name:     (row.last_name  ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        client_first_name:    titleCase((row.first_name ?? "").trim()),
+        client_last_name:     titleCase((row.last_name  ?? "").trim()),
         phone:                phoneByPolicy.get(pn) ?? "",
         email:                "",
         address:              "",
