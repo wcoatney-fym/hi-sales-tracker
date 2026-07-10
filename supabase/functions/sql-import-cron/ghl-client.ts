@@ -267,8 +267,8 @@ export function buildGhlContactBody(
     put("termination_date", str(p.termination_date));
   }
 
-  const tags = ["lifecycle", `trigger-${p.trigger}`];
-  if (lob) tags.push(PRODUCT_TAG[lob]);
+  // Only pass the product | sold client tag — no internal lifecycle/trigger tags in GHL.
+  const tags = lob ? [PRODUCT_TAG[lob]] : [];
 
   const email = str(p.email).trim();
   const phone = str(p.phone).trim();
