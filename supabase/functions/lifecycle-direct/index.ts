@@ -205,6 +205,13 @@ Deno.serve(async (req: Request) => {
   const ghlConfig = loadGhlConfig();
   const nowMs = Date.now();
 
+  // Optional single-policy scope for test fires (pass {"single_policy": "20H6XXXXXX"}).
+  let singlePolicy: string | null = null;
+  try {
+    const body = await req.clone().json();
+    if (body?.single_policy) singlePolicy = String(body.single_policy).trim();
+  } catch { /* empty body fine */ }
+
   // ── 1. Load agency gate ──────────────────────────────────────────────────
   const { data: agencyRows } = await supabase
     .from("agencies")
@@ -248,16 +255,18 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // ── 2b. Build phone lookup from form_submissions ──────────────────────────
-  // Max's DB has no contact info; form_submissions has phone from the intake form.
-  const phoneByPolicy = new Map<string, string>();
-  const { data: contactRows } = await supabase
+  // ── 2b. Agent-number fallback for agencies whose hierarchy has no person node
+  // (e.g. DH Insurance Group — all hierarchy nodes are org-level, individual writing
+  // number lives only in form_submissions.agent_number). Used as secondary NPN lookup.
+  const agentNumberByPolicy = new Map<string, string>();
+  const { data: agentNumRows } = await supabase
     .from("form_submissions")
-    .select("policy_number, phone")
-    .not("phone", "is", null)
-    .neq("phone", "");
-  for (const c of contactRows ?? []) {
-    if (c.policy_number && c.phone) phoneByPolicy.set(c.policy_number as string, c.phone as string);
+    .select("policy_number, agent_number")
+    .not("agent_number", "is", null)
+    .neq("agent_number", "");
+  for (const r of agentNumRows ?? []) {
+    if (r.policy_number && r.agent_number)
+      agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
   }
 
   // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
@@ -327,6 +336,7 @@ Deno.serve(async (req: Request) => {
   for (const row of prodRows) {
     const pn = (row.policy_nbr ?? "").trim();
     if (!pn) continue;
+    if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
 
     // Resolve agency from hierarchy.
     const hierarchy = row.roster_hierarchy_json ?? [];
@@ -383,7 +393,12 @@ Deno.serve(async (req: Request) => {
 
     // Resolve agent.
     const agent = agentFromHierarchy(hierarchy);
-    const npn   = npnByWritingNumber.get(agent.writingNumber) ?? "";
+    // Primary: resolve NPN from hierarchy writing number.
+    // Fallback: if hierarchy has no person node (e.g. DH — org-only hierarchy),
+    // use form_submissions.agent_number to find the individual writing number.
+    const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
+    const npn = npnByWritingNumber.get(agent.writingNumber)
+             ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
     const monthly  = monthlyPremium(row.annual_premium, row.billing_mode);
@@ -391,8 +406,8 @@ Deno.serve(async (req: Request) => {
 
     for (const ev of events) {
       const payload: LifecyclePayload = {
-        client_first_name:    (row.first_name ?? "").trim().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        client_last_name:     (row.last_name  ?? "").trim().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        client_first_name:    (row.first_name ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        client_last_name:     (row.last_name  ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
         phone:                phoneByPolicy.get(pn) ?? "",
         email:                "",
         address:              "",
@@ -460,7 +475,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig }),
+    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, single_policy: singlePolicy ?? undefined }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
