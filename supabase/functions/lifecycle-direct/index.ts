@@ -386,6 +386,7 @@ Deno.serve(async (req: Request) => {
   const auditRows:    Record<string, unknown>[] = [];
   let   fired = 0;
   let   skipped = 0;
+  let   dryRunPayload: unknown = undefined; // populated in single-policy dry-run
 
   for (const row of prodRows) {
     const pn = (row.policy_nbr ?? "").trim();
@@ -488,7 +489,11 @@ Deno.serve(async (req: Request) => {
       };
 
       if (dry) {
-        console.log(`[lifecycle-direct:dry-run] ${ev.trigger} ${pn}`, JSON.stringify(payload));
+        // In single-policy dry-run, build the full GHL request body and return it
+        // in the response so the payload can be reviewed field-by-field before any live fire.
+        const dryBody = ghlConfig ? buildGhlContactBody(payload, ghlConfig.locationId) : null;
+        console.log(`[lifecycle-direct:dry-run] ${ev.trigger} ${pn}`, JSON.stringify(dryBody ?? payload));
+        if (singlePolicy) dryRunPayload = dryBody;
         auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: true, dry_run: true, error: null, http_status: null, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
         fired++;
         continue;
@@ -527,7 +532,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
