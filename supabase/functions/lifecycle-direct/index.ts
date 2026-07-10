@@ -207,7 +207,8 @@ Deno.serve(async (req: Request) => {
 
   // Optional single-policy scope for test fires (pass {"single_policy": "20H6XXXXXX"}).
   // Read via URL param to avoid consuming the already-read request body.
-  const singlePolicy: string | null = new URL(req.url).searchParams.get("single_policy");
+  let singlePolicy: string | null = null;
+  try { singlePolicy = new URL(req.url).searchParams.get("single_policy"); } catch { /* ignore */ }
 
   // ── 1. Load agency gate ──────────────────────────────────────────────────
   const { data: agencyRows } = await supabase
@@ -260,7 +261,8 @@ Deno.serve(async (req: Request) => {
     .from("form_submissions")
     .select("policy_number, agent_number")
     .not("agent_number", "is", null)
-    .neq("agent_number", "");
+    .neq("agent_number", "")
+    .limit(50000);
   for (const r of agentNumRows ?? []) {
     if (r.policy_number && r.agent_number)
       agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
