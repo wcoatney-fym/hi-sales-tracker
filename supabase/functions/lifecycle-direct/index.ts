@@ -646,6 +646,18 @@ Deno.serve(async (req: Request) => {
 
   return new Response(
     JSON.stringify({ ok: true, fired, skipped, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+  // Write a lifecycle_cron_runs row on every invocation so cron_auth is
+  // observable from the DB without relying on pg_net response retention.
+  // Best-effort: failure here must not affect the main response.
+  supabase.from("lifecycle_cron_runs").insert({
+    cron_auth:  isScheduledCron,
+    dry,
+    fired,
+    skipped,
+    deploy_sha: deployedSha,
+  }).then(() => { /* best-effort */ }).catch((e: Error) => {
+    console.error("[lifecycle-direct] cron_runs insert failed (non-fatal):", e.message);
+  });
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
