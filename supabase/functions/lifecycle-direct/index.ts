@@ -248,6 +248,18 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ── 2b. Build phone lookup from form_submissions ──────────────────────────
+  // Max's DB has no contact info; form_submissions has phone from the intake form.
+  const phoneByPolicy = new Map<string, string>();
+  const { data: contactRows } = await supabase
+    .from("form_submissions")
+    .select("policy_number, phone")
+    .not("phone", "is", null)
+    .neq("phone", "");
+  for (const c of contactRows ?? []) {
+    if (c.policy_number && c.phone) phoneByPolicy.set(c.policy_number as string, c.phone as string);
+  }
+
   // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
   const { data: priorRows } = await supabase
     .from("lifecycle_policy_state")
@@ -381,7 +393,7 @@ Deno.serve(async (req: Request) => {
       const payload: LifecyclePayload = {
         client_first_name:    (row.first_name ?? "").trim().replace(/\b\w/g, (c: string) => c.toUpperCase()),
         client_last_name:     (row.last_name  ?? "").trim().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        phone:                "",
+        phone:                phoneByPolicy.get(pn) ?? "",
         email:                "",
         address:              "",
         city:                 "",

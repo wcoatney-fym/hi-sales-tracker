@@ -321,7 +321,9 @@ export async function pushContactToGhl(
   body: GhlContactBody,
 ): Promise<GhlPushResult> {
   try {
-    const resp = await fetch(`${cfg.apiBase}/contacts/upsert`, {
+    // Use /contacts/ (POST create) — upsert requires email or phone which
+    // the lifecycle runner doesn't always have. Dedup handled in GHL subaccount layer.
+    const resp = await fetch(`${cfg.apiBase}/contacts/`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${cfg.token}`,
