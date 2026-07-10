@@ -63,10 +63,19 @@ function cleanHost(raw: string): string {
   return raw.replace(/^https?:\/\//, "").replace(/\/$/, "").split(":")[0];
 }
 
-function usDate(d: string | null | undefined): string {
-  if (!d) return "";
-  const [y, m, day] = String(d).split("-");
-  return y ? `${m}/${day}/${y}` : "";
+/**
+ * Format a date value from Postgres (may arrive as Date object, ISO string, or
+ * YYYY-MM-DD string) into MM/DD/YYYY for GHL custom fields.
+ */
+function usDate(d: unknown): string {
+  if (d === null || d === undefined || d === "") return "";
+  // Postgres driver returns Date objects for date columns
+  const dt = d instanceof Date ? d : new Date(String(d));
+  if (isNaN(dt.getTime())) return "";
+  const mm  = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd  = String(dt.getUTCDate()).padStart(2, "0");
+  const yyyy = String(dt.getUTCFullYear());
+  return `${mm}/${dd}/${yyyy}`;
 }
 
 function billingModeLabel(code: number | string | null): string {
@@ -79,9 +88,16 @@ function billingModeLabel(code: number | string | null): string {
   }
 }
 
+/**
+ * Return the per-period premium from the annual amount.
+ * billing_mode is the number of payments per year (1=annual, 3=quarterly,
+ * 6=semi-annual, 12=monthly). Divides annual by periods and rounds to 2dp.
+ */
 function monthlyPremium(annual: number | null, billingMode: number | null): number {
   if (!annual) return 0;
-  return Math.round((annual / 12) * 100) / 100;
+  const periods = Number(billingMode ?? 12);
+  const divisor = [1, 3, 6, 12].includes(periods) ? periods : 12;
+  return Math.round((annual / divisor) * 100) / 100;
 }
 
 // Plan-code → human-readable name (mirrors planCodes.ts).
@@ -120,6 +136,19 @@ interface HierarchyNode {
   writing_number: string;
 }
 
+/**
+ * Title-case a name string. Preserves all-caps tokens that are 1-3 chars
+ * (e.g. DH, LLC, II, III) so abbreviations aren’t mangled to "Dh" / "Llc".
+ */
+function titleCase(s: string): string {
+  return s.split(/\s+/).filter(Boolean).map((w) => {
+    const upper = w.toUpperCase();
+    // Keep all-caps abbreviations (1-3 chars) as-is
+    if (upper === w && w.length <= 3) return upper;
+    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  }).join(" ");
+}
+
 function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   fullName: string;
   firstName: string;
@@ -130,13 +159,10 @@ function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   }
   const persons = hierarchy.filter((n) => n.is_person);
   const node = persons.length > 0 ? persons[persons.length - 1] : hierarchy[hierarchy.length - 1];
-  const parts = (node.name ?? "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+  const fullName = titleCase(node.name ?? "");
   return {
-    fullName: parts.join(" "),
-    firstName: parts[0] ?? "",
+    fullName,
+    firstName: fullName.split(" ")[0] ?? "",
     writingNumber: (node.writing_number ?? "").trim().toUpperCase(),
   };
 }
@@ -146,11 +172,7 @@ function agencyFromHierarchy(hierarchy: HierarchyNode[] | null): string {
   if (!hierarchy) return "";
   const depth2 = hierarchy.filter((n) => n.depth === "02" && !n.is_person);
   if (depth2.length === 0) return "";
-  return (depth2[0].name ?? "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(" ");
+  return titleCase(depth2[0].name ?? "");
 }
 
 function isDryRun(): boolean {
@@ -162,11 +184,12 @@ interface ProdRow {
   policy_nbr: string;
   first_name: string;
   last_name: string;
+  phone_nbr: string | null;          // bigint cast to text in SELECT
   cntrct_code: string | null;
   cntrct_reason: string | null;
-  issue_date: string | null;
-  paid_to_date: string | null;
-  term_date: string | null;
+  issue_date: unknown;               // Postgres date — arrives as Date object
+  paid_to_date: unknown;
+  term_date: unknown;
   billing_mode: number | null;
   annual_premium: number | null;
   plan_code: string | null;
@@ -228,7 +251,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 2. Build NPN lookup (agents table primary, agency_rosters fallback) ──
-  const npnByWritingNumber = new Map<string, string>();
+  const npnByWritingNumber  = new Map<string, string>();
+  const nameByWritingNumber = new Map<string, { first: string; full: string }>();
 
   const { data: agentsList } = await supabase
     .from("agents")
@@ -241,7 +265,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: rosterList } = await supabase
     .from("agency_rosters")
-    .select("writing_number, npn")
+    .select("writing_number, npn, agent_first_name, agent_last_name")
     .eq("status", "active")
     .not("npn", "is", null)
     .neq("npn", "");
@@ -250,32 +274,40 @@ Deno.serve(async (req: Request) => {
     if (wn && r.npn && !npnByWritingNumber.has(wn)) {
       npnByWritingNumber.set(wn, r.npn as string);
     }
+    if (wn && (r.agent_first_name || r.agent_last_name)) {
+      const first = titleCase(String(r.agent_first_name ?? ""));
+      const last  = titleCase(String(r.agent_last_name  ?? ""));
+      nameByWritingNumber.set(wn, { first, full: `${first} ${last}`.trim() });
+    }
   }
 
-  // ── 2b. Build phone lookup from form_submissions ──────────────────────────
-  // Max's DB has no contact info; form_submissions has phone from the intake form.
-  const phoneByPolicy = new Map<string, string>();
-  const { data: contactRows } = await supabase
-    .from("form_submissions")
-    .select("policy_number, phone")
-    .not("phone", "is", null)
-    .neq("phone", "");
-  for (const c of contactRows ?? []) {
-    if (c.policy_number && c.phone) phoneByPolicy.set(c.policy_number as string, c.phone as string);
-  }
+  // Phone comes directly from phone_nbr on Max's DB (bigint cast to text in SELECT).
 
   // ── 2b. Agent writing-number lookup (form_submissions) for agencies whose
   // hierarchy carries no person node (e.g. DH Insurance Group). Used as NPN fallback.
+  // Scoped to GHL-enabled agency names to stay under PostgREST's 1000-row page cap.
+  const enabledAgencyNames = agencyRows
+    ?.filter((a) => a.ghl_api_enabled)
+    .map((a) => (a.name as string).toLowerCase()) ?? [];
   const agentNumberByPolicy = new Map<string, string>();
-  const { data: agentNumRows } = await supabase
-    .from("form_submissions")
-    .select("policy_number, agent_number")
-    .not("agent_number", "is", null)
-    .neq("agent_number", "")
-    .limit(50000);
-  for (const r of agentNumRows ?? []) {
-    if (r.policy_number && r.agent_number)
-      agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+  if (enabledAgencyNames.length > 0) {
+    // Fetch agent_number only for GHL-enabled agencies, using exact agency name matches
+    // from the agencies table. This keeps us under PostgREST's 1000-row page limit.
+    const enabledAgencyNamesOriginal = agencyRows
+      ?.filter((a) => a.ghl_api_enabled)
+      .map((a) => a.name as string) ?? [];
+    for (const agencyName of enabledAgencyNamesOriginal) {
+      const { data: agentNumRows } = await supabase
+        .from("form_submissions")
+        .select("policy_number, agent_number")
+        .ilike("agency", agencyName)
+        .not("agent_number", "is", null)
+        .neq("agent_number", "");
+      for (const r of agentNumRows ?? []) {
+        if (r.policy_number && r.agent_number)
+          agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+      }
+    }
   }
 
   // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
@@ -309,29 +341,54 @@ Deno.serve(async (req: Request) => {
   let prodRows: ProdRow[] = [];
   try {
     await sql.unsafe("SET statement_timeout = '120s'");
-    prodRows = await sql.unsafe(`
-      SELECT
-        TRIM(policy_nbr)            AS policy_nbr,
-        TRIM(first_name)            AS first_name,
-        TRIM(last_name)             AS last_name,
-        TRIM(cntrct_code)           AS cntrct_code,
-        TRIM(cntrct_reason)         AS cntrct_reason,
-        issue_date,
-        paid_to_date,
-        term_date,
-        billing_mode,
-        annual_premium,
-        TRIM(plan_code)             AS plan_code,
-        TRIM(billing_form)          AS billing_form,
-        at_risk_policy,
-        roster_hierarchy_json,
-        _dlt_load_id
-      FROM typed.unl_fym_policy_latest_load
-      WHERE plan_code ILIKE '%HI%'
-         OR plan_code ILIKE '%HHC%'
-         OR plan_code ILIKE '%GHI%'
-         OR plan_code ILIKE '%HIP%'
-    `) as ProdRow[];
+    const PLAN_FILTER = `plan_code ILIKE '%HI%' OR plan_code ILIKE '%HHC%' OR plan_code ILIKE '%GHI%' OR plan_code ILIKE '%HIP%'`;
+    const SELECT_LATEST = `
+      TRIM(policy_nbr)            AS policy_nbr,
+      TRIM(first_name)            AS first_name,
+      TRIM(last_name)             AS last_name,
+      TRIM(phone_nbr::text)        AS phone_nbr,
+      TRIM(cntrct_code)           AS cntrct_code,
+      TRIM(cntrct_reason)         AS cntrct_reason,
+      issue_date, paid_to_date, term_date, billing_mode, annual_premium,
+      TRIM(plan_code)             AS plan_code,
+      TRIM(billing_form)          AS billing_form,
+      at_risk_policy, roster_hierarchy_json, _dlt_load_id
+    `;
+    const SELECT_FALLBACK = `
+      TRIM(policy_nbr)            AS policy_nbr,
+      TRIM(first_name)            AS first_name,
+      TRIM(last_name)             AS last_name,
+      TRIM(phone_nbr::text)        AS phone_nbr,
+      TRIM(cntrct_code)           AS cntrct_code,
+      TRIM(cntrct_reason)         AS cntrct_reason,
+      issue_date, paid_to_date, term_date, billing_mode, annual_premium,
+      TRIM(plan_code)             AS plan_code,
+      TRIM(billing_form)          AS billing_form,
+      at_risk_policy, _dlt_load_id,
+      jsonb_build_array(
+        jsonb_build_object('depth','01','name',TRIM(mga_name),'writing_number',TRIM(mga),'is_person',false),
+        jsonb_build_object('depth','02','name',TRIM(ga_name),'writing_number',TRIM(ga),'is_person',false)
+      ) AS roster_hierarchy_json
+    `;
+    prodRows = await sql.unsafe(
+      `SELECT ${SELECT_LATEST} FROM typed.unl_fym_policy_latest_load WHERE ${PLAN_FILTER}`
+    ) as ProdRow[];
+    // Fallback: if latest_load is empty (new file landed but DLT ingest not yet run),
+    // query the previous fully-ingested file directly so daily crons aren't skipped.
+    if (prodRows.length === 0) {
+      console.log("[lifecycle-direct] latest_load empty — falling back to prev file");
+      prodRows = await sql.unsafe(`
+        WITH prev_file AS (
+          SELECT _source_file FROM typed.unl_fym_policy
+          GROUP BY _source_file ORDER BY MAX(_dlt_load_id) DESC LIMIT 1
+        )
+        SELECT ${SELECT_FALLBACK}
+        FROM typed.unl_fym_policy p
+        JOIN prev_file pf ON pf._source_file = p._source_file
+        WHERE ${PLAN_FILTER}
+      `) as ProdRow[];
+      console.log("[lifecycle-direct] fallback returned " + prodRows.length + " rows");
+    }
   } finally {
     try { await sql.end(); } catch { /* ignore */ }
   }
@@ -341,6 +398,7 @@ Deno.serve(async (req: Request) => {
   const auditRows:    Record<string, unknown>[] = [];
   let   fired = 0;
   let   skipped = 0;
+  let   dryRunPayload: unknown = undefined; // populated in single-policy dry-run
 
   for (const row of prodRows) {
     const pn = (row.policy_nbr ?? "").trim();
@@ -406,6 +464,13 @@ Deno.serve(async (req: Request) => {
     const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
     const npn = npnByWritingNumber.get(agent.writingNumber)
              ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
+    // When hierarchy has no person node (e.g. DH — all org nodes), resolve agent
+    // name from the roster using the fallback writing number.
+    const resolvedWn   = npn && fallbackWn ? fallbackWn : agent.writingNumber;
+    const rosterName   = nameByWritingNumber.get(resolvedWn);
+    const agentFirst   = rosterName?.first ?? agent.firstName;
+    const agentFull    = rosterName?.full  ?? agent.fullName;
+    if (singlePolicy) console.log(`[npn-trace] pn=${pn} agentWn=${agent.writingNumber} fallbackWn=${fallbackWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size} agentNumMapSize=${agentNumberByPolicy.size} agentNumEntry=${agentNumberByPolicy.get(pn)}`);
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
     const monthly  = monthlyPremium(row.annual_premium, row.billing_mode);
@@ -413,9 +478,9 @@ Deno.serve(async (req: Request) => {
 
     for (const ev of events) {
       const payload: LifecyclePayload = {
-        client_first_name:    (row.first_name ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        client_last_name:     (row.last_name  ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        phone:                phoneByPolicy.get(pn) ?? "",
+        client_first_name:    titleCase((row.first_name ?? "").trim()),
+        client_last_name:     titleCase((row.last_name  ?? "").trim()),
+        phone:                (row.phone_nbr ?? "").trim(),
         email:                "",
         address:              "",
         city:                 "",
@@ -436,14 +501,18 @@ Deno.serve(async (req: Request) => {
         agent_npn:            npn,
         agency:               agencyName,
         carrier:              "United American",
-        agent_first_name:     agent.firstName,
-        agent_full_name:      agent.fullName,
-        agent_writing_number: agent.writingNumber,
+        agent_first_name:     agentFirst,
+        agent_full_name:      agentFull,
+        agent_writing_number: resolvedWn,
         trigger:              ev.trigger,
       };
 
       if (dry) {
-        console.log(`[lifecycle-direct:dry-run] ${ev.trigger} ${pn}`, JSON.stringify(payload));
+        // In single-policy dry-run, build the full GHL request body and return it
+        // in the response so the payload can be reviewed field-by-field before any live fire.
+        const dryBody = ghlConfig ? buildGhlContactBody(payload, ghlConfig.locationId) : null;
+        console.log(`[lifecycle-direct:dry-run] ${ev.trigger} ${pn}`, JSON.stringify(dryBody ?? payload));
+        if (singlePolicy) dryRunPayload = dryBody;
         auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: true, dry_run: true, error: null, http_status: null, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
         fired++;
         continue;
@@ -482,7 +551,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
