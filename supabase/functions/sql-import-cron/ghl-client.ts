@@ -270,12 +270,16 @@ export function buildGhlContactBody(
   const tags = ["lifecycle", `trigger-${p.trigger}`];
   if (lob) tags.push(PRODUCT_TAG[lob]);
 
+  const email = str(p.email).trim();
+  const phone = str(p.phone).trim();
+
   return {
     locationId,
     firstName: str(p.client_first_name),
     lastName: str(p.client_last_name),
-    email: str(p.email),
-    phone: str(p.phone),
+    // Omit email/phone entirely when blank — GHL 422s on empty string format validation
+    ...(email ? { email } : {}),
+    ...(phone ? { phone } : {}),
     address1: str(p.address),
     city: str(p.city),
     state: str(p.state),
@@ -283,7 +287,7 @@ export function buildGhlContactBody(
     source: "activity-tracker-lifecycle",
     tags,
     customFields,
-  };
+  } as GhlContactBody;
 }
 
 export interface GhlConfig {
