@@ -180,7 +180,12 @@ interface ProdRow {
 Deno.serve(async (req: Request) => {
   // Auth: cron secret header (same mechanism as sql-import-cron).
   const supabaseUrl  = Deno.env.get("SUPABASE_URL")!;
-  const serviceKey   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  // Use new-format secret key (sb_secret_...) — legacy SUPABASE_SERVICE_ROLE_KEY JWT
+  // was disabled on this project 2026-06-16. Fall back to legacy key if secret key absent.
+  const serviceKey   = Deno.env.get("SB_SECRET_KEY") ||
+                       Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
+  console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
+  console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_HIP_PORTAL")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
   const supabase     = createClient(supabaseUrl, serviceKey);
 
   // Verify cron secret (skip on OPTIONS).
@@ -199,6 +204,10 @@ Deno.serve(async (req: Request) => {
   const dry = isDryRun();
   const ghlConfig = loadGhlConfig();
   const nowMs = Date.now();
+
+  // Single-policy test filter: ?single_policy=20H6XXXXXX
+  let singlePolicy: string | null = null;
+  try { singlePolicy = new URL(req.url).searchParams.get("single_policy"); } catch { /* ignore */ }
 
   // ── 1. Load agency gate ──────────────────────────────────────────────────
   const { data: agencyRows } = await supabase
@@ -241,6 +250,32 @@ Deno.serve(async (req: Request) => {
     if (wn && r.npn && !npnByWritingNumber.has(wn)) {
       npnByWritingNumber.set(wn, r.npn as string);
     }
+  }
+
+  // ── 2b. Build phone lookup from form_submissions ──────────────────────────
+  // Max's DB has no contact info; form_submissions has phone from the intake form.
+  const phoneByPolicy = new Map<string, string>();
+  const { data: contactRows } = await supabase
+    .from("form_submissions")
+    .select("policy_number, phone")
+    .not("phone", "is", null)
+    .neq("phone", "");
+  for (const c of contactRows ?? []) {
+    if (c.policy_number && c.phone) phoneByPolicy.set(c.policy_number as string, c.phone as string);
+  }
+
+  // ── 2b. Agent writing-number lookup (form_submissions) for agencies whose
+  // hierarchy carries no person node (e.g. DH Insurance Group). Used as NPN fallback.
+  const agentNumberByPolicy = new Map<string, string>();
+  const { data: agentNumRows } = await supabase
+    .from("form_submissions")
+    .select("policy_number, agent_number")
+    .not("agent_number", "is", null)
+    .neq("agent_number", "")
+    .limit(50000);
+  for (const r of agentNumRows ?? []) {
+    if (r.policy_number && r.agent_number)
+      agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
   }
 
   // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
@@ -365,8 +400,12 @@ Deno.serve(async (req: Request) => {
     if (events.length === 0) continue;
 
     // Resolve agent.
+    if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
+
     const agent = agentFromHierarchy(hierarchy);
-    const npn   = npnByWritingNumber.get(agent.writingNumber) ?? "";
+    const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
+    const npn = npnByWritingNumber.get(agent.writingNumber)
+             ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
     const monthly  = monthlyPremium(row.annual_premium, row.billing_mode);
@@ -374,9 +413,9 @@ Deno.serve(async (req: Request) => {
 
     for (const ev of events) {
       const payload: LifecyclePayload = {
-        client_first_name:    (row.first_name ?? "").trim().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        client_last_name:     (row.last_name  ?? "").trim().replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        phone:                "",
+        client_first_name:    (row.first_name ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        client_last_name:     (row.last_name  ?? "").trim().toLowerCase().replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        phone:                phoneByPolicy.get(pn) ?? "",
         email:                "",
         address:              "",
         city:                 "",
@@ -418,7 +457,7 @@ Deno.serve(async (req: Request) => {
       } else {
         console.warn(`[lifecycle-direct] no GHL config; skipped ${ev.trigger} ${pn}`);
         auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
-        fired++;
+        // do NOT increment fired — no GHL config means nothing was pushed
       }
     }
   }
@@ -443,7 +482,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length }),
+    JSON.stringify({ ok: true, fired, skipped, dry, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });

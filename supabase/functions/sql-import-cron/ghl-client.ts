@@ -267,15 +267,19 @@ export function buildGhlContactBody(
     put("termination_date", str(p.termination_date));
   }
 
-  const tags = ["lifecycle", `trigger-${p.trigger}`];
-  if (lob) tags.push(PRODUCT_TAG[lob]);
+  // Only pass the product | sold client tag — no internal lifecycle/trigger tags in GHL.
+  const tags = lob ? [PRODUCT_TAG[lob]] : [];
+
+  const email = str(p.email).trim();
+  const phone = str(p.phone).trim();
 
   return {
     locationId,
     firstName: str(p.client_first_name),
     lastName: str(p.client_last_name),
-    email: str(p.email),
-    phone: str(p.phone),
+    // Omit email/phone entirely when blank — GHL 422s on empty string format validation
+    ...(email ? { email } : {}),
+    ...(phone ? { phone } : {}),
     address1: str(p.address),
     city: str(p.city),
     state: str(p.state),
@@ -283,7 +287,7 @@ export function buildGhlContactBody(
     source: "activity-tracker-lifecycle",
     tags,
     customFields,
-  };
+  } as GhlContactBody;
 }
 
 export interface GhlConfig {
@@ -321,7 +325,9 @@ export async function pushContactToGhl(
   body: GhlContactBody,
 ): Promise<GhlPushResult> {
   try {
-    const resp = await fetch(`${cfg.apiBase}/contacts/upsert`, {
+    // Use /contacts/ (POST create) — upsert requires email or phone which
+    // the lifecycle runner doesn't always have. Dedup handled in GHL subaccount layer.
+    const resp = await fetch(`${cfg.apiBase}/contacts/`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${cfg.token}`,
