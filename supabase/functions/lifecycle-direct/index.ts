@@ -206,11 +206,8 @@ Deno.serve(async (req: Request) => {
   const nowMs = Date.now();
 
   // Optional single-policy scope for test fires (pass {"single_policy": "20H6XXXXXX"}).
-  let singlePolicy: string | null = null;
-  try {
-    const body = await req.clone().json();
-    if (body?.single_policy) singlePolicy = String(body.single_policy).trim();
-  } catch { /* empty body fine */ }
+  // Read via URL param to avoid consuming the already-read request body.
+  const singlePolicy: string | null = new URL(req.url).searchParams.get("single_policy");
 
   // ── 1. Load agency gate ──────────────────────────────────────────────────
   const { data: agencyRows } = await supabase
