@@ -257,15 +257,16 @@ Deno.serve(async (req: Request) => {
   // confirmation gate fires or an error short-circuits the main loop.
   // Best-effort — failure must not affect the caller's response.
   async function writeCronRun(opts: { fired?: number; skipped?: number }) {
-    await supabase.from("lifecycle_cron_runs").insert({
+    supabase.from("lifecycle_cron_runs").insert({
       cron_auth:  isScheduledCron,
       dry,
       fired:      opts.fired   ?? 0,
       skipped:    opts.skipped ?? 0,
       deploy_sha: deployedSha,
-    }).then(() => { /* best-effort */ }).catch((e: Error) => {
-      console.error("[lifecycle-direct] cron_runs insert failed (non-fatal):", e.message);
-    });
+    }).then(
+      () => { /* best-effort */ },
+      (e: Error) => { console.error("[lifecycle-direct] cron_runs insert failed (non-fatal):", e.message); }
+    );
   }
 
   // Deploy identity — set at deploy time via: supabase secrets set DEPLOY_LIFECYCLE_SHA=<git-sha>
@@ -523,8 +524,8 @@ Deno.serve(async (req: Request) => {
       contract_code:         row.cntrct_code ?? null,
       billing_mode:          row.billing_mode != null ? String(row.billing_mode) : null,
       billing_form:          row.billing_form ?? null,
-      policy_effective_date: row.issue_date   ?? null,
-      paid_to_date:          row.paid_to_date ?? null,
+      policy_effective_date: row.issue_date   ? usDate(row.issue_date)   : null,
+      paid_to_date:          row.paid_to_date ? usDate(row.paid_to_date) : null,
       contract_reason:       row.cntrct_reason ?? null,
     };
 
