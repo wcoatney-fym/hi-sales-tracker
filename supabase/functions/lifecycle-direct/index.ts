@@ -426,9 +426,10 @@ Deno.serve(async (req: Request) => {
   // ── 6. Persist state + audit in bulk (best-effort) ───────────────────────
   try {
     for (let i = 0; i < stateUpserts.length; i += 500) {
-      await supabase
+      const { error: upsertErr } = await supabase
         .from("lifecycle_policy_state")
         .upsert(stateUpserts.slice(i, i + 500), { onConflict: "policy_number" });
+      if (upsertErr) console.error("[lifecycle-direct] state upsert error:", JSON.stringify(upsertErr));
     }
   } catch (e) {
     console.error("[lifecycle-direct] state upsert failed (non-fatal):", e);
