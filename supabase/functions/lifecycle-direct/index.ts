@@ -279,16 +279,22 @@ Deno.serve(async (req: Request) => {
 
   // ── 2b. Agent writing-number lookup (form_submissions) for agencies whose
   // hierarchy carries no person node (e.g. DH Insurance Group). Used as NPN fallback.
+  // Scoped to GHL-enabled agency names to stay under PostgREST's 1000-row page cap.
+  const enabledAgencyNames = agencyRows
+    ?.filter((a) => a.ghl_api_enabled)
+    .map((a) => (a.name as string).toLowerCase()) ?? [];
   const agentNumberByPolicy = new Map<string, string>();
-  const { data: agentNumRows } = await supabase
-    .from("form_submissions")
-    .select("policy_number, agent_number")
-    .not("agent_number", "is", null)
-    .neq("agent_number", "")
-    .limit(50000);
-  for (const r of agentNumRows ?? []) {
-    if (r.policy_number && r.agent_number)
-      agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+  if (enabledAgencyNames.length > 0) {
+    const { data: agentNumRows } = await supabase
+      .from("form_submissions")
+      .select("policy_number, agent_number, agency")
+      .not("agent_number", "is", null)
+      .neq("agent_number", "");
+    for (const r of agentNumRows ?? []) {
+      const agencyLower = (r.agency as string ?? "").toLowerCase();
+      if (enabledAgencyNames.some((n) => agencyLower.includes(n.split(" ")[0])) && r.policy_number && r.agent_number)
+        agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+    }
   }
 
   // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
