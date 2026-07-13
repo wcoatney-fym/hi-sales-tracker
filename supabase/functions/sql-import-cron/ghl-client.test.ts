@@ -1,9 +1,11 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  AGENCY_SORTING_FIELD_ID,
   AGENT_NPN_FIELD_ID,
   buildGhlContactBody,
   LOB_FIELD_IDS,
   lobKeyForPlanType,
+  MIDDLE_INITIAL_FIELD_ID,
   PRODUCT_TAG,
   type LifecyclePayload,
 } from "./ghl-client.ts";
@@ -33,6 +35,8 @@ function basePayload(overrides: Partial<LifecyclePayload> = {}): LifecyclePayloa
     termination_date: "",
     contract_reason: "",
     agent_npn: "18408252",
+    agency: "DH Insurance Group",
+    middle_initial: "D",
     carrier: "GTL",
     agent_first_name: "Tyler",
     agent_full_name: "Tyler Cole",
@@ -69,16 +73,19 @@ Deno.test("standard contact fields map straight through", () => {
   assertEquals(b.state, "FL");
   assertEquals(b.postalCode, "33601");
   assertEquals(b.source, "activity-tracker-lifecycle");
-  assertEquals(b.tags, ["lifecycle", "trigger-approved", "hip | sold client"]);
+  // LOCKED spec §3: exactly ONE product tag, no lifecycle/trigger tags.
+  assertEquals(b.tags, ["hip | sold client"]);
 });
 
 Deno.test("HIP approved writes the hip__ field group with correct ids", () => {
   const b = buildGhlContactBody(basePayload(), LOC);
   const m = cfMap(b);
   const ids = LOB_FIELD_IDS.hip;
-  // 15 LOB fields + 1 global agent_npn.
-  assertEquals(b.customFields.length, 16);
+  // 15 LOB fields + 3 global fields (agent_npn, agency sorting, middle_initial).
+  assertEquals(b.customFields.length, 18);
   assertEquals(m.get(AGENT_NPN_FIELD_ID), "18408252");
+  assertEquals(m.get(AGENCY_SORTING_FIELD_ID), "DH Insurance Group");
+  assertEquals(m.get(MIDDLE_INITIAL_FIELD_ID), "D");
   assertEquals(m.get(ids.plan_name), "Hospital Indemnity Plus");
   assertEquals(m.get(ids.plan_premium), "45");
   assertEquals(m.get(ids.client_status), "active");
@@ -94,7 +101,7 @@ Deno.test("at risk boolean true -> Yes", () => {
   const b = buildGhlContactBody(basePayload({ at_risk_status: true, trigger: "at risk" }), LOC);
   const m = cfMap(b);
   assertEquals(m.get(LOB_FIELD_IDS.hip.at_risk_status), "Yes");
-  assertEquals(b.tags, ["lifecycle", "trigger-at risk", "hip | sold client"]);
+  assertEquals(b.tags, ["hip | sold client"]);
 });
 
 Deno.test("product tag applied per LOB; Unknown gets none", () => {
@@ -109,10 +116,9 @@ Deno.test("product tag applied per LOB; Unknown gets none", () => {
   for (const [pt, tag] of cases) {
     const b = buildGhlContactBody(basePayload({ plan_type: pt }), LOC);
     if (tag === null) {
-      assertEquals(b.tags, ["lifecycle", "trigger-approved"], `${pt} no product tag`);
+      assertEquals(b.tags, [], `${pt} no product tag`);
     } else {
-      assertEquals(b.tags.includes(tag), true, `${pt} has product tag`);
-      assertEquals(b.tags.length, 3, `${pt} tag count`);
+      assertEquals(b.tags, [tag], `${pt} exactly one product tag`);
     }
   }
 });
@@ -140,11 +146,15 @@ Deno.test("terminated carries mapped reason label + date into hhc group", () => 
   assertEquals(m.get(ids.client_status), "terminated");
 });
 
-Deno.test("Unknown plan type still writes agent_npn (only the global field)", () => {
+Deno.test("Unknown plan type still writes the global fields only (no LOB group)", () => {
   const b = buildGhlContactBody(basePayload({ plan_type: "Unknown" }), LOC);
-  assertEquals(b.customFields.length, 1);
-  assertEquals(b.customFields[0].id, AGENT_NPN_FIELD_ID);
-  assertEquals(b.customFields[0].value, "18408252");
+  const m = cfMap(b);
+  // Only the 3 global fields; no LOB custom fields, no product tag.
+  assertEquals(b.customFields.length, 3);
+  assertEquals(m.get(AGENT_NPN_FIELD_ID), "18408252");
+  assertEquals(m.get(AGENCY_SORTING_FIELD_ID), "DH Insurance Group");
+  assertEquals(m.get(MIDDLE_INITIAL_FIELD_ID), "D");
+  assertEquals(b.tags, []);
   assertEquals(b.firstName, "Marcus");
 });
 
@@ -156,13 +166,15 @@ Deno.test("agent_npn is always included across every LOB", () => {
   }
 });
 
-Deno.test("null/undefined values become empty strings", () => {
+Deno.test("blank email/phone keys are omitted from the body (avoid GHL 422)", () => {
   const b = buildGhlContactBody(
     basePayload({ email: null, phone: undefined, plan_premium: null }),
     LOC,
   );
-  assertEquals(b.email, "");
-  assertEquals(b.phone, "");
+  // Blank email/phone must be absent keys, not empty strings (GHL 422s on "").
+  assertEquals("email" in b, false);
+  assertEquals("phone" in b, false);
+  // custom-field values still coerce to empty string
   assertEquals(cfMap(b).get(LOB_FIELD_IDS.hip.plan_premium), "");
 });
 

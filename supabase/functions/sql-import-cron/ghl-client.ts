@@ -2,8 +2,10 @@
 //
 // Replaces the Zapier hop (Charlie, 2026-07-02): the Activity-tracker evaluator
 // now writes lifecycle state straight into the GHL contact via the v2
-// contacts/upsert endpoint. Upsert dedupes on email/phone within the location,
-// so it updates the intake-created contact in place rather than duplicating.
+// POST /contacts/ (create) endpoint. Each lifecycle event creates a NEW contact
+// by design — duplicates are allowed in the Sunfire subaccount and workflows key
+// on contact-created + tag. (NOT contacts/upsert: upsert requires email/phone,
+// which the lifecycle runner doesn't always have.)
 //
 // GHL stores the policy state in per-line-of-business custom fields
 // (contact.{lob}__{attr}). We select the field group from the policy's derived
@@ -44,6 +46,7 @@ export type LobFieldAttr =
 // (Charlie, 2026-07-02). Field: contact.agent_npn.
 export const AGENT_NPN_FIELD_ID       = "uEFOApsD4JKXsXH3T9E4";
 export const AGENCY_SORTING_FIELD_ID  = "qSHUIp3GfPWHRGbPh1CM"; // Ancillary Agency | Sorting
+export const MIDDLE_INITIAL_FIELD_ID  = "9a1uz6fFK8x1kaZcNbFd"; // contact.middle_initial (verified vs Sunfire 2026-07-13)
 
 // Product tag applied to the contact so GHL can segment by line of business
 // (Charlie, 2026-07-02). Uses the existing GHL tag taxonomy (`<product> | sold
@@ -169,6 +172,7 @@ export function lobKeyForPlanType(planType: PlanType): LobKey | null {
 export interface LifecyclePayload {
   client_first_name?: unknown;
   client_last_name?: unknown;
+  middle_initial?: unknown;   // split from first_name; not yet mapped to a GHL field
   phone?: unknown;
   email?: unknown;
   address?: unknown;
@@ -230,7 +234,7 @@ function yesNo(v: unknown): string {
 }
 
 /**
- * Build the GHL contacts/upsert body from a flat lifecycle payload. Pure.
+ * Build the GHL contact-create (POST /contacts/) body from a flat lifecycle payload. Pure.
  *
  * Standard contact fields come from the client/agent columns; the policy state
  * is written to the LOB-specific custom fields selected by plan_type. Unknown
@@ -243,10 +247,11 @@ export function buildGhlContactBody(
   const lob = lobKeyForPlanType(p.plan_type);
   const customFields: GhlCustomField[] = [];
 
-  // Agent NPN + Agency sorting are global (not LOB-scoped) — GHL automations
-  // hinge on both (Charlie, 2026-07-02). Both must be present on every contact.
+  // Agent NPN, Agency sorting, and Middle Initial are global (not LOB-scoped) —
+  // GHL automations/merge fields hinge on them. All present on every contact.
   customFields.push({ id: AGENT_NPN_FIELD_ID,      value: str(p.agent_npn) });
   customFields.push({ id: AGENCY_SORTING_FIELD_ID, value: str(p.agency) });
+  customFields.push({ id: MIDDLE_INITIAL_FIELD_ID, value: str(p.middle_initial) });
 
   if (lob) {
     const ids = LOB_FIELD_IDS[lob];
