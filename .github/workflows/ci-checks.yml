@@ -49,3 +49,15 @@ jobs:
           else
             echo "Frontend / safe-path change."
           fi
+  deno-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Edge-function unit tests
+        run: |
+          deno test \
+            supabase/functions/lifecycle-direct/index.test.ts \
+            supabase/functions/sql-import-cron/ghl-client.test.ts
