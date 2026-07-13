@@ -1,0 +1,168 @@
+/*
+  # Add full FYM downline to agencies roster
+
+  Source: UNL_202JVV00_2026-06-12.csv (96 unique agency rows, blank First Name filter)
+  Previously 28 agencies were tracked. This migration adds all 69 remaining
+  downline agencies so the roster is complete.
+
+  Writing numbers are seeded into agency_writing_numbers for production scoping.
+  Each agency's writing number comes directly from the Agent Number column in the
+  UNL CSV — these are the carrier-assigned codes used in Max's hierarchy.
+
+  The 27 already-existing agencies are untouched (ON CONFLICT DO NOTHING).
+*/
+
+-- ============================================================
+-- 1. Insert the 69 missing agencies
+-- ============================================================
+INSERT INTO agencies (name, slug) VALUES
+  ('369 Insurance Inc', '369-insurance'),
+  ('Aca Agent LLC', 'aca-agent'),
+  ('Agility Health Group LLC', 'agility-health-group'),
+  ('Aidmed Insurance LLC', 'aidmed-insurance'),
+  ('Alfred Robinson', 'alfred-robinson'),
+  ('Ap Insurance Partners', 'ap-insurance-partners'),
+  ('Archon Insurance Agency, LLC', 'archon-insurance-agency'),
+  ('Axia Senior Insurance Advisors', 'axia-senior-insurance-advisors'),
+  ('Better Insurance Management', 'better-insurance-management'),
+  ('Blueprint Health Agency', 'blueprint-health-agency'),
+  ('Breelee-Cole, LLC', 'breelee-cole'),
+  ('Brooks Automation Empire LLC', 'brooks-automation-empire'),
+  ('Brown Networking Solutions', 'brown-networking-solutions'),
+  ('BWL Insurance II LLC', 'bwl-insurance-ii'),
+  ('Charthern Consulting', 'charthern-consulting'),
+  ('Clearview Health Advisors', 'clearview-health-advisors'),
+  ('Complete Care Solutions LC', 'complete-care-solutions-lc'),
+  ('Crystal Coast Marketing Group', 'crystal-coast-marketing-group'),
+  ('Dawkins Agency', 'dawkins-agency'),
+  ('E&E Financial Solutions LLC', 'e-e-financial-solutions'),
+  ('East West Senior Solutions LLC', 'east-west-senior-solutions'),
+  ('EF Marshall Agency', 'ef-marshall-agency'),
+  ('Elite Insurance Group Agency, LLC', 'elite-insurance-group-agency'),
+  ('Emery Insurance LLC', 'emery-insurance'),
+  ('Essential Health Affiliates LLC', 'essential-health-affiliates'),
+  ('Evercare Insurance Inc', 'evercare-insurance'),
+  ('Family Financial Consultants LLC', 'family-financial-consultants'),
+  ('Family First Insurance Advisors LLC', 'family-first-insurance-advisors'),
+  ('Freedom Financial Consultants LLC', 'freedom-financial-consultants'),
+  ('Gap Insurance Group LLC', 'gap-insurance-group'),
+  ('Health Wise', 'health-wise'),
+  ('Insure Choice', 'insure-choice'),
+  ('Insure Health Now', 'insure-health-now'),
+  ('Integrity Brokers LLC', 'integrity-brokers'),
+  ('JAR Insurance Services', 'jar-insurance-services'),
+  ('JTM Insurance & Financial Group LLC', 'jtm-insurance-financial-group'),
+  ('KM&RM Solutions LLC', 'km-rm-solutions'),
+  ('Legacy Family Advisors', 'legacy-family-advisors'),
+  ('Local Heritage Benefits, LP', 'local-heritage-benefits'),
+  ('Longevity Capital Insurance, LLC', 'longevity-capital-insurance'),
+  ('Magnolia Health Advisors', 'magnolia-health-advisors'),
+  ('Markham Financial Assurance', 'markham-financial-assurance'),
+  ('Matthews Health Solutions LLC', 'matthews-health-solutions'),
+  ('Med Advantage Advisors', 'med-advantage-advisors'),
+  ('Medicare Medical Benefits LLC', 'medicare-medical-benefits'),
+  ('Miranda Breaux LLC', 'miranda-breaux'),
+  ('MyHealthAngel Insurance LLC', 'myhealthangel-insurance'),
+  ('National Senior Benefit Advisors', 'national-senior-benefit-advisors'),
+  ('National Underwriting Service LLC', 'national-underwriting-service'),
+  ('NFG Insurance Solutions Inc', 'nfg-insurance-solutions'),
+  ('Platinum Choice Healthcare LLC', 'platinum-choice-healthcare'),
+  ('Platinum Shield Insurance LLC', 'platinum-shield-insurance'),
+  ('Reviva Health Group LLC', 'reviva-health-group'),
+  ('Rhonda Ridgely Agency LLC', 'rhonda-ridgely-agency'),
+  ('Salud Network LLC', 'salud-network'),
+  ('Savage Financial Group Inc', 'savage-financial-group'),
+  ('Senior Health Advocates', 'senior-health-advocates'),
+  ('Senior Market Consultants LLC', 'senior-market-consultants'),
+  ('Senior Market Insurance LLC', 'senior-market-insurance'),
+  ('Shore Legacy Insurance, LLC', 'shore-legacy-insurance'),
+  ('TG Squared Asset Consultants LLC', 'tg-squared-asset-consultants'),
+  ('The Possibilities Group, LLC', 'the-possibilities-group'),
+  ('Thirteen Five, LLC', 'thirteen-five'),
+  ('UBG Insurance LLC', 'ubg-insurance'),
+  ('Unified Growth Partners', 'unified-growth-partners'),
+  ('Valeir Insurance LLC', 'valeir-insurance'),
+  ('Vargas Investment Enterprises LLC', 'vargas-investment-enterprises'),
+  ('Vivid Financial Services LLC', 'vivid-financial-services'),
+  ('Yunicare Medical Solutions', 'yunicare-medical-solutions')
+ON CONFLICT (slug) DO NOTHING;
+
+-- ============================================================
+-- 2. Seed agency_writing_numbers for the new agencies
+--    (keyed by slug to avoid uuid assumptions)
+-- ============================================================
+INSERT INTO public.agency_writing_numbers (agency_id, writing_number)
+SELECT a.id, v.wn
+FROM (VALUES
+  ('369-insurance',                '202NPK00'),
+  ('aca-agent',                    '202NLM00'),
+  ('agility-health-group',         '202KTH00'),
+  ('aidmed-insurance',             '202NL800'),
+  ('alfred-robinson',              '202JL300'),
+  ('ap-insurance-partners',        '202NL700'),
+  ('archon-insurance-agency',      '202NJR00'),
+  ('axia-senior-insurance-advisors','202JCT00'),
+  ('better-insurance-management',  '202NF700'),
+  ('blueprint-health-agency',      '202NG900'),
+  ('breelee-cole',                 '202NF600'),
+  ('brooks-automation-empire',     '202NFL00'),
+  ('brown-networking-solutions',   '202JW200'),
+  ('bwl-insurance-ii',             '202NHJ00'),
+  ('charthern-consulting',         '202JRM00'),
+  ('clearview-health-advisors',    '202BJN00'),
+  ('complete-care-solutions-lc',   '202BJM00'),
+  ('crystal-coast-marketing-group','202NG400'),
+  ('dawkins-agency',               '202JMB00'),
+  ('e-e-financial-solutions',      '202A9V00'),
+  ('east-west-senior-solutions',   '202NFP00'),
+  ('ef-marshall-agency',           '202NG700'),
+  ('elite-insurance-group-agency', '202NKX00'),
+  ('emery-insurance',              '202NN500'),
+  ('essential-health-affiliates',  '202NGD00'),
+  ('evercare-insurance',           '202NLH00'),
+  ('family-financial-consultants', '202JPD00'),
+  ('family-first-insurance-advisors','202NHK00'),
+  ('freedom-financial-consultants','202JNZ00'),
+  ('gap-insurance-group',          '202NM600'),
+  ('health-wise',                  '202NPC00'),
+  ('insure-choice',                '202NM700'),
+  ('insure-health-now',            '202NHH00'),
+  ('integrity-brokers',            '202KRT00'),
+  ('jar-insurance-services',       '202NNK00'),
+  ('jtm-insurance-financial-group','202NHR00'),
+  ('km-rm-solutions',              '202NMM00'),
+  ('legacy-family-advisors',       '202JLB00'),
+  ('local-heritage-benefits',      '202JX600'),
+  ('longevity-capital-insurance',  '202KFZ00'),
+  ('magnolia-health-advisors',     '202NPH00'),
+  ('markham-financial-assurance',  '202DAX00'),
+  ('matthews-health-solutions',    '202NG800'),
+  ('med-advantage-advisors',       '202NMD00'),
+  ('medicare-medical-benefits',    '202JM200'),
+  ('miranda-breaux',               '202NF300'),
+  ('myhealthangel-insurance',      '202NEY00'),
+  ('national-senior-benefit-advisors','202NGZ00'),
+  ('national-underwriting-service','202NFD00'),
+  ('nfg-insurance-solutions',      '202NM500'),
+  ('platinum-choice-healthcare',   '202NFY00'),
+  ('platinum-shield-insurance',    '202NFS00'),
+  ('reviva-health-group',          '202NNL00'),
+  ('rhonda-ridgely-agency',        '202JPC00'),
+  ('salud-network',                '202AJA00'),
+  ('savage-financial-group',       '202NKR00'),
+  ('senior-health-advocates',      '202NFT00'),
+  ('senior-market-consultants',    '202NFA00'),
+  ('senior-market-insurance',      '202JCS00'),
+  ('shore-legacy-insurance',       '202NP400'),
+  ('tg-squared-asset-consultants', '202KFE00'),
+  ('the-possibilities-group',      '202BNR00'),
+  ('thirteen-five',                '202JTX00'),
+  ('ubg-insurance',                '202NML00'),
+  ('unified-growth-partners',      '202NPT00'),
+  ('valeir-insurance',             '202KNM00'),
+  ('vargas-investment-enterprises','202NJE00'),
+  ('vivid-financial-services',     '202JMJ00'),
+  ('yunicare-medical-solutions',   '202KPS00')
+) AS v(slug, wn)
+JOIN public.agencies a ON a.slug = v.slug
+ON CONFLICT (agency_id) DO UPDATE SET writing_number = EXCLUDED.writing_number;
