@@ -160,6 +160,28 @@ function titleCase(s: string): string {
   }).join(" ");
 }
 
+/**
+ * Split a middle initial embedded in Max's first_name field. Max stores names
+ * like "CLARAREESA D" where a trailing single-letter token is the middle
+ * initial. Peeling it off keeps client-facing GHL merge fields from rendering
+ * "Hi Charles E,". Returns the title-cased first name and the upper-cased
+ * initial (letter only; a trailing period is stripped). A two-word first name
+ * with no single-letter tail (e.g. "MARY ANN") is preserved intact.
+ */
+function splitMiddleInitial(rawFirst: string): { first: string; middleInitial: string } {
+  const tokens = (rawFirst ?? "").trim().split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    const bare = tokens[tokens.length - 1].replace(/\.$/, "");
+    if (bare.length === 1 && /[A-Za-z]/.test(bare)) {
+      return {
+        first: titleCase(tokens.slice(0, -1).join(" ")),
+        middleInitial: bare.toUpperCase(),
+      };
+    }
+  }
+  return { first: titleCase(tokens.join(" ")), middleInitial: "" };
+}
+
 function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   fullName: string;
   firstName: string;
@@ -199,6 +221,7 @@ interface ProdRow {
   cntrct_code: string | null;
   cntrct_reason: string | null;
   issue_date: unknown;               // Postgres date — arrives as Date object
+  app_recvd_date: unknown;           // application-received date → GHL Submit Date
   paid_to_date: unknown;
   term_date: unknown;
   billing_mode: number | null;
@@ -452,7 +475,7 @@ Deno.serve(async (req: Request) => {
       TRIM(phone_nbr::text)        AS phone_nbr,
       TRIM(cntrct_code)           AS cntrct_code,
       TRIM(cntrct_reason)         AS cntrct_reason,
-      issue_date, paid_to_date, term_date, billing_mode, annual_premium,
+      issue_date, app_recvd_date, paid_to_date, term_date, billing_mode, annual_premium,
       TRIM(plan_code)             AS plan_code,
       TRIM(billing_form)          AS billing_form,
       at_risk_policy, roster_hierarchy_json, _dlt_load_id
@@ -464,7 +487,7 @@ Deno.serve(async (req: Request) => {
       TRIM(phone_nbr::text)        AS phone_nbr,
       TRIM(cntrct_code)           AS cntrct_code,
       TRIM(cntrct_reason)         AS cntrct_reason,
-      issue_date, paid_to_date, term_date, billing_mode, annual_premium,
+      issue_date, app_recvd_date, paid_to_date, term_date, billing_mode, annual_premium,
       TRIM(plan_code)             AS plan_code,
       TRIM(billing_form)          AS billing_form,
       at_risk_policy, _dlt_load_id,
@@ -578,10 +601,15 @@ Deno.serve(async (req: Request) => {
     const planType = derivePlanType(planName || row.plan_code);
     const monthly  = perPaymentPremium(row.annual_premium, row.billing_mode, pn);
     const atRiskStatus = row.at_risk_policy;
+    // Max embeds a middle initial in first_name ("CLARAREESA D"); peel it off so
+    // GHL greeting merge fields don't render "Hi Charles E,". The initial is
+    // written to the global contact.middle_initial field (see buildGhlContactBody).
+    const nameParts = splitMiddleInitial(row.first_name ?? "");
 
     for (const ev of events) {
       const payload: LifecyclePayload = {
-        client_first_name:    titleCase((row.first_name ?? "").trim()),
+        client_first_name:    nameParts.first,
+        middle_initial:       nameParts.middleInitial,
         client_last_name:     titleCase((row.last_name  ?? "").trim()),
         phone:                (row.phone_nbr ?? "").trim(),
         email:                "",
@@ -592,7 +620,9 @@ Deno.serve(async (req: Request) => {
         plan_name:            planName,
         plan_type:            planType,
         plan_premium:         String(monthly),
-        submission_date:      usDate(row.issue_date),
+        // Submit Date = application-received date (app_recvd_date); Effective Date = issue_date.
+        // No longer double-sourced from issue_date. Null app_recvd_date → "" (date canon).
+        submission_date:      usDate(row.app_recvd_date),
         effective_date:       usDate(row.issue_date),
         paid_to_date:         usDate(row.paid_to_date),
         billing_mode:         billingModeLabel(row.billing_mode),

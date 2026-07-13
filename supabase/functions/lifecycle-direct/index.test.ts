@@ -33,6 +33,20 @@ function titleCase(s: string): string {
   }).join(" ");
 }
 
+function splitMiddleInitial(rawFirst: string): { first: string; middleInitial: string } {
+  const tokens = (rawFirst ?? "").trim().split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    const bare = tokens[tokens.length - 1].replace(/\.$/, "");
+    if (bare.length === 1 && /[A-Za-z]/.test(bare)) {
+      return {
+        first: titleCase(tokens.slice(0, -1).join(" ")),
+        middleInitial: bare.toUpperCase(),
+      };
+    }
+  }
+  return { first: titleCase(tokens.join(" ")), middleInitial: "" };
+}
+
 // ── usDate tests ──────────────────────────────────────────────────────────────
 
 Deno.test("usDate: ISO string YYYY-MM-DD", () => {
@@ -147,4 +161,46 @@ Deno.test("titleCase: normal name", () => {
 
 Deno.test("titleCase: mixed case input", () => {
   assertEquals(titleCase("ANTONIO NOVIELLI"), "Antonio Novielli");
+});
+
+// ── splitMiddleInitial tests ────────────────────────────────────────────────
+
+Deno.test("splitMiddleInitial: trailing initial peeled off (Clarareesa D)", () => {
+  const r = splitMiddleInitial("CLARAREESA D");
+  assertEquals(r.first, "Clarareesa");
+  assertEquals(r.middleInitial, "D");
+});
+
+Deno.test("splitMiddleInitial: no initial -> first name unchanged", () => {
+  const r = splitMiddleInitial("KAREN");
+  assertEquals(r.first, "Karen");
+  assertEquals(r.middleInitial, "");
+});
+
+Deno.test("splitMiddleInitial: two-word first name preserved (Mary Jane, not split)", () => {
+  const r = splitMiddleInitial("MARY JANE");
+  assertEquals(r.first, "Mary Jane");
+  assertEquals(r.middleInitial, "");
+});
+
+// Known quirk (documented, not desired): titleCase preserves all-caps tokens
+// <=3 chars (the DH/LLC/II rule), so short real names like ANN/JO/ED stay
+// all-caps. splitMiddleInitial still correctly does NOT treat "ANN" as an
+// initial. Fixing the casing is a separate titleCase concern (out of scope).
+Deno.test("splitMiddleInitial: short 3-letter token not split; titleCase leaves it all-caps (quirk)", () => {
+  const r = splitMiddleInitial("MARY ANN");
+  assertEquals(r.middleInitial, "");   // not split — ANN is 3 chars, not an initial
+  assertEquals(r.first, "Mary ANN");   // titleCase preserves <=3-char all-caps (DH/LLC/II rule)
+});
+
+Deno.test("splitMiddleInitial: trailing period stripped (Mary J.)", () => {
+  const r = splitMiddleInitial("MARY J.");
+  assertEquals(r.first, "Mary");
+  assertEquals(r.middleInitial, "J");
+});
+
+Deno.test("splitMiddleInitial: empty input -> empty first and initial", () => {
+  const r = splitMiddleInitial("");
+  assertEquals(r.first, "");
+  assertEquals(r.middleInitial, "");
 });
