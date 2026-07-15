@@ -357,6 +357,159 @@ Deno.serve(async (req: Request) => {
     await supabase.from("lifecycle_confirm_tokens").update({ used: true }).eq("token", confirmToken);
   }
 
+  // ── BACKFILL MODE ─────────────────────────────────────────────────────────
+  // Triggered by ?mode=backfill&agency_id=<uuid>&date_from=<YYYY-MM-DD>
+  // Reads directly from form_submissions (Supabase), bypasses delta, fires all
+  // matching contacts to GHL as "submission" events. No state upsert so the
+  // next normal cron run still works cleanly.
+  let backfillMode = false;
+  let backfillAgencyId: string | null = null;
+  let backfillDateFrom: string | null = null;
+  try {
+    const params = new URL(req.url).searchParams;
+    if (params.get("mode") === "backfill") {
+      backfillMode      = true;
+      backfillAgencyId  = params.get("agency_id");
+      backfillDateFrom  = params.get("date_from");
+    }
+  } catch { /* ignore */ }
+
+  if (backfillMode) {
+    if (!backfillAgencyId || !backfillDateFrom) {
+      return new Response(
+        JSON.stringify({ error: "backfill requires agency_id and date_from params" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const ghlCfg = loadGhlConfig();
+    if (!ghlCfg) {
+      return new Response(
+        JSON.stringify({ error: "GHL config not present" }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    // Resolve agency name for payload
+    const { data: agencyRow } = await supabase
+      .from("agencies")
+      .select("name")
+      .eq("id", backfillAgencyId)
+      .maybeSingle();
+    const agencyName = (agencyRow?.name as string) ?? "";
+
+    // Build NPN map from agents + agency_rosters
+    const npnByWn = new Map<string, string>();
+    const { data: agentRows } = await supabase
+      .from("agents")
+      .select("unl_writing_number, npn")
+      .range(0, 9999);
+    for (const a of agentRows ?? []) {
+      const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
+      if (wn && a.npn) npnByWn.set(wn, a.npn as string);
+    }
+    const { data: rosterRows } = await supabase
+      .from("agency_rosters")
+      .select("writing_number, npn")
+      .eq("status", "active");
+    for (const r of rosterRows ?? []) {
+      const wn = (r.writing_number as string ?? "").trim().toUpperCase();
+      if (wn && r.npn && !npnByWn.has(wn)) npnByWn.set(wn, r.npn as string);
+    }
+
+    // Fetch all form_submissions for this agency since date_from
+    const allSubmissions: Record<string, unknown>[] = [];
+    let offset = 0;
+    while (true) {
+      const { data: batch } = await supabase
+        .from("form_submissions")
+        .select("policy_number,client_first_name,client_last_name,phone,email,address,city,state,zip,plan_name,plan_premium,status,product_type,app_submit_date,policy_effective_date,paid_to_date,billing_mode,contract_reason,terminated_date,agent_number,agent_first_name,agent_last_name,carrier")
+        .eq("agency_id", backfillAgencyId)
+        .gte("app_submit_date", backfillDateFrom)
+        .range(offset, offset + 499);
+      if (!batch || batch.length === 0) break;
+      allSubmissions.push(...batch);
+      if (batch.length < 500) break;
+      offset += 500;
+    }
+
+    const bfAudit: Record<string, unknown>[] = [];
+    let bfFired = 0;
+    let bfFailed = 0;
+
+    for (const row of allSubmissions) {
+      const pn        = String(row.policy_number ?? "").trim();
+      const pt        = String(row.product_type  ?? "").trim().toUpperCase();
+      const planType  = pt === "HHC" ? "HHC" : pt === "HI" || pt === "HIP" ? "HI" : pt;
+      const wn        = String(row.agent_number   ?? "").trim().toUpperCase();
+      const npn       = npnByWn.get(wn) ?? wn;
+      const firstName = String(row.client_first_name ?? "").trim();
+      const nameParts = splitMiddleInitial(firstName);
+      const agentFirst = String(row.agent_first_name ?? "").trim();
+      const agentLast  = String(row.agent_last_name  ?? "").trim();
+      const agentFull  = `${agentFirst} ${agentLast}`.trim();
+      const statusRaw  = String(row.status ?? "").trim().toLowerCase();
+      const clientStatus = statusRaw === "active" ? "Active" : statusRaw === "pending" ? "Pending" : statusRaw === "terminated" ? "Terminated" : String(row.status ?? "");
+
+      const payload: LifecyclePayload = {
+        client_first_name:    nameParts.first,
+        middle_initial:       nameParts.middleInitial,
+        client_last_name:     titleCase(String(row.client_last_name ?? "").trim()),
+        phone:                String(row.phone ?? "").trim(),
+        email:                String(row.email ?? "").trim(),
+        address:              String(row.address ?? "").trim(),
+        city:                 String(row.city   ?? "").trim(),
+        state:                String(row.state  ?? "").trim(),
+        zip:                  String(row.zip    ?? "").trim(),
+        plan_name:            String(row.plan_name ?? "").trim(),
+        plan_type:            planType,
+        plan_premium:         String(row.plan_premium ?? "").trim(),
+        submission_date:      String(row.app_submit_date         ?? "").trim(),
+        effective_date:       String(row.policy_effective_date   ?? "").trim(),
+        paid_to_date:         String(row.paid_to_date            ?? "").trim(),
+        billing_mode:         String(row.billing_mode            ?? "").trim(),
+        at_risk_status:       false,
+        client_status:        clientStatus,
+        policy_number:        pn,
+        termination_date:     String(row.terminated_date         ?? "").trim(),
+        contract_reason:      String(row.contract_reason         ?? "").trim(),
+        agent_npn:            npn,
+        agency:               agencyName,
+        carrier:              String(row.carrier ?? "UNL").trim(),
+        agent_first_name:     agentFirst,
+        agent_full_name:      agentFull,
+        agent_writing_number: wn,
+        trigger:              "submission",
+      };
+
+      if (dry) {
+        console.log(`[lifecycle-direct:backfill:dry] ${pn}`, JSON.stringify(buildGhlContactBody(payload, ghlCfg.locationId)));
+        bfFired++;
+        continue;
+      }
+
+      const ghlBody = buildGhlContactBody(payload, ghlCfg.locationId);
+      const result  = await pushContactToGhl(ghlCfg, ghlBody);
+      bfAudit.push({ policy_number: pn, trigger: "submission", ok: result.ok, dry_run: false, error: result.error, http_status: result.http_status, agency_id: backfillAgencyId, risk_signal: null, previous_contract_code: null, contract_code: null, contract_reason: null, upload_id: null });
+      if (result.ok) { bfFired++; } else { bfFailed++; }
+      console.log(`[lifecycle-direct:backfill] ${pn} ok=${result.ok} http=${result.http_status}`);
+    }
+
+    if (bfAudit.length > 0) {
+      try {
+        for (let i = 0; i < bfAudit.length; i += 500) {
+          await supabase.from("lifecycle_event_log").insert(bfAudit.slice(i, i + 500));
+        }
+      } catch (e) { console.error("[lifecycle-direct] backfill audit write failed:", e); }
+    }
+
+    return new Response(
+      JSON.stringify({ ok: true, mode: "backfill", agency: agencyName, total: allSubmissions.length, fired: bfFired, failed: bfFailed, dry }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  // ── END BACKFILL MODE ─────────────────────────────────────────────────────
+
   // ── 1. Load agency gate ──────────────────────────────────────────────────
   const { data: agencyRows } = await supabase
     .from("agencies")
