@@ -279,13 +279,16 @@ export function buildGhlContactBody(
   const tags = lob ? [PRODUCT_TAG[lob]] : [];
 
   const email = str(p.email).trim();
-  const phone = str(p.phone).trim();
+  // Omit phone when blank OR when the UNL source emits sentinel value "0" (no phone on file).
+  // GHL 422s on empty-string format validation AND on "0" as an invalid phone number.
+  const rawPhone = str(p.phone).trim();
+  const phone = rawPhone && rawPhone !== "0" ? rawPhone : "";
 
   return {
     locationId,
     firstName: str(p.client_first_name),
     lastName: str(p.client_last_name),
-    // Omit email/phone entirely when blank — GHL 422s on empty string format validation
+    // Omit email/phone entirely when blank/invalid — GHL 422s on empty string or sentinel "0"
     ...(email ? { email } : {}),
     ...(phone ? { phone } : {}),
     address1: str(p.address),

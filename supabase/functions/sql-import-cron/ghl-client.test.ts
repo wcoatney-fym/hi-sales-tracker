@@ -178,6 +178,17 @@ Deno.test("blank email/phone keys are omitted from the body (avoid GHL 422)", ()
   assertEquals(cfMap(b).get(LOB_FIELD_IDS.hip.plan_premium), "");
 });
 
+Deno.test("phone sentinel \"0\" is omitted (GHL 422s on \"0\" as invalid phone)", () => {
+  // UNL emits "0" when no phone is on file. Must be treated as absent, not sent.
+  const b = buildGhlContactBody(basePayload({ phone: "0" }), LOC);
+  assertEquals("phone" in b, false);
+});
+
+Deno.test("valid phone passes through unchanged", () => {
+  const b = buildGhlContactBody(basePayload({ phone: "9842882093" }), LOC);
+  assertEquals(b.phone, "9842882093");
+});
+
 Deno.test("all five LOB groups expose the full 15-field id set", () => {
   const attrs = [
     "plan_name","plan_premium","submission_date","effective_date","paid_to_date",

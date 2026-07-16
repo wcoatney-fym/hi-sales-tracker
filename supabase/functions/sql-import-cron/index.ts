@@ -33,11 +33,13 @@ function lifecycleUseZap(): boolean {
   }
 }
 
-// Set LIFECYCLE_ZAP_DRY_RUN="true" as a function secret to evaluate + log
-// events without POSTing to Zapier (safe rollout / verification mode).
+// Set LIFECYCLE_DRY_RUN="true" as a function secret to evaluate + log
+// events without POSTing to GHL (safe rollout / verification mode).
+// NOTE: renamed from LIFECYCLE_ZAP_DRY_RUN (Zap era) — update the secret name
+// in Supabase dashboard when switching dry-run on/off.
 function lifecycleDryRun(): boolean {
   try {
-    return (Deno.env.get("LIFECYCLE_ZAP_DRY_RUN") || "").toLowerCase() === "true";
+    return (Deno.env.get("LIFECYCLE_DRY_RUN") || "").toLowerCase() === "true";
   } catch {
     return false;
   }
