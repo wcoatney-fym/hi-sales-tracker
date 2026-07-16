@@ -7,80 +7,66 @@ import { createClient } from "npm:@supabase/supabase-js@2";
  *
  * PUSH SEMANTICS (explicit, per Will 2026-07-16):
  *   - One contact per policy, current state as of push day.
- *   - Policies that recovered: if originally missed as at-risk but are no
- *     longer at-risk today (contract_code='A', paid_to_date current), they
- *     still get a contact — but with at_risk_status='No' and
- *     client_status='Active'. No stale at-risk signal. Current state only.
- *   - Policies that terminated since missed event: pushed with
- *     client_status='Terminated', termination fields populated. Correct.
- *   - Policies that were submission/approved triggers: pushed with current
- *     state (Active if still active, Terminated if lapsed). Correct.
- *   - Stale at-risk rule: a contact is NEVER pushed with at_risk_status='Yes'
- *     unless the policy is STILL at-risk today (paid_to_date < threshold).
- *     The at_risk_status field reflects current state, not the trigger that
- *     fired in the no-config era.
+ *   - at_risk_status reflects TODAY's state (via shared deriveAtRisk logic),
+ *     never the historical trigger. Recovered policy → at_risk_status='No'.
+ *   - Stale-risk rule: 'Yes' only if contract_code='A' AND billing_form='DIR'
+ *     AND paid_to_date < today (UTC). Mirrors lifecycle-evaluator.ts exactly.
+ *   - Terminated policies: client_status='Terminated' + termination fields.
+ *   - No stale at-risk signal, ever.
  *
  * WORKFLOW SUPPRESSION (condition 2 — Chris sign-off required before prod):
- *   - All reconcile contacts receive tag: `reconciled | do not automate`
- *   - This tag must be mapped to a GHL workflow suppression condition by Chris
- *     before any prod run. Build test first; Chris confirms suppression works.
- *   - Prevents 2-week-delayed client-facing SMS/email from firing on stale events.
+ *   - All reconcile contacts receive tag: 'reconciled | do not automate'
+ *   - Prevents 2-week-delayed client-facing sends on stale events.
  *
  * FIELD ID RESOLUTION (condition 3):
- *   - Build run:  uses GHL_LOCATION_ID_BUILD_ACT + Build-namespace field IDs
- *   - Prod run:   uses GHL_LOCATION_ID_SUNFIRE  + Sunfire-namespace field IDs
- *   - Field IDs are resolved at runtime via GET /locations/{id}/customFields,
- *     keyed by fieldKey. No hardcoded cross-location IDs.
- *   - Fallback: if a fieldKey is not found for the target location, that field
- *     is omitted and a warning is logged (never fails the push over a missing field).
+ *   - Build: GHL_LOCATION_ID_BUILD_ACT + Build-namespace IDs (runtime resolved)
+ *   - Prod:  GHL_LOCATION_ID_SUNFIRE   + Sunfire-namespace IDs (runtime resolved)
+ *   - No hardcoded cross-location IDs.
  *
- * RATE LIMITING: 80 requests per 10 seconds (GHL ceiling ~100/10s).
+ * RATE LIMITING: 80 requests per 10 seconds.
  *
- * GATES (enforced in code):
- *   - DRY_RUN=true by default. Set request body { "dryRun": false } to push live.
- *   - TARGET must be explicitly set: body { "target": "build" | "prod" }.
- *     Omitting target = error, no push.
- *   - Prod requires body { "prodConfirmed": true } as an additional interlock.
- *   - Chris sign-off tag present on all contacts regardless of target.
- *
- * REQUIRED SUPABASE SECRETS:
- *   SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
- *   GHL_API_KEY_BUILD_ACT        (Build token)
- *   GHL_LOCATION_ID_BUILD_ACT    (Build location)
- *   GHL_API_KEY_HIP_PORTAL_SUNFIRE  (Sunfire/prod token)
- *   GHL_LOCATION_ID_SUNFIRE         (Sunfire/prod location)
+ * GATES:
+ *   - dryRun=true by default. Pass { "dryRun": false } to push live.
+ *   - target required: { "target": "build" } or { "target": "prod" }
+ *   - Prod also requires { "prodConfirmed": true }
  */
 
 // ---------------------------------------------------------------------------
-// Types
+// Types — using actual form_submissions column names
 // ---------------------------------------------------------------------------
 interface PolicyRow {
   policy_number: string;
   product_type: string;
   contract_code: string;
+  billing_form: string | null;        // 'DIR' or 'PAC' — needed for at-risk check
   paid_to_date: string | null;
   plan_name: string | null;
-  plan_premium: string | null;
+  plan_premium: number | string | null;
   billing_mode: string | null;
-  carrier_name: string | null;
-  submission_date: string | null;
-  effective_date: string | null;
-  termination_date: string | null;
-  terminated_reason: string | null;
-  agent_npn: string | null;
+  carrier: string | null;             // actual col: carrier (not carrier_name)
+  app_submit_date: string | null;     // actual col (not submission_date)
+  policy_effective_date: string | null; // actual col (not effective_date)
+  terminated_date: string | null;     // actual col (not termination_date)
+  contract_reason: string | null;     // actual col (not terminated_reason)
+  agent_number: string | null;        // actual col (not agent_writing_number)
   agent_first_name: string | null;
-  agent_full_name: string | null;
-  agent_writing_number: string | null;
+  agent_last_name: string | null;
   agency: string | null;
-  middle_initial: string | null;
   phone: string | null;
   email: string | null;
-  first_name: string | null;
-  last_name: string | null;
+  client_first_name: string | null;   // actual col (not first_name)
+  client_last_name: string | null;    // actual col (not last_name)
+  status: string | null;              // 'active'/'terminated'/'pending'
+}
+
+// NPN lives in the agents table, keyed by writing_number
+interface AgentNpnRow {
+  writing_number: string;
+  npn: string | null;
 }
 
 interface FieldIdMap {
-  [fieldKey: string]: string; // fieldKey -> fieldId for this location
+  [fieldKey: string]: string;
 }
 
 interface ReconcileResult {
@@ -94,33 +80,60 @@ interface ReconcileResult {
 }
 
 // ---------------------------------------------------------------------------
-// Constants
+// At-risk logic — mirrors deriveAtRisk() in lifecycle-evaluator.ts exactly.
+// Shared path: same contract_code + billing_form + paid_to_date rules.
+// Source: supabase/functions/sql-import-cron/lifecycle-evaluator.ts:120
 // ---------------------------------------------------------------------------
-const RECONCILE_TAG     = "reconciled | do not automate";
-const RATE_LIMIT_BATCH  = 80;
-const RATE_LIMIT_MS     = 10_000;
+function deriveAtRisk(policy: PolicyRow, now: number = Date.now()): boolean {
+  const code = (policy.contract_code || "").trim().toUpperCase();
+  if (code !== "A") return false;
 
-// fieldKeys we write — resolved to IDs per location at runtime
-const GLOBAL_FIELD_KEYS = [
-  "contact.agent_npn",
-  "contact.ancillary_agency__sorting",
-  "contact.middle_initial",
-];
+  const form = (policy.billing_form || "").trim().toUpperCase();
+  if (form !== "DIR") return false;
 
-const LOB_FIELD_KEY_SUFFIXES = [
-  "plan_name", "plan_premium", "submission_date", "effective_date",
-  "paid_to_date", "billing_mode", "at_risk_status", "client_status",
-  "policy_number", "carrier_name", "agent_first_name", "agent_full_name",
-  "agent_writing_number", "terminated_reason", "termination_date",
-];
+  if (!policy.paid_to_date) return false;
 
-// Plan type → LOB prefix map (matches ghl-client.ts)
-const LOB_PREFIX: Record<string, string> = {
-  HIP: "hip", HHC: "hhc", LIFE: "life", DV: "dv", CANCER: "cancer",
-};
+  const ptd = new Date(policy.paid_to_date + "T00:00:00Z").getTime();
+  if (isNaN(ptd)) return false;
+
+  // today UTC midnight
+  const d = new Date(now);
+  const todayUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return ptd < todayUtc;
+}
 
 // ---------------------------------------------------------------------------
-// Field ID resolution — fetched fresh per target location, keyed by fieldKey
+// Contract reason label — mirrors contractReasonLabel() in index.ts
+// ---------------------------------------------------------------------------
+function contractReasonLabel(code: string | null): string {
+  if (!code) return "";
+  const map: Record<string, string> = {
+    NS: "Non-Sufficient Funds",
+    CA: "Client Requested Cancellation",
+    NR: "Non-Renewal",
+    DE: "Deceased",
+    DB: "Duplicate Billing",
+    DP: "Duplicate Policy",
+    FR: "Fraud",
+    IC: "Invalid Coverage",
+    PA: "Policy Anniversary",
+    RP: "Replaced Policy",
+  };
+  return map[code.toUpperCase()] ?? code;
+}
+
+// ---------------------------------------------------------------------------
+// Date to US format MM/DD/YYYY — mirrors usDate() in index.ts
+// ---------------------------------------------------------------------------
+function usDate(iso: string | null): string {
+  if (!iso) return "";
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return iso;
+  return `${m[2]}/${m[3]}/${m[1]}`;
+}
+
+// ---------------------------------------------------------------------------
+// Field ID resolution — fetched fresh per target location
 // ---------------------------------------------------------------------------
 async function resolveFieldIds(
   locationId: string,
@@ -143,23 +156,23 @@ async function resolveFieldIds(
   for (const f of data.customFields ?? []) {
     if (f.fieldKey && f.id) map[f.fieldKey] = f.id;
   }
-  console.log(`[reconcile] resolved ${Object.keys(map).length} field IDs for location ${locationId}`);
+  console.log(`[reconcile] resolved ${Object.keys(map).length} field IDs for ${locationId}`);
   return map;
 }
 
 // ---------------------------------------------------------------------------
-// At-risk determination — current state, not historical trigger
-// Mirrors the logic in lifecycle-evaluator.ts: at-risk if paid_to_date is
-// more than 30 days behind today for monthly, or lapsed for non-monthly.
-// Conservative: if paid_to_date is null, treat as NOT at-risk (unknown state).
+// LOB prefix map — mirrors lobKeyForPlanType() in ghl-client.ts
 // ---------------------------------------------------------------------------
-function isCurrentlyAtRisk(policy: PolicyRow): boolean {
-  if (!policy.paid_to_date) return false;
-  if (policy.contract_code !== "A") return false; // terminated = not at-risk
-  const paidTo = new Date(policy.paid_to_date);
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  return paidTo < thirtyDaysAgo;
+function lobKey(productType: string): string | null {
+  switch ((productType || "").toUpperCase()) {
+    case "HI":
+    case "HIP": return "hip";
+    case "HHC": return "hhc";
+    case "LIFE": return "life";
+    case "DV": return "dv";
+    case "CANCER": return "cancer";
+    default: return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,59 +180,64 @@ function isCurrentlyAtRisk(policy: PolicyRow): boolean {
 // ---------------------------------------------------------------------------
 function buildContactBody(
   policy: PolicyRow,
+  agentNpn: string,
   locationId: string,
   fieldIds: FieldIdMap,
+  omittedFields: string[],
 ): Record<string, unknown> {
   const str = (v: unknown) => (v == null || v === "" || v === "0") ? "" : String(v);
 
-  const lobKey = LOB_PREFIX[policy.product_type] ?? null;
-  const atRisk = isCurrentlyAtRisk(policy);
-  const isTerminated = policy.contract_code !== "A";
-
-  const clientStatus   = isTerminated ? "Terminated" : "Active";
-  const atRiskStatus   = atRisk ? "Yes" : "No";
-  const productTag     = lobKey ? `${lobKey} | sold client` : null;
+  const lob         = lobKey(policy.product_type);
+  const atRisk      = deriveAtRisk(policy);
+  const isTerminated = (policy.contract_code || "").trim().toUpperCase() !== "A";
+  const clientStatus = isTerminated ? "Terminated" : "Active";
+  const atRiskStatus = atRisk ? "Yes" : "No";
+  const lobTag       = lob ? `${lob} | sold client` : null;
 
   const customFields: Array<{ id: string; value: string }> = [];
 
   const push = (fieldKey: string, value: string) => {
+    if (!value) return;
     const id = fieldIds[fieldKey];
     if (!id) {
-      console.warn(`[reconcile] fieldKey ${fieldKey} not found in location ${locationId} — skipping`);
+      omittedFields.push(fieldKey);
       return;
     }
-    if (value) customFields.push({ id, value });
+    customFields.push({ id, value });
   };
 
   // Global fields
-  push("contact.agent_npn",                str(policy.agent_npn));
-  push("contact.ancillary_agency__sorting", str(policy.agency));
-  push("contact.middle_initial",           str(policy.middle_initial));
+  push("contact.agent_npn",                 str(agentNpn));
+  push("contact.ancillary_agency__sorting",  str(policy.agency));
+  // middle_initial: split from client_first_name if it contains a middle initial
+  // (UNL sometimes embeds it). For now push empty — matches current evaluator
+  // behavior (field noted as "not yet mapped" in ghl-client.ts line 175).
+  push("contact.middle_initial", "");
 
   // LOB fields
-  if (lobKey) {
-    const p = `contact.${lobKey}__`;
-    push(`${p}client_status`,      clientStatus);
-    push(`${p}at_risk_status`,     atRiskStatus);
-    push(`${p}policy_number`,      str(policy.policy_number));
-    push(`${p}carrier_name`,       str(policy.carrier_name));
-    push(`${p}plan_name`,          str(policy.plan_name));
-    push(`${p}plan_premium`,       str(policy.plan_premium));
-    push(`${p}billing_mode`,       str(policy.billing_mode));
-    push(`${p}submission_date`,    str(policy.submission_date));
-    push(`${p}effective_date`,     str(policy.effective_date));
-    push(`${p}paid_to_date`,       str(policy.paid_to_date));
-    push(`${p}agent_first_name`,   str(policy.agent_first_name));
-    push(`${p}agent_full_name`,    str(policy.agent_full_name));
-    push(`${p}agent_writing_number`, str(policy.agent_writing_number));
+  if (lob) {
+    const p = `contact.${lob}__`;
+    push(`${p}client_status`,        clientStatus);
+    push(`${p}at_risk_status`,       atRiskStatus);
+    push(`${p}policy_number`,        str(policy.policy_number));
+    push(`${p}carrier_name`,         str(policy.carrier));
+    push(`${p}plan_name`,            str(policy.plan_name));
+    push(`${p}plan_premium`,         str(policy.plan_premium));
+    push(`${p}billing_mode`,         str(policy.billing_mode));
+    push(`${p}submission_date`,      usDate(policy.app_submit_date));
+    push(`${p}effective_date`,       usDate(policy.policy_effective_date));
+    push(`${p}paid_to_date`,         usDate(policy.paid_to_date));
+    push(`${p}agent_first_name`,     str(policy.agent_first_name));
+    push(`${p}agent_full_name`,      [policy.agent_first_name, policy.agent_last_name].filter(Boolean).join(" "));
+    push(`${p}agent_writing_number`, str(policy.agent_number));
     if (isTerminated) {
-      push(`${p}terminated_reason`,  str(policy.terminated_reason));
-      push(`${p}termination_date`,   str(policy.termination_date));
+      push(`${p}terminated_reason`,  contractReasonLabel(policy.contract_reason));
+      push(`${p}termination_date`,   usDate(policy.terminated_date));
     }
   }
 
-  const tags = [RECONCILE_TAG];
-  if (productTag) tags.push(productTag);
+  const tags = ["reconciled | do not automate"];
+  if (lobTag) tags.push(lobTag);
 
   const body: Record<string, unknown> = {
     locationId,
@@ -228,18 +246,17 @@ function buildContactBody(
     customFields,
   };
 
-  // Contact identity fields (best-effort — UNL may not have all)
-  if (str(policy.first_name)) body.firstName = str(policy.first_name);
-  if (str(policy.last_name))  body.lastName  = str(policy.last_name);
-  const phone = str(policy.phone);
-  if (phone && phone !== "0") body.phone = phone;
+  if (str(policy.client_first_name)) body.firstName = str(policy.client_first_name);
+  if (str(policy.client_last_name))  body.lastName  = str(policy.client_last_name);
+  const ph = str(policy.phone);
+  if (ph && ph !== "0") body.phone = ph;
   if (str(policy.email)) body.email = str(policy.email);
 
   return body;
 }
 
 // ---------------------------------------------------------------------------
-// GHL POST with retries on 429
+// GHL POST with 429 retry
 // ---------------------------------------------------------------------------
 async function ghlPost(
   url: string,
@@ -258,9 +275,8 @@ async function ghlPost(
       body: JSON.stringify(body),
     });
     if (resp.status === 429) {
-      const retryAfter = parseInt(resp.headers.get("Retry-After") ?? "10", 10);
-      console.warn(`[reconcile] 429 rate limit — waiting ${retryAfter}s`);
-      await new Promise(r => setTimeout(r, retryAfter * 1000));
+      const after = parseInt(resp.headers.get("Retry-After") ?? "10", 10);
+      await new Promise(r => setTimeout(r, after * 1000));
       continue;
     }
     let data: unknown = null;
@@ -270,9 +286,6 @@ async function ghlPost(
   return { ok: false, status: 429, data: "Max retries exceeded" };
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -298,24 +311,24 @@ Deno.serve(async (req: Request) => {
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { /* empty */ }
 
-  // ── Gate 1: target must be explicit ──────────────────────────────────────
+  // Gate 1: explicit target
   const target = (body.target as string | undefined)?.toLowerCase();
   if (target !== "build" && target !== "prod") {
     return jsonResponse({
-      error: 'target must be explicitly set: { "target": "build" } or { "target": "prod" }. No default.',
+      error: 'target must be "build" or "prod" — no default.',
     }, 400);
   }
 
-  // ── Gate 2: prod requires additional interlock ────────────────────────────
+  // Gate 2: prod interlock
   if (target === "prod" && body.prodConfirmed !== true) {
     return jsonResponse({
-      error: 'Prod run requires { "prodConfirmed": true } in request body. Add it only after Build test passes and Chris has signed off on workflow suppression in #dev-ghl.',
+      error: 'Prod requires { "prodConfirmed": true }. Add only after Build test passes and Chris has signed off on workflow suppression.',
     }, 400);
   }
 
-  const dryRun = body.dryRun !== false; // default true
+  const dryRun = body.dryRun !== false;
 
-  // ── Resolve GHL config for target ────────────────────────────────────────
+  // Resolve GHL creds for target
   const ghlToken      = target === "prod"
     ? Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE")
     : Deno.env.get("GHL_API_KEY_BUILD_ACT");
@@ -325,61 +338,99 @@ Deno.serve(async (req: Request) => {
 
   if (!ghlToken || !ghlLocationId) {
     return jsonResponse({
-      error: `Missing GHL secrets for target="${target}". ` +
-        (target === "prod"
-          ? "Need: GHL_API_KEY_HIP_PORTAL_SUNFIRE, GHL_LOCATION_ID_SUNFIRE"
-          : "Need: GHL_API_KEY_BUILD_ACT, GHL_LOCATION_ID_BUILD_ACT"),
+      error: `Missing GHL secrets for target="${target}".`,
     }, 500);
   }
 
-  // ── Resolve field IDs for this location ──────────────────────────────────
-  const fieldIds = await resolveFieldIds(ghlLocationId, ghlToken, apiBase);
-  if (Object.keys(fieldIds).length === 0) {
-    return jsonResponse({ error: "Failed to resolve field IDs — cannot proceed" }, 500);
+  // Resolve field IDs for this location (skip on dry run to avoid GHL call)
+  let fieldIds: FieldIdMap = {};
+  if (!dryRun) {
+    fieldIds = await resolveFieldIds(ghlLocationId, ghlToken, apiBase);
+    if (Object.keys(fieldIds).length === 0) {
+      return jsonResponse({ error: "Failed to resolve field IDs — cannot proceed" }, 500);
+    }
   }
 
-  // ── Fetch policies to reconcile ───────────────────────────────────────────
-  // Get distinct policy numbers from lifecycle_event_log (no-GHL-config era)
+  // Fetch distinct policy numbers from the no-config era
   const { data: logRows, error: logErr } = await supabase
     .from("lifecycle_event_log")
     .select("policy_number")
     .like("error", "%no GHL config%");
 
   if (logErr) {
-    return jsonResponse({ error: `Failed to query lifecycle_event_log: ${logErr.message}` }, 500);
+    return jsonResponse({ error: `lifecycle_event_log query failed: ${logErr.message}` }, 500);
   }
 
   const policyNumbers = [...new Set((logRows ?? []).map((r: { policy_number: string }) => r.policy_number))];
-  console.log(`[reconcile] ${policyNumbers.length} distinct policies to process`);
+  console.log(`[reconcile] ${policyNumbers.length} distinct policies`);
 
   if (policyNumbers.length === 0) {
     return jsonResponse({ ok: true, message: "No policies to reconcile", processed: 0 });
   }
 
-  // Fetch current state for all policies
+  // Dry run: return scope only, no DB or GHL calls beyond log query
+  if (dryRun) {
+    return jsonResponse({
+      ok: true,
+      dry_run: true,
+      target,
+      location_id: ghlLocationId,
+      scope: {
+        distinct_policies: policyNumbers.length,
+        note: "No GHL or DB contacts calls made. Pass dryRun:false to push.",
+      },
+    });
+  }
+
+  // Fetch current state for all policies from form_submissions
+  const COLS = [
+    "policy_number", "product_type", "contract_code", "billing_form",
+    "paid_to_date", "plan_name", "plan_premium", "billing_mode",
+    "carrier", "app_submit_date", "policy_effective_date",
+    "terminated_date", "contract_reason", "agent_number",
+    "agent_first_name", "agent_last_name", "agency",
+    "phone", "email", "client_first_name", "client_last_name", "status",
+  ].join(",");
+
   const { data: policies, error: polErr } = await supabase
     .from("form_submissions")
-    .select([
-      "policy_number", "product_type", "contract_code", "paid_to_date",
-      "plan_name", "plan_premium", "billing_mode", "carrier_name",
-      "submission_date", "effective_date", "termination_date", "terminated_reason",
-      "agent_npn", "agent_first_name", "agent_full_name", "agent_writing_number",
-      "agency", "middle_initial", "phone", "email",
-      "first_name", "last_name",
-    ].join(","))
+    .select(COLS)
     .in("policy_number", policyNumbers);
 
   if (polErr) {
-    return jsonResponse({ error: `Failed to query form_submissions: ${polErr.message}` }, 500);
+    return jsonResponse({ error: `form_submissions query failed: ${polErr.message}` }, 500);
   }
+
+  // Fetch agent NPNs (writing_number -> npn map)
+  const agentNumbers = [...new Set(
+    (policies ?? [])
+      .map((p: PolicyRow) => (p.agent_number || "").toUpperCase())
+      .filter(Boolean),
+  )];
+  const { data: agentRows } = await supabase
+    .from("agents")
+    .select("writing_number, npn")
+    .in("writing_number", agentNumbers);
+
+  const npnMap = new Map<string, string>(
+    (agentRows ?? []).map((a: AgentNpnRow) => [
+      (a.writing_number || "").toUpperCase(),
+      a.npn || "",
+    ]),
+  );
 
   const policyMap = new Map<string, PolicyRow>(
     (policies ?? []).map((p: PolicyRow) => [p.policy_number, p]),
   );
 
-  // ── Push loop with rate limiting ──────────────────────────────────────────
+  // Push loop with rate limiting
   const results: ReconcileResult[] = [];
+  const allOmittedFields = new Set<string>();
   let batchCount = 0;
+
+  // For the sample contact (first successful push)
+  let sampleContact: Record<string, unknown> | null = null;
+  let samplePolicyNumber: string | null = null;
 
   for (const policyNumber of policyNumbers) {
     const policy = policyMap.get(policyNumber);
@@ -387,60 +438,58 @@ Deno.serve(async (req: Request) => {
     if (!policy) {
       results.push({
         policy_number: policyNumber, ok: false, http_status: null,
-        dry_run: dryRun, error: "Policy not found in form_submissions",
+        dry_run: false, error: "Not found in form_submissions",
         skipped: true, skip_reason: "not_found",
       });
       continue;
     }
 
-    const contactBody = buildContactBody(policy, ghlLocationId, fieldIds);
+    const agentNpn = npnMap.get((policy.agent_number || "").toUpperCase()) ?? "";
+    const omittedFields: string[] = [];
+    const contactBody = buildContactBody(policy, agentNpn, ghlLocationId, fieldIds, omittedFields);
+    omittedFields.forEach(f => allOmittedFields.add(f));
 
-    if (dryRun) {
-      results.push({
-        policy_number: policyNumber, ok: true, http_status: null,
-        dry_run: true, error: null, skipped: false, skip_reason: null,
-      });
-      batchCount++;
-    } else {
-      const result = await ghlPost(`${apiBase}/contacts/`, ghlToken, contactBody);
-      results.push({
-        policy_number: policyNumber,
-        ok: result.ok,
-        http_status: result.status,
-        dry_run: false,
-        error: result.ok ? null : `HTTP ${result.status}: ${JSON.stringify(result.data).slice(0, 200)}`,
-        skipped: false,
-        skip_reason: null,
-      });
-      batchCount++;
+    const result = await ghlPost(`${apiBase}/contacts/`, ghlToken, contactBody);
+    results.push({
+      policy_number: policyNumber,
+      ok: result.ok,
+      http_status: result.status,
+      dry_run: false,
+      error: result.ok ? null : `HTTP ${result.status}: ${JSON.stringify(result.data).slice(0, 200)}`,
+      skipped: false,
+      skip_reason: null,
+    });
 
-      // Rate limiting: pause after every RATE_LIMIT_BATCH requests
-      if (batchCount % RATE_LIMIT_BATCH === 0) {
-        console.log(`[reconcile] batch ${batchCount} — pausing ${RATE_LIMIT_MS}ms`);
-        await new Promise(r => setTimeout(r, RATE_LIMIT_MS));
-      }
+    if (result.ok && sampleContact === null) {
+      sampleContact = contactBody;
+      samplePolicyNumber = policyNumber;
+    }
+
+    batchCount++;
+    if (batchCount % 80 === 0) {
+      console.log(`[reconcile] batch ${batchCount} — pausing 10s`);
+      await new Promise(r => setTimeout(r, 10_000));
     }
   }
 
-  // ── Summary ───────────────────────────────────────────────────────────────
-  const ok_count      = results.filter(r => r.ok && !r.skipped).length;
-  const fail_count    = results.filter(r => !r.ok && !r.skipped).length;
-  const skip_count    = results.filter(r => r.skipped).length;
-  const failures      = results.filter(r => !r.ok && !r.skipped);
-
-  console.log(`[reconcile] done — ok=${ok_count} fail=${fail_count} skip=${skip_count} dry_run=${dryRun}`);
+  const ok_count   = results.filter(r => r.ok && !r.skipped).length;
+  const fail_count = results.filter(r => !r.ok && !r.skipped).length;
+  const skip_count = results.filter(r => r.skipped).length;
+  const failures   = results.filter(r => !r.ok && !r.skipped).slice(0, 20);
 
   return jsonResponse({
     ok: fail_count === 0,
     target,
-    dry_run: dryRun,
+    dry_run: false,
     location_id: ghlLocationId,
     total: policyNumbers.length,
     processed: results.length,
     ok_count,
     fail_count,
     skip_count,
-    reconcile_tag: RECONCILE_TAG,
-    failures: failures.slice(0, 20), // first 20 failures for diagnosis
+    omitted_field_keys: [...allOmittedFields],
+    sample_policy_number: samplePolicyNumber,
+    sample_contact: sampleContact,
+    failures,
   });
 });
