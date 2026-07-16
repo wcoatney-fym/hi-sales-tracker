@@ -11,18 +11,20 @@ import { createClient } from "npm:@supabase/supabase-js@2";
  * any failure; silent on green.
  *
  * Required Supabase function secrets:
- *   GHL_API_KEY_HIP_PORTAL        — same Private Integration token used by
- *                                    the lifecycle push (works across Build + Prod)
- *   GHL_LOCATION_ID_SUNFIRE_BUILD — the BUILD location ID (NOT production)
+ *   GHL_API_KEY_BUILD_ACT         — Private Integration token for the Build
+ *                                    template sub-account (NOT the Sunfire token)
+ *   GHL_LOCATION_ID_BUILD_ACT     — Build template sub-account location ID
+ *                                    (CLSxgOblhfpvW6ICB82A). NOT production.
  *   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY — standard edge fn env
  *   GHL_API_BASE                  — defaults to https://services.leadconnectorhq.com
  *
  * The Slack alert reads the 'slack_alert_webhook' secret from Vault
  * (same secret the dead-man's switch uses).
  *
- * NEVER point this at the Production (Sunfire) location. The BUILD location
- * is the safety boundary — all canary contacts are created and immediately
- * deleted there.
+ * NEVER point this at Sunfire Production. The Build sub-account is the safety
+ * boundary — all canary contacts are created and immediately deleted there.
+ * Three GHL tiers: Build (template/sandbox), Sunfire (production), Agency
+ * sub-accounts (downstream). This canary targets Build only.
  */
 
 // ---------------------------------------------------------------------------
@@ -91,8 +93,8 @@ interface GhlConfig {
 
 function loadCanaryConfig(): GhlConfig | null {
   try {
-    const token      = Deno.env.get("GHL_API_KEY_HIP_PORTAL");
-    const locationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE_BUILD");
+    const token      = Deno.env.get("GHL_API_KEY_BUILD_ACT");
+    const locationId = Deno.env.get("GHL_LOCATION_ID_BUILD_ACT");
     if (!token || !locationId) return null;
     return {
       token,
@@ -377,8 +379,8 @@ Deno.serve(async (req: Request) => {
   const cfg = loadCanaryConfig();
   if (!cfg) {
     const errMsg =
-      "GHL_API_KEY_HIP_PORTAL or GHL_LOCATION_ID_SUNFIRE_BUILD not set. " +
-      "Canary cannot run. Set both as Supabase function secrets.";
+      "GHL_API_KEY_BUILD_ACT or GHL_LOCATION_ID_BUILD_ACT not set. " +
+      "Canary cannot run. Add both as Supabase function secrets (Build sub-account credentials).";
     console.error(`[canary] ${errMsg}`);
 
     await supabase.from("lifecycle_canary_runs").insert({
@@ -396,8 +398,8 @@ Deno.serve(async (req: Request) => {
     await sendSlackAlert(
       supabase,
       `:red_circle: *GHL canary — config missing* — ${runAt.slice(0, 10)}\n` +
-      `\`GHL_API_KEY_HIP_PORTAL\` or \`GHL_LOCATION_ID_SUNFIRE_BUILD\` not set. ` +
-      `Canary cannot run. Add both secrets in Supabase → Edge Functions → Secrets.`,
+      `\`GHL_API_KEY_BUILD_ACT\` or \`GHL_LOCATION_ID_BUILD_ACT\` not set. ` +
+      `Canary cannot run. Add both as Supabase function secrets (Build sub-account credentials).`,
     );
 
     return jsonResponse({ ok: false, error: errMsg }, 500);
