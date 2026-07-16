@@ -11,18 +11,20 @@ import { createClient } from "npm:@supabase/supabase-js@2";
  * any failure; silent on green.
  *
  * Required Supabase function secrets:
- *   GHL_API_KEY_HIP_PORTAL        — same Private Integration token used by
- *                                    the lifecycle push (works across Build + Prod)
- *   GHL_LOCATION_ID_SUNFIRE_BUILD — the BUILD location ID (NOT production)
+ *   GHL_API_KEY_BUILD_ACT         — Private Integration token for the Build
+ *                                    template sub-account (NOT the Sunfire token)
+ *   GHL_LOCATION_ID_BUILD_ACT     — Build template sub-account location ID
+ *                                    (CLSxgOblhfpvW6ICB82A). NOT production.
  *   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY — standard edge fn env
  *   GHL_API_BASE                  — defaults to https://services.leadconnectorhq.com
  *
  * The Slack alert reads the 'slack_alert_webhook' secret from Vault
  * (same secret the dead-man's switch uses).
  *
- * NEVER point this at the Production (Sunfire) location. The BUILD location
- * is the safety boundary — all canary contacts are created and immediately
- * deleted there.
+ * NEVER point this at Sunfire Production. The Build sub-account is the safety
+ * boundary — all canary contacts are created and immediately deleted there.
+ * Three GHL tiers: Build (template/sandbox), Sunfire (production), Agency
+ * sub-accounts (downstream). This canary targets Build only.
  */
 
 // ---------------------------------------------------------------------------
@@ -91,8 +93,8 @@ interface GhlConfig {
 
 function loadCanaryConfig(): GhlConfig | null {
   try {
-    const token      = Deno.env.get("GHL_API_KEY_HIP_PORTAL");
-    const locationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE_BUILD");
+    const token      = Deno.env.get("GHL_API_KEY_BUILD_ACT");
+    const locationId = Deno.env.get("GHL_LOCATION_ID_BUILD_ACT");
     if (!token || !locationId) return null;
     return {
       token,
@@ -178,7 +180,7 @@ async function runCanary(
   let contactId: string | null = null;
   const assertions: Assertion[] = [];
   let stepsPassed = 0;
-  const stepsTotal = 4; // create, read, assert, delete
+  const stepsTotal = 4; // create, read+location-guard, assert, delete
 
   const canaryBody = {
     locationId: cfg.locationId,
@@ -232,7 +234,12 @@ async function runCanary(
   stepsPassed++;
   console.log(`[canary] step 1 passed — contact created: ${contactId}`);
 
-  // ── Step 2: Read contact back ─────────────────────────────────────────────
+  // ── Step 2: Read contact back + HARD location guard ─────────────────────
+  // Structural safety: even if the POST somehow landed in the wrong location
+  // (token scoped to multiple locations, GHL routing bug, etc.), we verify the
+  // returned contact.locationId === GHL_LOCATION_ID_SUNFIRE_BUILD before doing
+  // anything else. If it doesn't match: DELETE immediately, alert loud, abort.
+  // This makes the canary structurally incapable of leaving debris in Production.
   const readResult = await ghlRequest(cfg, "GET", `/contacts/${contactId}`);
   if (!readResult.ok) {
     // Best-effort delete even if read fails
@@ -247,8 +254,37 @@ async function runCanary(
       detail: { read_status: readResult.status, read_body: readResult.data },
     };
   }
+
+  // Location guard — must pass before any other work on this contact
+  const readData2   = readResult.data as Record<string, unknown>;
+  const contact2    = (readData2.contact ?? readData2) as Record<string, unknown>;
+  const actualLoc   = contact2.locationId as string | undefined;
+  if (actualLoc !== cfg.locationId) {
+    // Wrong location — delete immediately and alert; never leave canary debris in Production
+    const deleteAttempt = await ghlRequest(cfg, "DELETE", `/contacts/${contactId}`).catch(() => ({}));
+    const alertMsg =
+      `:rotating_light: *GHL canary LOCATION MISMATCH — possible Production contact created* ` +
+      `— ${runAt.slice(0, 10)}\n` +
+      `Expected locationId: \`${cfg.locationId}\` (Build)\n` +
+      `Actual locationId:   \`${actualLoc ?? "unknown"}\`\n` +
+      `Contact id: \`${contactId}\`\n` +
+      `Delete attempted: ${JSON.stringify(deleteAttempt)}\n` +
+      `:warning: *Manually verify this contact was removed from Production GHL.*`;
+    await sendSlackAlert(supabase, alertMsg);
+    console.error("[canary] LOCATION MISMATCH", alertMsg);
+    return {
+      ok: false,
+      steps_passed: stepsPassed,
+      steps_total: stepsTotal,
+      contact_id: contactId,
+      assertions,
+      error: `Location mismatch: expected ${cfg.locationId}, got ${actualLoc}`,
+      detail: { expected_location: cfg.locationId, actual_location: actualLoc, delete_result: deleteAttempt },
+    };
+  }
+
   stepsPassed++;
-  console.log(`[canary] step 2 passed — contact read back`);
+  console.log(`[canary] step 2 passed — contact read back, locationId verified: ${actualLoc}`);
 
   // ── Step 3: Assert field IDs + values ─────────────────────────────────────
   const readData    = readResult.data as Record<string, unknown>;
@@ -343,8 +379,8 @@ Deno.serve(async (req: Request) => {
   const cfg = loadCanaryConfig();
   if (!cfg) {
     const errMsg =
-      "GHL_API_KEY_HIP_PORTAL or GHL_LOCATION_ID_SUNFIRE_BUILD not set. " +
-      "Canary cannot run. Set both as Supabase function secrets.";
+      "GHL_API_KEY_BUILD_ACT or GHL_LOCATION_ID_BUILD_ACT not set. " +
+      "Canary cannot run. Add both as Supabase function secrets (Build sub-account credentials).";
     console.error(`[canary] ${errMsg}`);
 
     await supabase.from("lifecycle_canary_runs").insert({
@@ -362,8 +398,8 @@ Deno.serve(async (req: Request) => {
     await sendSlackAlert(
       supabase,
       `:red_circle: *GHL canary — config missing* — ${runAt.slice(0, 10)}\n` +
-      `\`GHL_API_KEY_HIP_PORTAL\` or \`GHL_LOCATION_ID_SUNFIRE_BUILD\` not set. ` +
-      `Canary cannot run. Add both secrets in Supabase → Edge Functions → Secrets.`,
+      `\`GHL_API_KEY_BUILD_ACT\` or \`GHL_LOCATION_ID_BUILD_ACT\` not set. ` +
+      `Canary cannot run. Add both as Supabase function secrets (Build sub-account credentials).`,
     );
 
     return jsonResponse({ ok: false, error: errMsg }, 500);
@@ -402,7 +438,6 @@ Deno.serve(async (req: Request) => {
     detail:            { ...result.detail, assertions: result.assertions },
   });
 
-  // Alert on failure only — green runs are silent
   if (!result.ok) {
     const failedList = result.assertions
       .filter((a) => !a.passed)
@@ -420,6 +455,12 @@ Deno.serve(async (req: Request) => {
 
     console.error("[canary] FAILED:", result.error, JSON.stringify(result.assertions));
   } else {
+    // Explicit green signal — a dead canary must never look like a passing one.
+    await sendSlackAlert(
+      supabase,
+      `:white_check_mark: *GHL canary passed* — ${runAt.slice(0, 10)} — ` +
+      `${assertionsPassed} assertions ok, ${result.steps_passed}/${result.steps_total} steps`,
+    );
     console.log(
       `[canary] PASSED — ${assertionsPassed} assertions, ${result.steps_passed} steps`,
     );
