@@ -34,7 +34,7 @@ function bandColor(pct: number | null): string {
 
 // Semicircular gauge (0-100%) with a needle at `value`, a 90% target tick,
 // and the current number called out in the center.
-function PersistencyGauge({ value, label = "90-day persistency" }: { value: number | null; label?: string }) {
+function PersistencyGauge({ value }: { value: number | null }) {
   const pct = value === null || value === undefined ? null : Math.max(0, Math.min(100, value));
   const cx = 100;
   const cy = 100;
@@ -78,12 +78,14 @@ function PersistencyGauge({ value, label = "90-day persistency" }: { value: numb
       <line x1={cx} y1={cy} x2={nx} y2={ny} stroke={bandColor(pct)} strokeWidth="3" strokeLinecap="round" />
       <circle cx={cx} cy={cy} r="5" fill={bandColor(pct)} />
       {/* center value */}
-      <text x={cx} y={cy - 24} textAnchor="middle" fontSize="26" fontWeight="700" fill={bandColor(pct)}>
+      <text x={cx} y={cy - 26} textAnchor="middle" fontSize="26" fontWeight="700" fill={bandColor(pct)}>
         {pct === null ? "—" : `${pct}%`}
       </text>
       <text x={cx} y={cy - 10} textAnchor="middle" fontSize="9" fill="#94a3b8">
-        {label}
+        90-day persistency
       </text>
+      {/* target label */}
+      <text x={tickOuter.x + 2} y={tickOuter.y - 4} fontSize="8" fill="#cbd5e1">90% target</text>
     </svg>
   );
 }
@@ -150,7 +152,7 @@ export default function QualityMetrics({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <div className="flex flex-col">
           <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">90-Day Retention</h4>
-          <PersistencyGauge value={retention ? retention.retention_pct : null} label="90-day retention" />
+          <PersistencyGauge value={retention ? retention.retention_pct : null} />
           <p className="text-[11px] text-slate-400 text-center mt-1">
             {retention && retention.drafted_first
               ? `${retention.retained}/${retention.drafted_first} policies retained through the 3rd draft`
