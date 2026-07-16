@@ -28,22 +28,28 @@ import { createClient } from "npm:@supabase/supabase-js@2";
  */
 
 // ---------------------------------------------------------------------------
-// Field IDs — copied from ghl-client.ts. Keep in sync if IDs are refreshed.
-// These are exactly what the canary asserts on readback so any drift surfaces
-// immediately. If a field ID changes in ghl-client.ts, update here too.
+// Field IDs — BUILD sub-account (locationId: CLSxgOblhfpvW6ICB82A).
+//
+// These differ from Sunfire's field IDs even though the fieldKeys are identical
+// (contact.agent_npn, contact.hip__client_status, etc.). Build and Sunfire are
+// separate GHL sub-accounts under the same company; each has its own field ID
+// namespace. IDs verified via GET /locations/CLSxgOblhfpvW6ICB82A/customFields
+// on 2026-07-16. If IDs drift, re-pull from that endpoint and update here.
+//
+// DO NOT substitute Sunfire field IDs here — they will silently return
+// actual=null on GET-back from the Build sub-account.
 // ---------------------------------------------------------------------------
-const AGENT_NPN_FIELD_ID      = "uEFOApsD4JKXsXH3T9E4";
-const AGENCY_SORTING_FIELD_ID = "qSHUIp3GfPWHRGbPh1CM";
-const MIDDLE_INITIAL_FIELD_ID = "9a1uz6fFK8x1kaZcNbFd";
+const AGENT_NPN_FIELD_ID      = "BioiKiWAgS6nAPXqv62P";  // contact.agent_npn
+const AGENCY_SORTING_FIELD_ID = "5DOgnRWCmld3wDL7GfQA";  // contact.ancillary_agency__sorting
+const MIDDLE_INITIAL_FIELD_ID = "lEzXuO2tVkt5e2Pl6YCp";  // contact.middle_initial
 
-// HIP LOB field IDs — the 6 exercised by the canary (covers global path +
-// the most assertion-rich LOB fields: status, risk, policy number, carrier).
-const HIP_CLIENT_STATUS_ID    = "GnUA91j0Yj1PXH7CPtT4";
-const HIP_AT_RISK_STATUS_ID   = "AHDJArHPmAzZ6IMaIcxw";
-const HIP_POLICY_NUMBER_ID    = "O7MjvGP1J6PRGhjdwjhj";
-const HIP_CARRIER_NAME_ID     = "ujIt1GLYAbrspZ2XgXQy";
-const HIP_PLAN_NAME_ID        = "0wkHYd9Jfr1mtttt56kf";
-const HIP_BILLING_MODE_ID     = "cB6DQmu1gbSY7piS5Wb1";
+// HIP LOB field IDs — Build sub-account
+const HIP_CLIENT_STATUS_ID    = "jaENac3zhqsWTCpLqJfe";  // contact.hip__client_status
+const HIP_AT_RISK_STATUS_ID   = "nag2R8rm5ZzBj4dj4LPe";  // contact.hip__at_risk_status
+const HIP_POLICY_NUMBER_ID    = "k7N1iLXWSJScaVvOUh8m";  // contact.hip__policy_number
+const HIP_CARRIER_NAME_ID     = "QkAYm6F0vbK30WiD2adK";  // contact.hip__carrier_name
+const HIP_PLAN_NAME_ID        = "QYNKAPuCquq9Uy7D5pBi";  // contact.hip__plan_name
+const HIP_BILLING_MODE_ID     = "CUSuD50WJeIzTDErvca6";  // contact.hip__billing_mode
 
 // Canary contact sentinel values.
 // Title Case on all field values — GHL workflows branch on these; casing
