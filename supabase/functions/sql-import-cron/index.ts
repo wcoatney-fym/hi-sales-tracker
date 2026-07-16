@@ -321,6 +321,74 @@ interface DataSource {
   last_seen_load_id: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Startup secret validation — fail loudly, not silently.
+//
+// Previously, a missing GHL_API_KEY_HIP_PORTAL caused 3,838 lifecycle events
+// to log as "no GHL config" with zero alerts. This check runs at boot so the
+// edge worker logs a hard error on every invocation while config is wrong,
+// making it impossible to miss in Supabase logs and surfacing immediately in
+// the daily brief.
+//
+// Rules:
+//   - REQUIRED_ALWAYS: must be set on every invocation. Missing = log error +
+//     include in response; does NOT block the import (import must still run so
+//     policies stay current). But lifecycle pushes will silently fail if these
+//     are absent, so the loud log is the alert.
+//   - REQUIRED_FOR_LIFECYCLE: only required when ghl_api_enabled agencies exist.
+//     If absent and there are enabled agencies, log error and surface in brief.
+// ---------------------------------------------------------------------------
+interface SecretValidationResult {
+  ok: boolean;
+  missing: string[];
+  warnings: string[];
+}
+
+function validateRequiredSecrets(): SecretValidationResult {
+  const REQUIRED_ALWAYS = [
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_URL",
+  ];
+  const REQUIRED_FOR_LIFECYCLE = [
+    "GHL_API_KEY_HIP_PORTAL",
+    "GHL_LOCATION_ID_SUNFIRE",
+  ];
+
+  const missing: string[] = [];
+  const warnings: string[] = [];
+
+  for (const name of REQUIRED_ALWAYS) {
+    const val = Deno.env.get(name);
+    if (!val) missing.push(name);
+  }
+
+  // Lifecycle secrets: warn if absent — lifecycle events will silently no-op
+  // for ghl_api_enabled agencies until these are set.
+  for (const name of REQUIRED_FOR_LIFECYCLE) {
+    const val = Deno.env.get(name);
+    if (!val) warnings.push(name);
+  }
+
+  if (missing.length > 0) {
+    console.error(
+      `[startup:secret-validation] MISSING REQUIRED SECRETS: ${missing.join(", ")}. ` +
+      `Import will run but may fail. Fix immediately.`
+    );
+  }
+  if (warnings.length > 0) {
+    console.warn(
+      `[startup:secret-validation] LIFECYCLE SECRETS NOT SET: ${warnings.join(", ")}. ` +
+      `Lifecycle push to GHL will be a silent no-op for all ghl_api_enabled agencies ` +
+      `until these are configured in Supabase Edge Function secrets.`
+    );
+  }
+
+  return { ok: missing.length === 0, missing, warnings };
+}
+
+// Run at module load — logs appear in Supabase edge function logs on every cold start.
+const _startupCheck = validateRequiredSecrets();
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -330,6 +398,10 @@ Deno.serve(async (req: Request) => {
   const cronSecret = req.headers.get("X-Cron-Secret") || "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+
+  // Re-run secret validation on every request so the warning lands in every
+  // invocation's log group, not just cold starts. Cheap (env reads only).
+  const secretCheck = validateRequiredSecrets();
 
   let authenticated = false;
   if (serviceRoleKey && authHeader.includes(serviceRoleKey)) {
@@ -364,9 +436,23 @@ Deno.serve(async (req: Request) => {
   const lastId = body.lastId as string | undefined;
   const syncedSoFar = parseInt(String(body.synced || "0"), 10);
 
+  // Attach secret-check warnings to every init/check response so they surface
+  // in the Supabase function response body and in Diamond's daily brief check.
+  const secretMeta = secretCheck.ok && secretCheck.warnings.length === 0
+    ? undefined
+    : { missing_secrets: secretCheck.missing, lifecycle_secrets_unset: secretCheck.warnings };
+
   try {
     if (phase === "init") {
-      return await handleInit(supabase, supabaseUrl, serviceRoleKey);
+      const r = await handleInit(supabase, supabaseUrl, serviceRoleKey);
+      if (secretMeta) {
+        // Augment init response with secret warnings so the daily brief can surface them
+        try {
+          const rb = await r.clone().json();
+          return jsonResponse({ ...rb, secret_validation: secretMeta });
+        } catch { return r; }
+      }
+      return r;
     } else if (phase === "check") {
       return await handleCheck(supabase, supabaseUrl, serviceRoleKey);
     } else if (phase === "fetch") {
