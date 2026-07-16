@@ -65,10 +65,14 @@ SELECT cron.schedule(
 );
 
 -- ── Daily canary schedule ─────────────────────────────────────────────────────
--- 13:30 UTC = 08:30 CDT / 07:30 CST. Adjust for DST: the cron fires at 13:30
--- UTC year-round; during CST (Nov–Mar) that's 07:30 CT — still fine.
+-- Authoritative trigger: OpenClaw heartbeat cron (tz-aware, 08:30 CT year-round).
+-- This pg_cron entry is BACKUP ONLY in case the OpenClaw cron misses a run.
+-- 13:30 UTC = 08:30 CDT (Mar–Nov) / 07:30 CST (Nov–Mar). DST drift of ±1hr on
+-- the backup is acceptable — the OpenClaw cron is the daily source of truth.
+-- If both fire on the same day the canary runs twice; lifecycle_canary_runs
+-- retains both rows (harmless duplicate, two green rows > one missed day).
 SELECT cron.schedule(
-  'ghl-canary-daily',
+  'ghl-canary-daily-backup',
   '30 13 * * *',
   $$
   SELECT net.http_post(
@@ -87,4 +91,5 @@ SELECT cron.schedule(
 
 COMMENT ON TABLE public.lifecycle_canary_runs IS
   'Daily GHL canary run log. One row per invocation. Purged after 90 days. '
-  'pg_cron: ghl-canary-daily fires at 13:30 UTC (08:30 CDT / 07:30 CST).';
+  'Authoritative trigger: OpenClaw cron at 08:30 CT (tz-aware). '
+  'pg_cron ghl-canary-daily-backup fires at 13:30 UTC as fallback only.';
