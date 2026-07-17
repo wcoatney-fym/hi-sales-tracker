@@ -312,27 +312,35 @@ Deno.serve(async (req: Request) => {
   try { body = await req.json(); } catch { /* empty */ }
 
   // Gate 1: explicit target
+  // Targets:
+  //   "build"        — Build sub-account (original sandbox). Field IDs differ from Sunfire.
+  //   "sunfire-test" — Sunfire Production with a tagged test contact (policy_nbr prefix TEST-).
+  //                    Uses real Sunfire field IDs. All contacts tagged 'reconciled | do not automate'.
+  //                    This is the right target for pre-prod validation.
+  //   "prod"         — Sunfire Production, real backfill. Requires prodConfirmed + Chris suppression
+  //                    sign-off. Not for testing.
   const target = (body.target as string | undefined)?.toLowerCase();
-  if (target !== "build" && target !== "prod") {
+  if (target !== "build" && target !== "sunfire-test" && target !== "prod") {
     return jsonResponse({
-      error: 'target must be "build" or "prod" — no default.',
+      error: 'target must be "build", "sunfire-test", or "prod" — no default.',
     }, 400);
   }
 
-  // Gate 2: prod interlock
+  // Gate 2: prod interlock (sunfire-test does NOT require prodConfirmed)
   if (target === "prod" && body.prodConfirmed !== true) {
     return jsonResponse({
-      error: 'Prod requires { "prodConfirmed": true }. Add only after Build test passes and Chris has signed off on workflow suppression.',
+      error: 'Prod requires { "prodConfirmed": true }. Add only after sunfire-test passes and Chris has signed off on workflow suppression.',
     }, 400);
   }
 
   const dryRun = body.dryRun !== false;
+  const isSunfire = target === "sunfire-test" || target === "prod";
 
   // Resolve GHL creds for target
-  const ghlToken      = target === "prod"
+  const ghlToken      = isSunfire
     ? Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE")
     : Deno.env.get("GHL_API_KEY_BUILD_ACT");
-  const ghlLocationId = target === "prod"
+  const ghlLocationId = isSunfire
     ? Deno.env.get("GHL_LOCATION_ID_SUNFIRE")
     : Deno.env.get("GHL_LOCATION_ID_BUILD_ACT");
 
@@ -351,11 +359,25 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // sunfire-test: accept an explicit list of test policy numbers (spot-check mode).
+  // Pass { "target": "sunfire-test", "testPolicyNumbers": ["POL-001", ...], "dryRun": false }
+  // to push exactly those policies to Sunfire without touching the full backlog.
+  // This is the recommended workflow before a prod run: pick 2-3 policies, verify
+  // contacts + field values in Sunfire, confirm suppression tag fires correctly.
+  const testPolicyNumbers = target === "sunfire-test" && Array.isArray(body.testPolicyNumbers)
+    ? (body.testPolicyNumbers as string[]).filter((s) => typeof s === "string" && s.length > 0)
+    : null;
+
   // Fetch distinct policy numbers from the no-config era.
   // MUST paginate — lifecycle_event_log has 3,875+ rows; JS client caps at 1,000.
   // Without pagination, policies in rows 1,001+ are silently missed.
   const allPolicies = new Set<string>();
-  {
+
+  if (testPolicyNumbers && testPolicyNumbers.length > 0) {
+    // Spot-check mode: use the explicit list directly, no log query needed.
+    testPolicyNumbers.forEach((p) => allPolicies.add(p));
+    console.log(`[reconcile] sunfire-test spot-check: ${testPolicyNumbers.length} explicit policies`);
+  } else {
     const PS = 1000;
     let psOff = 0;
     while (true) {
@@ -381,14 +403,21 @@ Deno.serve(async (req: Request) => {
 
   // Dry run: return scope only, no DB or GHL calls beyond log query
   if (dryRun) {
+    const scopeNote = target === "sunfire-test" && testPolicyNumbers
+      ? `Spot-check mode: ${testPolicyNumbers.length} explicit policy numbers. Pass dryRun:false to push.`
+      : target === "sunfire-test"
+      ? `Full backlog scope (${policyNumbers.length} policies) against Sunfire. Consider passing testPolicyNumbers:[...] for a spot-check first.`
+      : "No GHL or DB contacts calls made. Pass dryRun:false to push.";
+
     return jsonResponse({
       ok: true,
       dry_run: true,
       target,
       location_id: ghlLocationId,
+      suppression_tag: isSunfire ? "reconciled | do not automate" : null,
       scope: {
         distinct_policies: policyNumbers.length,
-        note: "No GHL or DB contacts calls made. Pass dryRun:false to push.",
+        note: scopeNote,
       },
     });
   }
