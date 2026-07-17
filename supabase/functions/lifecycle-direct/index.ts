@@ -589,18 +589,29 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
-  const { data: priorRows } = await supabase
-    .from("lifecycle_policy_state")
-    .select("policy_number, cntrct_code, at_risk_policy, paid_to_date, agency_id");
-
+  // MUST paginate: 1,599 rows; JS client caps at 1,000. Without pagination,
+  // policies in rows 1,001-1,599 have no prior-state entry → re-fire on every tick.
   const priorState = new Map<string, PriorState & { agency_id: string | null; at_risk_policy: boolean }>();
-  for (const r of priorRows ?? []) {
-    priorState.set(r.policy_number as string, {
-      contract_code:    r.cntrct_code as string | null,
-      at_risk_fired_at: null,
-      agency_id:        r.agency_id as string | null,
-      at_risk_policy:   (r.at_risk_policy as boolean) ?? false, // persisted from prior live fire
-    });
+  {
+    const PS = 1000;
+    let psOff = 0;
+    while (true) {
+      const { data: priorRows, error: priorErr } = await supabase
+        .from("lifecycle_policy_state")
+        .select("policy_number, cntrct_code, at_risk_policy, paid_to_date, agency_id")
+        .range(psOff, psOff + PS - 1);
+      if (priorErr) { console.error(`[lifecycle-direct] lifecycle_policy_state read failed: ${priorErr.message}`); break; }
+      for (const r of priorRows ?? []) {
+        priorState.set(r.policy_number as string, {
+          contract_code:    r.cntrct_code as string | null,
+          at_risk_fired_at: null,
+          agency_id:        r.agency_id as string | null,
+          at_risk_policy:   (r.at_risk_policy as boolean) ?? false,
+        });
+      }
+      if (!priorRows || priorRows.length < PS) break;
+      psOff += PS;
+    }
   }
 
   // ── 4. Query Max's DB ────────────────────────────────────────────────────

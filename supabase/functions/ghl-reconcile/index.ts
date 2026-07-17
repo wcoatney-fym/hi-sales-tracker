@@ -351,18 +351,29 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // Fetch distinct policy numbers from the no-config era
-  const { data: logRows, error: logErr } = await supabase
-    .from("lifecycle_event_log")
-    .select("policy_number")
-    .like("error", "%no GHL config%");
-
-  if (logErr) {
-    return jsonResponse({ error: `lifecycle_event_log query failed: ${logErr.message}` }, 500);
+  // Fetch distinct policy numbers from the no-config era.
+  // MUST paginate — lifecycle_event_log has 3,875+ rows; JS client caps at 1,000.
+  // Without pagination, policies in rows 1,001+ are silently missed.
+  const allPolicies = new Set<string>();
+  {
+    const PS = 1000;
+    let psOff = 0;
+    while (true) {
+      const { data: logRows, error: logErr } = await supabase
+        .from("lifecycle_event_log")
+        .select("policy_number")
+        .like("error", "%no GHL config%")
+        .range(psOff, psOff + PS - 1);
+      if (logErr) {
+        return jsonResponse({ error: `lifecycle_event_log query failed: ${logErr.message}` }, 500);
+      }
+      for (const r of (logRows ?? [])) allPolicies.add((r as { policy_number: string }).policy_number);
+      if (!logRows || logRows.length < PS) break;
+      psOff += PS;
+    }
   }
-
-  const policyNumbers = [...new Set((logRows ?? []).map((r: { policy_number: string }) => r.policy_number))];
-  console.log(`[reconcile] ${policyNumbers.length} distinct policies`);
+  const policyNumbers = [...allPolicies];
+  console.log(`[reconcile] ${policyNumbers.length} distinct policies (paginated)`);
 
   if (policyNumbers.length === 0) {
     return jsonResponse({ ok: true, message: "No policies to reconcile", processed: 0 });
