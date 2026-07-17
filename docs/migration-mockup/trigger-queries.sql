@@ -9,6 +9,14 @@
 --     at_risk_status_last_change_date, at_risk_policy, app_recvd_date
 --   Table: typed.unl_fym_policy_latest_load ✅
 --
+-- at_risk_status_last_change_date — BUSINESS DATE (confirmed 2026-07-17):
+--   Delta distribution vs file_date shows delta=0 (289 rows), delta=-1 (233),
+--   delta=-2 (367), delta=-3 (284). Unlike contract_code_last_change_date which
+--   is mostly delta=0, at-risk lag runs up to 3 days. 3-day window catches the
+--   vast majority; a delta=-3 event arriving in the same load it changed could
+--   be at the edge — fired_triggers idempotency ensures no double-fire if window
+--   is extended in future. NULL rate on trigger candidates: 4/4,506 (negligible).
+--
 -- app_recvd_date — submission date anchor (confirmed 2026-07-17):
 --   100% populated on all 4,162 P rows (zero NULLs).
 --   contract_code_last_change_date is NULL on 4,154/4,162 P rows — NOT
@@ -255,3 +263,73 @@ WHERE
     )
 
 ORDER BY changed_on DESC, trigger_type;
+
+
+-- ---------------------------------------------------------------------------
+-- QUERY D: At-risk flag newly set (false/NULL → true)
+-- ---------------------------------------------------------------------------
+--
+-- Fires when:
+--   at_risk_policy = true AND (previous_at_risk_status = false OR IS NULL)
+--   i.e. policy just became at-risk for the first time (or first time recorded).
+--
+-- SCHEMA VERIFIED (2026-07-17):
+--   at_risk_policy                   boolean  ✅
+--   previous_at_risk_status          boolean  ✅
+--   at_risk_status_last_change_date  date     ✅
+--
+-- at_risk_status_last_change_date = BUSINESS DATE (not load date):
+--   Confirmed by delta distribution (risk_changed - file_date):
+--     delta=0:  289 rows (same-day changes appear in today's load)
+--     delta=-1: 233 rows
+--     delta=-2: 367 rows
+--     delta=-3: 284 rows  ← lag runs deeper than contract_code dates
+--   3-day window covers the observed lag range. fired_triggers NOT EXISTS
+--   is still the essential idempotency gate — same reason as Queries A/B.
+--
+-- NULL rate: 4 of 4,506 trigger candidates have NULL risk_changed_on (negligible).
+--   Those 4 rows would be excluded by the >= window filter — acceptable.
+--
+-- trigger_type = 'at_risk' in fired_triggers.
+-- fired_triggers.changed_on = at_risk_status_last_change_date.
+--
+-- Volume (current 3-day window, today's snapshot 2026-07-17):
+--   2026-07-17  266
+--   2026-07-16  181
+--   2026-07-15  288
+--   2026-07-14  173
+--   Total in window: 908
+--   Total at_risk=true, prev=false/NULL (all time): 4,506
+
+SELECT
+    t.policy_nbr,
+    t.cntrct_code                       AS current_code,
+    t.at_risk_policy                    AS is_at_risk,
+    t.previous_at_risk_status           AS was_at_risk,
+    t.at_risk_status_last_change_date   AS risk_changed_on,
+    'at_risk'                           AS trigger_type
+FROM typed.unl_fym_policy_latest_load t
+WHERE
+    t.at_risk_policy = true
+    AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
+    AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+    AND NOT EXISTS (
+        SELECT 1
+        FROM fired_triggers f
+        WHERE f.policy_nbr   = t.policy_nbr
+          AND f.trigger_type = 'at_risk'
+          AND f.changed_on   = t.at_risk_status_last_change_date
+    )
+ORDER BY t.at_risk_status_last_change_date DESC;
+
+-- After successful GHL push:
+--
+-- INSERT INTO public.fired_triggers (policy_nbr, trigger_type, changed_on)
+-- VALUES ($1, 'at_risk', $2)
+-- ON CONFLICT (policy_nbr, trigger_type, changed_on) DO NOTHING;
+
+-- NOTE on trigger_type value:
+--   fired_triggers CHECK constraint is: 'approved'|'terminated'|'submission'|'at_risk'
+--   Use 'at_risk' (underscore) consistently — not 'at risk' (space).
+--   The SELECT above aliases AS trigger_type but the INSERT must use the
+--   constrained value 'at_risk'.

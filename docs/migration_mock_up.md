@@ -250,6 +250,36 @@ submission triggers.
 | **fired_triggers.changed_on** | `contract_code_last_change_date` |
 | **Volume (current snapshot)** | 58–133 per business date in the 3-day window |
 
+### Trigger D — At-Risk Flag Newly Set
+
+| Field | Value |
+|---|---|
+| **Condition** | `at_risk_policy = true AND (previous_at_risk_status = false OR IS NULL)` |
+| **Window anchor** | `at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '3 days'` |
+| **trigger_type** | `'at_risk'` (underscore — matches CHECK constraint in fired_triggers) |
+| **fired_triggers.changed_on** | `at_risk_status_last_change_date` |
+| **Volume (current snapshot)** | 908 policies in 3-day window (266 on 7/17, 181 on 7/16, 288 on 7/15, 173 on 7/14) |
+
+**Schema verified 2026-07-17 — all three columns confirmed present:**
+- `at_risk_policy` — boolean ✅
+- `previous_at_risk_status` — boolean ✅
+- `at_risk_status_last_change_date` — date ✅
+
+**`at_risk_status_last_change_date` = BUSINESS DATE (confirmed):**
+Delta distribution vs `file_date` shows lag runs deeper than contract code dates:
+- `delta=0`: 289 rows (same-day)
+- `delta=-1`: 233 rows
+- `delta=-2`: 367 rows
+- `delta=-3`: 284 rows
+
+3-day window covers the observed lag range. `fired_triggers NOT EXISTS` remains the
+essential idempotency gate — same reason as Triggers A/B.
+
+NULL rate: 4 of 4,506 trigger candidates have `NULL at_risk_status_last_change_date` —
+negligible; those rows are excluded by the `>=` window filter.
+
+---
+
 ### Trigger C — Submission (New P or Business Rewrite)
 
 Two cases unified into one trigger type (`'submission'`), using different date anchors:
