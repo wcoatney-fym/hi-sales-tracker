@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { buildAgencyMap, resolveAgencyName } from "../_shared/agency-map.ts";
 
 /**
  * ghl-reconcile — one-shot backfill for policies that missed GHL contact
@@ -174,6 +175,7 @@ function buildContactBody(
   locationId: string,
   fieldIds: FieldIdMap,
   omittedFields: string[],
+  agencyMap: Map<string, string>,
 ): Record<string, unknown> {
   const str = (v: unknown) => (v == null || v === "" || v === "0") ? "" : String(v);
 
@@ -193,9 +195,16 @@ function buildContactBody(
     customFields.push({ id, value });
   };
 
+  // Resolve agency name.
+  // Current path (form_submissions): policy.agency is already Title Case.
+  // Future path (Max's DB): policy.agent_number = wa, policy.agency = ga_name (ALL-CAPS).
+  // resolveAgencyName handles both: primary join via wa → agency_writing_numbers → agencies.name,
+  // fallback to titleCase(ga_name) when no writing-number match exists.
+  const resolvedAgency = resolveAgencyName(agencyMap, policy.agent_number, policy.agency);
+
   // Global fields
   push("contact.agent_npn",                str(agentNpn));
-  push("contact.ancillary_agency__sorting", str(policy.agency));
+  push("contact.ancillary_agency__sorting", resolvedAgency);
   push("contact.middle_initial",           ""); // not yet mapped in UNL
 
   // LOB fields
@@ -314,6 +323,11 @@ Deno.serve(async (req: Request) => {
   }
 
   const dryRun = body.dryRun !== false;
+
+  // ── Build agency map (wa → agencies.name, Title Case canonical) ──────────
+  // Resolves ALL-CAPS ga_name from Max's DB to canonical title-case agency names
+  // via the agency_writing_numbers join table. Built once per run.
+  const agencyMap = await buildAgencyMap(supabase);
 
   // ── Resolve GHL creds — always Sunfire ───────────────────────────────────
   const ghlToken      = Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE");
@@ -447,7 +461,7 @@ Deno.serve(async (req: Request) => {
 
     const agentNpn = npnMap.get((policy.agent_number || "").toUpperCase()) ?? "";
     const omittedFields: string[] = [];
-    const contactBody = buildContactBody(policy, agentNpn, ghlLocationId, fieldIds, omittedFields);
+    const contactBody = buildContactBody(policy, agentNpn, ghlLocationId, fieldIds, omittedFields, agencyMap);
     omittedFields.forEach(f => allOmittedFields.add(f));
 
     const result = await ghlPost(`${apiBase}/contacts/`, ghlToken, contactBody);

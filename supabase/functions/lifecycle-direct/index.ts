@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { buildAgencyMap, resolveAgencyName, titleCase } from "../_shared/agency-map.ts";
 import {
   computeLifecycleEvents,
   contractReasonLabel,
@@ -147,18 +148,7 @@ interface HierarchyNode {
   writing_number: string;
 }
 
-/**
- * Title-case a name string. Preserves all-caps tokens that are 1-3 chars
- * (e.g. DH, LLC, II, III) so abbreviations aren’t mangled to "Dh" / "Llc".
- */
-function titleCase(s: string): string {
-  return s.split(/\s+/).filter(Boolean).map((w) => {
-    const upper = w.toUpperCase();
-    // Keep all-caps abbreviations (1-3 chars) as-is
-    if (upper === w && w.length <= 3) return upper;
-    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
-  }).join(" ");
-}
+// titleCase imported from ../_shared/agency-map.ts (see line 3)
 
 /**
  * Split a middle initial embedded in Max's first_name field. Max stores names
@@ -528,7 +518,12 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: true, message: "No agencies enabled" }), { status: 200 });
   }
 
-  // ── 2. Build NPN lookup (agents table primary, agency_rosters fallback) ──
+  // ── 2. Build agency map (wa → agencies.name, Title Case canonical) ─────
+  // Resolves the ALL-CAPS ga_name from Max's DB to the tracker's canonical name.
+  // Built once at startup alongside the NPN map; cheap (small table).
+  const agencyMap = await buildAgencyMap(supabase);
+
+  // ── 2b. Build NPN lookup (agents table primary, agency_rosters fallback) ─
   const npnByWritingNumber  = new Map<string, string>();
   const nameByWritingNumber = new Map<string, { first: string; full: string }>();
 
@@ -694,9 +689,13 @@ Deno.serve(async (req: Request) => {
     const pn = (row.policy_nbr ?? "").trim();
     if (!pn) continue;
 
-    // Resolve agency from hierarchy.
-    const hierarchy = row.roster_hierarchy_json ?? [];
-    const agencyName = agencyFromHierarchy(hierarchy);
+    // Resolve agency from hierarchy → then confirm against agency map.
+    // agencyFromHierarchy extracts the depth-02 node name from the JSON hierarchy
+    // (title-cased). resolveAgencyName cross-checks via wa → agency_writing_numbers
+    // → agencies.name for canonical lookup; falls back to titleCase(ga_name) if not found.
+    const hierarchy  = row.roster_hierarchy_json ?? [];
+    const agent      = agentFromHierarchy(hierarchy);
+    const agencyName = resolveAgencyName(agencyMap, agent.writingNumber, agencyFromHierarchy(hierarchy));
     const agencyId   = agencyNameToId.get(agencyName.toLowerCase()) ?? null;
 
     // Agency gate.
@@ -750,7 +749,7 @@ Deno.serve(async (req: Request) => {
     // Resolve agent.
     if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
 
-    const agent = agentFromHierarchy(hierarchy);
+    // agent already resolved above (before agency gate)
     const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
     const npn = npnByWritingNumber.get(agent.writingNumber)
              ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
