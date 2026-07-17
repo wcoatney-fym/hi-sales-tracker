@@ -21,7 +21,7 @@ Current-state snapshot, one row per active policy. Read-only via `unl_fym_policy
 | `first_name` | First Name | `contact.first_name` | Direct |
 | `last_name` | Last Name | `contact.last_name` | Direct |
 | `phone_nbr` | Phone | `contact.phone` | Cast `bigint` → string |
-| `ga_name` | Downline Agency | `contact.ancillary_agency__sorting` | Sub-agency sorting field |
+| `wa` → `agency_writing_numbers` → `agencies.name` | Downline Agency | `contact.ancillary_agency__sorting` | Join `wa` (normalized UPPER-trim) to `agency_writing_numbers.writing_number`, resolve `agency_id`, then look up `agencies.name`. Do NOT use `ga_name` directly — Max's DB uses all-caps display names that don't match the tracker's `agencies.name`. If no match found, fall back to `ga_name` raw value and log a warning. |
 | `issue_state` | State | `contact.state` | Single line, Applicant Address Information |
 | `zip` | Postal Code | `contact.postal_code` | Single line, Applicant Address Information |
 | `wa` | UNL Writing Number | `contact.agent_npn` *(see NPN note below)* | `wa` = agent writing number; NPN lookup logic TBD — **HOLD** |
@@ -313,10 +313,43 @@ Two cases unified into one trigger type (`'submission'`), using different date a
 
 ---
 
+## Agency Name Resolution — Confirmed Architecture
+
+`ga_name` from Max's DB is an all-caps display name (e.g. `GUARDIAN BENEFITS INC`) that does **not** match `agencies.name` in the tracker (which uses title-case / canonical form). Validation run on 2026-07-17 confirmed 24/24 distinct `ga_name` values had zero matches against `agencies.name`.
+
+The correct join path:
+
+```
+Max's DB:  wa (writing number, UPPER-trim normalized)
+               ↓  JOIN
+Supabase:  agency_writing_numbers.writing_number
+               ↓  →  agency_id
+Supabase:  agencies.id  →  agencies.name
+               ↓
+GHL push:  contact.ancillary_agency__sorting
+```
+
+Table schema (confirmed from Supabase 2026-07-17):
+```sql
+-- agency_writing_numbers
+agency_id      uuid  -- FK → agencies.id
+writing_number text  -- matches wa from Max's DB (UPPER, no spaces)
+created_at     timestamptz
+```
+
+Implementation note:
+- Build a `Map<writing_number_upper, agencies.name>` from Supabase at the top of each cron run (same pattern as the NPN map).
+- Normalize both sides: `.trim().toUpperCase()` on `wa` and `writing_number`.
+- If a `wa` value has no entry in `agency_writing_numbers`, fall back to `ga_name` raw and emit a warning to the cron log — this signals a missing roster entry, not a code bug.
+- This map is cheap (agency_writing_numbers is a small table) and can be built once per run alongside the NPN map.
+
+---
+
 ## Key Clarifications Established This Session
 
 - **`wa`** = UNL writing number (the agent). NOT `agent_ga_level_01` (that's the FYM hierarchy root).
-- **`ga_name`** = Downline Agency = the sub-agency sorting value for `contact.ancillary_agency__sorting`.
+- **`ga_name`** = Downline Agency raw display name from Max's DB (all-caps). Do NOT push directly — resolve through `wa` → `agency_writing_numbers` → `agencies.name` first. `ga_name` is a fallback/warning signal only.
+- **`wa` → agency name join**: `agency_writing_numbers.writing_number` (UPPER-trim) → `agencies.id` → `agencies.name` → `contact.ancillary_agency__sorting`.
 - **`at_risk_policy`** is a pre-computed boolean in Max's DB — use directly, no re-derivation.
 - **`billing_mode`** is an integer (1/3/6/12), not a string — must be mapped to a label before pushing to GHL.
 - **`phone_nbr`** is a `bigint` — must be cast to string before GHL push.
