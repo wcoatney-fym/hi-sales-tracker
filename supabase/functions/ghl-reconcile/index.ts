@@ -2,33 +2,34 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 /**
- * ghl-reconcile — one-shot backfill for 239 policies that missed GHL contact
+ * ghl-reconcile — one-shot backfill for policies that missed GHL contact
  * creation during the no-config era (2026-07-03–10).
+ *
+ * Always targets Sunfire Production (IQljfeWX6wWHmzUtgSyz). Field IDs
+ * resolved at runtime via GET /locations/{id}/customFields — no hardcoded IDs.
  *
  * PUSH SEMANTICS (explicit, per Will 2026-07-16):
  *   - One contact per policy, current state as of push day.
- *   - at_risk_status reflects TODAY's state (via shared deriveAtRisk logic),
- *     never the historical trigger. Recovered policy → at_risk_status='No'.
- *   - Stale-risk rule: 'Yes' only if contract_code='A' AND billing_form='DIR'
- *     AND paid_to_date < today (UTC). Mirrors lifecycle-evaluator.ts exactly.
+ *   - at_risk_status = TODAY's state (shared deriveAtRisk logic).
+ *     Recovered policy → at_risk_status='No'. No stale-risk signal, ever.
  *   - Terminated policies: client_status='Terminated' + termination fields.
- *   - No stale at-risk signal, ever.
  *
- * WORKFLOW SUPPRESSION (condition 2 — Chris sign-off required before prod):
- *   - All reconcile contacts receive tag: 'reconciled | do not automate'
- *   - Prevents 2-week-delayed client-facing sends on stale events.
+ * WORKFLOW SUPPRESSION:
+ *   - All contacts receive tag: 'reconciled | do not automate'
+ *   - Prevents stale client-facing sends on historical events.
+ *   - Chris has configured suppression in Sunfire (confirmed 2026-07-17).
  *
- * FIELD ID RESOLUTION (condition 3):
- *   - Build: GHL_LOCATION_ID_BUILD_ACT + Build-namespace IDs (runtime resolved)
- *   - Prod:  GHL_LOCATION_ID_SUNFIRE   + Sunfire-namespace IDs (runtime resolved)
- *   - No hardcoded cross-location IDs.
+ * RATE LIMITING: 80 requests per 10 seconds with 429 backoff.
  *
- * RATE LIMITING: 80 requests per 10 seconds.
+ * TARGETS:
+ *   "test" — Sunfire, no prodConfirmed gate. Use testPolicyNumbers:[...] for
+ *             a spot-check before running full prod. Recommended first step.
+ *   "prod" — Sunfire, full backfill. Requires { "prodConfirmed": true }.
  *
  * GATES:
  *   - dryRun=true by default. Pass { "dryRun": false } to push live.
- *   - target required: { "target": "build" } or { "target": "prod" }
- *   - Prod also requires { "prodConfirmed": true }
+ *   - target required: "test" or "prod" — no default.
+ *   - "prod" also requires { "prodConfirmed": true }.
  */
 
 // ---------------------------------------------------------------------------
@@ -38,28 +39,27 @@ interface PolicyRow {
   policy_number: string;
   product_type: string;
   contract_code: string;
-  billing_form: string | null;        // 'DIR' or 'PAC' — needed for at-risk check
+  billing_form: string | null;
   paid_to_date: string | null;
   plan_name: string | null;
   plan_premium: number | string | null;
   billing_mode: string | null;
-  carrier: string | null;             // actual col: carrier (not carrier_name)
-  app_submit_date: string | null;     // actual col (not submission_date)
-  policy_effective_date: string | null; // actual col (not effective_date)
-  terminated_date: string | null;     // actual col (not termination_date)
-  contract_reason: string | null;     // actual col (not terminated_reason)
-  agent_number: string | null;        // actual col (not agent_writing_number)
+  carrier: string | null;
+  app_submit_date: string | null;
+  policy_effective_date: string | null;
+  terminated_date: string | null;
+  contract_reason: string | null;
+  agent_number: string | null;
   agent_first_name: string | null;
   agent_last_name: string | null;
   agency: string | null;
   phone: string | null;
   email: string | null;
-  client_first_name: string | null;   // actual col (not first_name)
-  client_last_name: string | null;    // actual col (not last_name)
-  status: string | null;              // 'active'/'terminated'/'pending'
+  client_first_name: string | null;
+  client_last_name: string | null;
+  status: string | null;
 }
 
-// NPN lives in the agents table, keyed by writing_number
 interface AgentNpnRow {
   writing_number: string;
   npn: string | null;
@@ -73,37 +73,27 @@ interface ReconcileResult {
   policy_number: string;
   ok: boolean;
   http_status: number | null;
-  dry_run: boolean;
   error: string | null;
   skipped: boolean;
   skip_reason: string | null;
 }
 
 // ---------------------------------------------------------------------------
-// At-risk logic — mirrors deriveAtRisk() in lifecycle-evaluator.ts exactly.
-// Shared path: same contract_code + billing_form + paid_to_date rules.
-// Source: supabase/functions/sql-import-cron/lifecycle-evaluator.ts:120
+// At-risk logic — mirrors deriveAtRisk() in lifecycle-evaluator.ts exactly
 // ---------------------------------------------------------------------------
 function deriveAtRisk(policy: PolicyRow, now: number = Date.now()): boolean {
-  const code = (policy.contract_code || "").trim().toUpperCase();
-  if (code !== "A") return false;
-
-  const form = (policy.billing_form || "").trim().toUpperCase();
-  if (form !== "DIR") return false;
-
+  if ((policy.contract_code || "").trim().toUpperCase() !== "A") return false;
+  if ((policy.billing_form  || "").trim().toUpperCase() !== "DIR") return false;
   if (!policy.paid_to_date) return false;
-
   const ptd = new Date(policy.paid_to_date + "T00:00:00Z").getTime();
   if (isNaN(ptd)) return false;
-
-  // today UTC midnight
   const d = new Date(now);
   const todayUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
   return ptd < todayUtc;
 }
 
 // ---------------------------------------------------------------------------
-// Contract reason label — mirrors contractReasonLabel() in index.ts
+// Contract reason label — mirrors contractReasonLabel() in lifecycle index.ts
 // ---------------------------------------------------------------------------
 function contractReasonLabel(code: string | null): string {
   if (!code) return "";
@@ -123,7 +113,7 @@ function contractReasonLabel(code: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// Date to US format MM/DD/YYYY — mirrors usDate() in index.ts
+// Date formatter MM/DD/YYYY — mirrors usDate() in lifecycle index.ts
 // ---------------------------------------------------------------------------
 function usDate(iso: string | null): string {
   if (!iso) return "";
@@ -133,7 +123,22 @@ function usDate(iso: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// Field ID resolution — fetched fresh per target location
+// LOB prefix map — mirrors lobKeyForPlanType() in ghl-client.ts
+// ---------------------------------------------------------------------------
+function lobKey(productType: string): string | null {
+  switch ((productType || "").toUpperCase()) {
+    case "HI":
+    case "HIP":    return "hip";
+    case "HHC":    return "hhc";
+    case "LIFE":   return "life";
+    case "DV":     return "dv";
+    case "CANCER": return "cancer";
+    default:       return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resolve field IDs at runtime from /locations/{id}/customFields
 // ---------------------------------------------------------------------------
 async function resolveFieldIds(
   locationId: string,
@@ -161,21 +166,6 @@ async function resolveFieldIds(
 }
 
 // ---------------------------------------------------------------------------
-// LOB prefix map — mirrors lobKeyForPlanType() in ghl-client.ts
-// ---------------------------------------------------------------------------
-function lobKey(productType: string): string | null {
-  switch ((productType || "").toUpperCase()) {
-    case "HI":
-    case "HIP": return "hip";
-    case "HHC": return "hhc";
-    case "LIFE": return "life";
-    case "DV": return "dv";
-    case "CANCER": return "cancer";
-    default: return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Build GHL contact body from current policy state
 // ---------------------------------------------------------------------------
 function buildContactBody(
@@ -187,8 +177,8 @@ function buildContactBody(
 ): Record<string, unknown> {
   const str = (v: unknown) => (v == null || v === "" || v === "0") ? "" : String(v);
 
-  const lob         = lobKey(policy.product_type);
-  const atRisk      = deriveAtRisk(policy);
+  const lob          = lobKey(policy.product_type);
+  const atRisk       = deriveAtRisk(policy);
   const isTerminated = (policy.contract_code || "").trim().toUpperCase() !== "A";
   const clientStatus = isTerminated ? "Terminated" : "Active";
   const atRiskStatus = atRisk ? "Yes" : "No";
@@ -199,20 +189,14 @@ function buildContactBody(
   const push = (fieldKey: string, value: string) => {
     if (!value) return;
     const id = fieldIds[fieldKey];
-    if (!id) {
-      omittedFields.push(fieldKey);
-      return;
-    }
+    if (!id) { omittedFields.push(fieldKey); return; }
     customFields.push({ id, value });
   };
 
   // Global fields
-  push("contact.agent_npn",                 str(agentNpn));
-  push("contact.ancillary_agency__sorting",  str(policy.agency));
-  // middle_initial: split from client_first_name if it contains a middle initial
-  // (UNL sometimes embeds it). For now push empty — matches current evaluator
-  // behavior (field noted as "not yet mapped" in ghl-client.ts line 175).
-  push("contact.middle_initial", "");
+  push("contact.agent_npn",                str(agentNpn));
+  push("contact.ancillary_agency__sorting", str(policy.agency));
+  push("contact.middle_initial",           ""); // not yet mapped in UNL
 
   // LOB fields
   if (lob) {
@@ -309,75 +293,62 @@ Deno.serve(async (req: Request) => {
   const apiBase  = Deno.env.get("GHL_API_BASE") ?? "https://services.leadconnectorhq.com";
 
   let body: Record<string, unknown> = {};
-  try { body = await req.json(); } catch { /* empty */ }
+  try { body = await req.json(); } catch { /* empty body */ }
 
-  // Gate 1: explicit target
-  // Targets:
-  //   "build"        — Build sub-account (original sandbox). Field IDs differ from Sunfire.
-  //   "sunfire-test" — Sunfire Production with a tagged test contact (policy_nbr prefix TEST-).
-  //                    Uses real Sunfire field IDs. All contacts tagged 'reconciled | do not automate'.
-  //                    This is the right target for pre-prod validation.
-  //   "prod"         — Sunfire Production, real backfill. Requires prodConfirmed + Chris suppression
-  //                    sign-off. Not for testing.
+  // ── Gate 1: explicit target ───────────────────────────────────────────────
+  // "test" — Sunfire, spot-check or full scope, no prodConfirmed required.
+  //           Use testPolicyNumbers:[...] to push a handful of policies first.
+  // "prod" — Sunfire, full backfill, requires prodConfirmed:true.
   const target = (body.target as string | undefined)?.toLowerCase();
-  if (target !== "build" && target !== "sunfire-test" && target !== "prod") {
+  if (target !== "test" && target !== "prod") {
     return jsonResponse({
-      error: 'target must be "build", "sunfire-test", or "prod" — no default.',
+      error: 'target must be "test" or "prod" — no default. Both target Sunfire Production.',
     }, 400);
   }
 
-  // Gate 2: prod interlock (sunfire-test does NOT require prodConfirmed)
+  // ── Gate 2: prod interlock ────────────────────────────────────────────────
   if (target === "prod" && body.prodConfirmed !== true) {
     return jsonResponse({
-      error: 'Prod requires { "prodConfirmed": true }. Add only after sunfire-test passes and Chris has signed off on workflow suppression.',
+      error: 'Prod run requires { "prodConfirmed": true }. Run target="test" first to spot-check contacts and field values in Sunfire.',
     }, 400);
   }
 
   const dryRun = body.dryRun !== false;
-  const isSunfire = target === "sunfire-test" || target === "prod";
 
-  // Resolve GHL creds for target
-  const ghlToken      = isSunfire
-    ? Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE")
-    : Deno.env.get("GHL_API_KEY_BUILD_ACT");
-  const ghlLocationId = isSunfire
-    ? Deno.env.get("GHL_LOCATION_ID_SUNFIRE")
-    : Deno.env.get("GHL_LOCATION_ID_BUILD_ACT");
+  // ── Resolve GHL creds — always Sunfire ───────────────────────────────────
+  const ghlToken      = Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE");
+  const ghlLocationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE");
 
   if (!ghlToken || !ghlLocationId) {
     return jsonResponse({
-      error: `Missing GHL secrets for target="${target}".`,
+      error: "GHL_API_KEY_HIP_PORTAL_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set.",
     }, 500);
   }
 
-  // Resolve field IDs for this location (skip on dry run to avoid GHL call)
+  // ── Resolve field IDs (skip on dry run) ──────────────────────────────────
   let fieldIds: FieldIdMap = {};
   if (!dryRun) {
     fieldIds = await resolveFieldIds(ghlLocationId, ghlToken, apiBase);
     if (Object.keys(fieldIds).length === 0) {
-      return jsonResponse({ error: "Failed to resolve field IDs — cannot proceed" }, 500);
+      return jsonResponse({ error: "Failed to resolve Sunfire field IDs — cannot proceed" }, 500);
     }
   }
 
-  // sunfire-test: accept an explicit list of test policy numbers (spot-check mode).
-  // Pass { "target": "sunfire-test", "testPolicyNumbers": ["POL-001", ...], "dryRun": false }
-  // to push exactly those policies to Sunfire without touching the full backlog.
-  // This is the recommended workflow before a prod run: pick 2-3 policies, verify
-  // contacts + field values in Sunfire, confirm suppression tag fires correctly.
-  const testPolicyNumbers = target === "sunfire-test" && Array.isArray(body.testPolicyNumbers)
-    ? (body.testPolicyNumbers as string[]).filter((s) => typeof s === "string" && s.length > 0)
-    : null;
+  // ── Build policy scope ────────────────────────────────────────────────────
+  // test target accepts testPolicyNumbers:[...] for a spot-check without
+  // pulling the full backlog. Recommended first step before prod.
+  const testPolicyNumbers =
+    target === "test" && Array.isArray(body.testPolicyNumbers)
+      ? (body.testPolicyNumbers as string[]).filter((s) => typeof s === "string" && s.length > 0)
+      : null;
 
-  // Fetch distinct policy numbers from the no-config era.
-  // MUST paginate — lifecycle_event_log has 3,875+ rows; JS client caps at 1,000.
-  // Without pagination, policies in rows 1,001+ are silently missed.
   const allPolicies = new Set<string>();
 
   if (testPolicyNumbers && testPolicyNumbers.length > 0) {
-    // Spot-check mode: use the explicit list directly, no log query needed.
     testPolicyNumbers.forEach((p) => allPolicies.add(p));
-    console.log(`[reconcile] sunfire-test spot-check: ${testPolicyNumbers.length} explicit policies`);
+    console.log(`[reconcile] test spot-check: ${testPolicyNumbers.length} explicit policies`);
   } else {
+    // Full scope from lifecycle_event_log — MUST paginate (40K+ rows, JS cap 1K).
     const PS = 1000;
     let psOff = 0;
     while (true) {
@@ -394,35 +365,28 @@ Deno.serve(async (req: Request) => {
       psOff += PS;
     }
   }
+
   const policyNumbers = [...allPolicies];
-  console.log(`[reconcile] ${policyNumbers.length} distinct policies (paginated)`);
+  console.log(`[reconcile] scope: ${policyNumbers.length} distinct policies`);
 
   if (policyNumbers.length === 0) {
-    return jsonResponse({ ok: true, message: "No policies to reconcile", processed: 0 });
+    return jsonResponse({ ok: true, message: "No policies in scope", processed: 0 });
   }
 
-  // Dry run: return scope only, no DB or GHL calls beyond log query
+  // ── Dry run ───────────────────────────────────────────────────────────────
   if (dryRun) {
-    const scopeNote = target === "sunfire-test" && testPolicyNumbers
-      ? `Spot-check mode: ${testPolicyNumbers.length} explicit policy numbers. Pass dryRun:false to push.`
-      : target === "sunfire-test"
-      ? `Full backlog scope (${policyNumbers.length} policies) against Sunfire. Consider passing testPolicyNumbers:[...] for a spot-check first.`
-      : "No GHL or DB contacts calls made. Pass dryRun:false to push.";
-
+    const note = testPolicyNumbers
+      ? `Spot-check: ${testPolicyNumbers.length} explicit policies. Pass dryRun:false to push.`
+      : `Full backlog: ${policyNumbers.length} policies. Consider testPolicyNumbers:[...] for a spot-check first.`;
     return jsonResponse({
-      ok: true,
-      dry_run: true,
-      target,
+      ok: true, dry_run: true, target,
       location_id: ghlLocationId,
-      suppression_tag: isSunfire ? "reconciled | do not automate" : null,
-      scope: {
-        distinct_policies: policyNumbers.length,
-        note: scopeNote,
-      },
+      suppression_tag: "reconciled | do not automate",
+      scope: { distinct_policies: policyNumbers.length, note },
     });
   }
 
-  // Fetch current state for all policies from form_submissions
+  // ── Fetch current policy state from form_submissions ─────────────────────
   const COLS = [
     "policy_number", "product_type", "contract_code", "billing_form",
     "paid_to_date", "plan_name", "plan_premium", "billing_mode",
@@ -441,7 +405,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: `form_submissions query failed: ${polErr.message}` }, 500);
   }
 
-  // Fetch agent NPNs (writing_number -> npn map)
+  // ── Fetch agent NPNs ──────────────────────────────────────────────────────
   const agentNumbers = [...new Set(
     (policies ?? [])
       .map((p: PolicyRow) => (p.agent_number || "").toUpperCase())
@@ -463,12 +427,10 @@ Deno.serve(async (req: Request) => {
     (policies ?? []).map((p: PolicyRow) => [p.policy_number, p]),
   );
 
-  // Push loop with rate limiting
+  // ── Push loop ─────────────────────────────────────────────────────────────
   const results: ReconcileResult[] = [];
   const allOmittedFields = new Set<string>();
   let batchCount = 0;
-
-  // For the sample contact (first successful push)
   let sampleContact: Record<string, unknown> | null = null;
   let samplePolicyNumber: string | null = null;
 
@@ -478,8 +440,7 @@ Deno.serve(async (req: Request) => {
     if (!policy) {
       results.push({
         policy_number: policyNumber, ok: false, http_status: null,
-        dry_run: false, error: "Not found in form_submissions",
-        skipped: true, skip_reason: "not_found",
+        error: "Not found in form_submissions", skipped: true, skip_reason: "not_found",
       });
       continue;
     }
@@ -494,7 +455,6 @@ Deno.serve(async (req: Request) => {
       policy_number: policyNumber,
       ok: result.ok,
       http_status: result.status,
-      dry_run: false,
       error: result.ok ? null : `HTTP ${result.status}: ${JSON.stringify(result.data).slice(0, 200)}`,
       skipped: false,
       skip_reason: null,
