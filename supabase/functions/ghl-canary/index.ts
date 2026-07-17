@@ -462,9 +462,29 @@ Deno.serve(async (req: Request) => {
     console.error("[canary] FAILED:", result.error, JSON.stringify(result.assertions));
   } else {
     // Explicit green signal — a dead canary must never look like a passing one.
+    // Timestamp: tz-aware America/Chicago (CT), with UTC shown for log correlation.
+    // Never hardcode UTC offsets — DST breaks them.
+    const runAtDate     = new Date(runAt);
+    const ctFormatter  = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+    const utcFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const ctTime  = ctFormatter.format(runAtDate).replace(",", "");
+    const utcTime = utcFormatter.format(runAtDate);
+    const dateStr = runAtDate.toLocaleDateString("en-US", { timeZone: "America/Chicago", month: "short", day: "numeric", year: "numeric" });
+    const tsLabel = `${ctTime} CT (${utcTime} UTC) — ${dateStr}`;
+
     await sendSlackAlert(
       supabase,
-      `:white_check_mark: *GHL canary passed* — ${runAt.slice(0, 10)} — ` +
+      `:white_check_mark: *GHL canary passed* — ${tsLabel} — ` +
       `${assertionsPassed} assertions ok, ${result.steps_passed}/${result.steps_total} steps`,
     );
     console.log(
