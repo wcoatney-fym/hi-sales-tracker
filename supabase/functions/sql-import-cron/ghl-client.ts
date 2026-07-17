@@ -311,7 +311,7 @@ export interface GhlConfig {
 // import never breaks when the integration isn't configured.
 export function loadGhlConfig(): GhlConfig | null {
   try {
-    const token = Deno.env.get("GHL_API_KEY_HIP_PORTAL");
+    const token = Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE");
     const locationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE");
     if (!token || !locationId) return null;
     return {
