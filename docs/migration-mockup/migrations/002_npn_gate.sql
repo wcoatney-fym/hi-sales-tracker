@@ -113,14 +113,20 @@ COMMENT ON COLUMN public.npn_holds.changed_on IS
 --   4. DOES NOT fire GHL API — requires human approval
 --
 -- Approval flow (mockup phase — intended end state is auto-fire-on-resolve):
---   A human reviews proposed_fires and sets approved_at to allow the push.
+--   A human reviews proposed_fires via the FYM ADMIN PORTAL (confirmed 2026-07-17).
+--   The admin portal surfaces proposed_fires rows grouped by agency/agent with
+--   Approve/Skip per row. Clicking Approve sets approved_at.
 --   The actual GHL push reads WHERE approved_at IS NOT NULL AND fired_at IS NULL.
 --   After push: fired_at set, fired_triggers row inserted.
 --
+-- UI location: admin portal "NPN Holds" tab (new tab, existing admin UI).
+--   Shows: agency, agent name, writing number, trigger type, changed_on, proposed_at.
+--   Actions: Approve (sets approved_at + approved_by) | Skip (leaves row pending).
+--
 -- NOTE: auto-fire-on-resolve is the intended production end state.
---       It is explicitly gated here (approved_at required) for the mockup phase.
---       When go-live is approved, the approval gate is removed and the resolver
---       inserts directly into the push queue without the proposed_fires hop.
+--       The approved_at gate + admin portal tab are mockup-phase only.
+--       When NPN coverage is sufficient and the flow is validated, the approval
+--       gate is removed and the resolver inserts directly into the push queue.
 
 CREATE TABLE IF NOT EXISTS public.proposed_fires (
     id              BIGSERIAL PRIMARY KEY,

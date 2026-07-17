@@ -175,7 +175,8 @@ export async function writeHolds(
  * 4. DO NOT fire GHL. proposed_fires requires human approval (approved_at).
  *
  * NOTE: auto-fire-on-resolve is the intended end state.
- *       The approved_at gate is explicitly present for the mockup phase only.
+ *       Approval location: FYM admin portal — "NPN Holds" tab (confirmed 2026-07-17).
+ *       The approved_at gate + admin portal tab are mockup-phase only.
  *       At go-live: remove the proposed_fires hop and push directly.
  */
 export async function resolveHoldsForWritingNumber(

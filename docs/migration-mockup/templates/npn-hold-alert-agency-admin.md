@@ -80,9 +80,11 @@ Agency: {{agency_name}} | Agent: {{agent_name}} ({{writing_number}}) | Held: {{h
 3. Resolution scan detects NPN now present for `writing_number`
 4. `npn_holds` rows flipped to `status = 'resolved'`, `released_at = NOW()`
 5. Rows promoted to `proposed_fires` with NPN attached
-6. **Human approval required** (`approved_at` set by FYM team) before GHL push fires
+6. **FYM team approves via the admin portal** — "NPN Holds" tab surfaces
+   `proposed_fires` rows grouped by agency/agent with Approve/Skip per row.
+   Clicking Approve sets `approved_at + approved_by`. (Confirmed location: admin portal, 2026-07-17.)
 7. After approval + successful push: `proposed_fires.fired_at` set,
    `fired_triggers` row inserted to close the idempotency loop
 
 > **End state (post go-live):** Step 6 is removed — NPN resolution auto-fires.
-> The `proposed_fires` approval gate is a mockup-phase safeguard only.
+> The `proposed_fires` approval gate + admin portal "NPN Holds" tab are mockup-phase only.
