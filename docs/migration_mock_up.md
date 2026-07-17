@@ -182,6 +182,107 @@ WHERE policy_nbr = ANY($1::text[])
 
 ---
 
+---
+
+## Trigger Logic — Confirmed 2026-07-17
+
+All trigger queries run against `typed.unl_fym_policy_latest_load` (Max's DB, read-only).
+Idempotency is enforced by the `fired_triggers` ledger in the Supabase tracker DB.
+Full query SQL lives in `docs/migration-mockup/trigger-queries.sql`.
+Ledger DDL lives in `docs/migration-mockup/migrations/001_fired_triggers.sql`.
+
+### fired_triggers ledger
+
+```sql
+CREATE TABLE public.fired_triggers (
+    id            BIGSERIAL PRIMARY KEY,
+    policy_nbr    TEXT        NOT NULL,
+    trigger_type  TEXT        NOT NULL,  -- 'approved' | 'terminated' | 'submission' | 'at_risk'
+    changed_on    DATE        NOT NULL,  -- business date of the transition (see per-trigger note)
+    fired_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (policy_nbr, trigger_type, changed_on),
+    CHECK (trigger_type IN ('approved','terminated','submission','at_risk'))
+);
+```
+
+Every trigger query gates on `NOT EXISTS (SELECT 1 FROM fired_triggers WHERE ...)` before firing.
+After a successful GHL push, insert with `ON CONFLICT DO NOTHING` as a second idempotency layer.
+
+**Why the ledger is essential:** `typed.unl_fym_policy_latest_load` is a daily snapshot that
+carries ALL historical `contract_code_last_change_date` values for every policy (13,339+ rows
+with old business dates confirmed in prod). Without `fired_triggers`, any date-window query
+would re-fire historical events on every run regardless of window size.
+
+### contract_code_last_change_date — confirmed BUSINESS DATE, not load date
+
+Verified 2026-07-17 by querying the delta distribution (`changed_on - file_date`):
+- `delta=0`: 187 rows — transition happened the same day as the ETL load
+- `delta=-1`: confirmed rows — business event on day N appeared in day N+1 load
+- `delta<0` bulk (13,339 rows): historical transitions, months/years old, re-presented every load
+
+The 3-day window catches same-day and 1-2 day lagged events with a 1-day safety margin.
+
+### app_recvd_date — confirmed 100% populated on all P rows
+
+`contract_code_last_change_date` is NULL on 4,154 of 4,162 P rows — not usable as a submission
+anchor. `app_recvd_date` is 100% populated on all P rows and is the correct anchor for
+submission triggers.
+
+---
+
+### Trigger A — P→A (Approved)
+
+| Field | Value |
+|---|---|
+| **Condition** | `previous_contract_code = 'P' AND cntrct_code = 'A'` |
+| **Window anchor** | `contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'` |
+| **trigger_type** | `'approved'` |
+| **fired_triggers.changed_on** | `contract_code_last_change_date` |
+| **Volume (current snapshot)** | 67–112 per business date in the 3-day window |
+
+### Trigger B — A→T (Terminated)
+
+| Field | Value |
+|---|---|
+| **Condition** | `previous_contract_code = 'A' AND cntrct_code = 'T'` |
+| **Window anchor** | `contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'` |
+| **trigger_type** | `'terminated'` |
+| **fired_triggers.changed_on** | `contract_code_last_change_date` |
+| **Volume (current snapshot)** | 58–133 per business date in the 3-day window |
+
+### Trigger C — Submission (New P or Business Rewrite)
+
+Two cases unified into one trigger type (`'submission'`), using different date anchors:
+
+#### Case 1 — New submission (`previous_contract_code IS NULL`)
+
+| Field | Value |
+|---|---|
+| **Condition** | `cntrct_code = 'P' AND previous_contract_code IS NULL` |
+| **Window anchor** | `app_recvd_date >= CURRENT_DATE - INTERVAL '3 days'` |
+| **Why app_recvd_date** | `contract_code_last_change_date` is NULL on 99.8% of first-time P rows |
+| **fired_triggers.changed_on** | `app_recvd_date` |
+| **Volume (current snapshot)** | 106 policies with `app_recvd_date >= 2026-07-15` (all `prev IS NULL`) |
+
+> **Key finding (2026-07-17):** Of 581 policies with `app_recvd_date` Jul 15–17, 469 have
+> already moved to `cntrct_code = 'A'` by the time the daily snapshot lands. A query
+> filtered to `cntrct_code = 'P'` only sees the 106 still pending. The 469 that moved
+> to A will be captured by Trigger A (P→A approved) — not by the submission trigger.
+> This is correct: submission fires for clients still in pending; approval fires when the
+> carrier approves. GHL workflows should be designed around both triggers firing in sequence.
+
+#### Case 2 — Business rewrite (`previous_contract_code IN ('T', 'A')`)
+
+| Field | Value |
+|---|---|
+| **Condition** | `cntrct_code = 'P' AND previous_contract_code IN ('T', 'A')` |
+| **Window anchor** | `contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'` |
+| **Why contract_code_last_change_date** | This IS populated for rewrites (actual transition date) |
+| **fired_triggers.changed_on** | `contract_code_last_change_date` |
+| **Volume (current snapshot)** | 0 in current window (query correct when they appear) |
+
+---
+
 ## Key Clarifications Established This Session
 
 - **`wa`** = UNL writing number (the agent). NOT `agent_ga_level_01` (that's the FYM hierarchy root).
