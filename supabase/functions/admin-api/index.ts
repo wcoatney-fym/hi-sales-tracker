@@ -43,6 +43,27 @@ function resolveSecret(name: string): string {
   return Deno.env.get(name) || "";
 }
 
+function cleanHost(raw: string): string {
+  return raw.replace(/^https?:\/\//, "").replace(/\/$/, "").split(":")[0];
+}
+
+// Open a short-lived postgres connection to Max's DB (READ-ONLY).
+// Always call sql.end() in a finally block.
+async function openMaxDb() {
+  const { default: postgres } = await import("npm:postgres@3.4.5");
+  return postgres({
+    host:            cleanHost(Deno.env.get("PROD_DB_HOST")!),
+    port:            Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
+    database:        Deno.env.get("PROD_DB_NAME")!,
+    username:        Deno.env.get("PROD_DB_USER")!,
+    password:        Deno.env.get("PROD_DB_PASSWORD")!,
+    ssl:             { ca: AKAMAI_CA_CERT },
+    connect_timeout: 30,
+    max:             1,
+    idle_timeout:    20,
+  });
+}
+
 const LOWERCASE_PARTICLES = new Set([
   "de", "del", "della", "di", "da", "das", "do", "dos",
   "van", "von", "der", "den", "het",
@@ -962,287 +983,20 @@ Deno.serve(async (req: Request) => {
       }
 
       case "get-policies": {
-        const { startDate, endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, clientSearch, page = 1, pageSize = 10 } = body;
-        if (!startDate || !endDate) {
-          return jsonResponse({ error: "Date range required" }, 400);
-        }
-
-        const offset = (page - 1) * pageSize;
-
-        let agentWritingNumbers: string[] = [];
-        if (agentFilter) {
-          const { data: agentRow } = await supabase
-            .from("agents")
-            .select("unl_writing_number, gtl_writing_number")
-            .eq("id", agentFilter)
-            .maybeSingle();
-          if (agentRow) {
-            if (agentRow.unl_writing_number) agentWritingNumbers.push(agentRow.unl_writing_number);
-            if (agentRow.gtl_writing_number) agentWritingNumbers.push(agentRow.gtl_writing_number);
-          }
-        }
-
-        let countQuery = supabase
-          .from("form_submissions")
-          .select("id", { count: "exact", head: true })
-          .gte("app_submit_date", startDate)
-          .lt("app_submit_date", endDate)
-          .not("status", "in", "(duplicate,superseded)");
-
-        let dataQuery = supabase
-          .from("form_submissions")
-          .select("*")
-          .gte("app_submit_date", startDate)
-          .lt("app_submit_date", endDate)
-          .not("status", "in", "(duplicate,superseded)")
-          .order("app_submit_date", { ascending: false })
-          .range(offset, offset + pageSize - 1);
-
-        if (agentFilter && agentWritingNumbers.length > 0) {
-          countQuery = countQuery.in("agent_number", agentWritingNumbers);
-          dataQuery = dataQuery.in("agent_number", agentWritingNumbers);
-        } else if (agentFilter) {
-          countQuery = countQuery.eq("agent_number", "__NO_MATCH__");
-          dataQuery = dataQuery.eq("agent_number", "__NO_MATCH__");
-        }
-
-        if (carrierFilter) {
-          countQuery = countQuery.eq("carrier", carrierFilter);
-          dataQuery = dataQuery.eq("carrier", carrierFilter);
-        }
-
-        if (productTypeFilter) {
-          countQuery = countQuery.eq("product_type", productTypeFilter);
-          dataQuery = dataQuery.eq("product_type", productTypeFilter);
-        }
-
-        if (agencyFilter) {
-          countQuery = countQuery.eq("agency", agencyFilter);
-          dataQuery = dataQuery.eq("agency", agencyFilter);
-        }
-
-        if (sourceFilter) {
-          countQuery = countQuery.eq("source", sourceFilter);
-          dataQuery = dataQuery.eq("source", sourceFilter);
-        }
-
-        if (clientSearch && typeof clientSearch === "string" && clientSearch.trim()) {
-          // Case-insensitive match on client first/last name. Strip PostgREST
-          // reserved chars to keep the .or() filter safe.
-          const cleaned = clientSearch.trim().replace(/[%,().*]/g, " ").replace(/\s+/g, " ").trim();
-          if (cleaned) {
-            const parts = cleaned.split(" ");
-            const orParts = [
-              `client_first_name.ilike.%${cleaned}%`,
-              `client_last_name.ilike.%${cleaned}%`,
-            ];
-            if (parts.length >= 2) {
-              // Handle "First Last" typed together.
-              const first = parts[0];
-              const last = parts.slice(1).join(" ");
-              orParts.push(`and(client_first_name.ilike.%${first}%,client_last_name.ilike.%${last}%)`);
-            }
-            const orFilter = orParts.join(",");
-            countQuery = countQuery.or(orFilter);
-            dataQuery = dataQuery.or(orFilter);
-          }
-        }
-
-        const [countResult, dataResult] = await Promise.all([countQuery, dataQuery]);
-        if (countResult.error) throw countResult.error;
-        if (dataResult.error) throw dataResult.error;
-
-        const { data: allAgents } = await supabase
-          .from("agents")
-          .select("id, first_name, last_name, unl_writing_number, gtl_writing_number");
-
-        const { data: filterList } = await supabase
-          .from("form_submissions")
-          .select("agent_number, carrier, product_type, agency")
-          .gte("app_submit_date", startDate)
-          .lt("app_submit_date", endDate)
-          .not("status", "in", "(duplicate,superseded)");
-
-        const activeNumbers = new Set((filterList || []).map((r) => r.agent_number));
-
-        const uniqueAgents = (allAgents || [])
-          .filter((a) => activeNumbers.has(a.unl_writing_number) || activeNumbers.has(a.gtl_writing_number))
-          .map((a) => {
-            const nums = [a.unl_writing_number, a.gtl_writing_number].filter(Boolean);
-            return { id: a.id, label: `${a.first_name} ${a.last_name} (${nums.join(", ")})` };
-          })
-          .sort((a, b) => a.label.localeCompare(b.label));
-
-        const uniqueCarriers = Array.from(
-          new Set((filterList || []).map((r) => r.carrier).filter(Boolean))
-        )
-          .sort()
-          .map((name) => ({ name }));
-
-        const uniqueProductTypes = Array.from(
-          new Set((filterList || []).map((r: { product_type: string }) => r.product_type).filter(Boolean))
-        )
-          .sort()
-          .map((name) => ({ name }));
-
-        const uniqueAgencies = Array.from(
-          new Set((filterList || []).map((r: { agency: string }) => r.agency).filter(Boolean))
-        )
-          .sort()
-          .map((name) => ({ name }));
-
-        return jsonResponse({
-          policies: dataResult.data || [],
-          totalCount: countResult.count || 0,
-          agents: uniqueAgents,
-          carriers: uniqueCarriers,
-          productTypes: uniqueProductTypes,
-          agencies: uniqueAgencies,
-        });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "export-policies": {
-        const { startDate, endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter } = body;
-        if (!startDate || !endDate) {
-          return jsonResponse({ error: "Date range required" }, 400);
-        }
-
-        let exportAgentWritingNumbers: string[] = [];
-        if (agentFilter) {
-          const { data: agentRow } = await supabase
-            .from("agents")
-            .select("unl_writing_number, gtl_writing_number")
-            .eq("id", agentFilter)
-            .maybeSingle();
-          if (agentRow) {
-            if (agentRow.unl_writing_number) exportAgentWritingNumbers.push(agentRow.unl_writing_number);
-            if (agentRow.gtl_writing_number) exportAgentWritingNumbers.push(agentRow.gtl_writing_number);
-          }
-        }
-
-        let exportQuery = supabase
-          .from("form_submissions")
-          .select("*")
-          .gte("app_submit_date", startDate)
-          .lt("app_submit_date", endDate)
-          .not("status", "in", "(duplicate,superseded)")
-          .order("app_submit_date", { ascending: false })
-          .limit(10000);
-
-        if (agentFilter && exportAgentWritingNumbers.length > 0) {
-          exportQuery = exportQuery.in("agent_number", exportAgentWritingNumbers);
-        } else if (agentFilter) {
-          exportQuery = exportQuery.eq("agent_number", "__NO_MATCH__");
-        }
-
-        if (carrierFilter) {
-          exportQuery = exportQuery.eq("carrier", carrierFilter);
-        }
-
-        if (productTypeFilter) {
-          exportQuery = exportQuery.eq("product_type", productTypeFilter);
-        }
-
-        if (agencyFilter) {
-          exportQuery = exportQuery.eq("agency", agencyFilter);
-        }
-
-        const exportResult = await exportQuery;
-        if (exportResult.error) throw exportResult.error;
-
-        return jsonResponse({ policies: exportResult.data || [] });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "export-leaderboard": {
-        const { startDate, endDate, agencyFilter } = body;
-        if (!startDate || !endDate) {
-          return jsonResponse({ error: "Date range required" }, 400);
-        }
-
-        let lbQuery = supabase
-          .from("form_submissions")
-          .select("agent_number, agent_first_name, agent_last_name, agency, plan_premium")
-          .gte("app_submit_date", startDate)
-          .lt("app_submit_date", endDate)
-          .not("status", "in", "(duplicate,superseded)");
-
-        if (agencyFilter) {
-          lbQuery = lbQuery.eq("agency", agencyFilter);
-        }
-
-        const lbResult = await lbQuery;
-        if (lbResult.error) throw lbResult.error;
-
-        const rows = lbResult.data || [];
-        const agentMap: Record<string, { firstName: string; lastName: string; agentNumber: string; agency: string; count: number; totalAnnualizedPremium: number }> = {};
-        for (const r of rows) {
-          const key = r.agent_number || `${r.agent_first_name}_${r.agent_last_name}`;
-          if (!agentMap[key]) {
-            agentMap[key] = {
-              firstName: r.agent_first_name,
-              lastName: r.agent_last_name,
-              agentNumber: r.agent_number || "",
-              agency: r.agency || "",
-              count: 0,
-              totalAnnualizedPremium: 0,
-            };
-          }
-          agentMap[key].count++;
-          agentMap[key].totalAnnualizedPremium += (Number(r.plan_premium) || 0) * 12;
-        }
-
-        const leaderboard = Object.values(agentMap).sort((a, b) => b.count - a.count);
-
-        const writingNums = leaderboard.map((a) => a.agentNumber).filter(Boolean);
-        let npnMap: Record<string, string> = {};
-        if (writingNums.length > 0) {
-          const { data: agentNpns } = await supabase
-            .from("agents")
-            .select("npn, unl_writing_number, gtl_writing_number")
-            .or(writingNums.map((n: string) => `unl_writing_number.eq.${n},gtl_writing_number.eq.${n}`).join(","));
-          if (agentNpns) {
-            for (const a of agentNpns) {
-              if (a.unl_writing_number && a.npn) npnMap[a.unl_writing_number] = a.npn;
-              if (a.gtl_writing_number && a.npn) npnMap[a.gtl_writing_number] = a.npn;
-            }
-          }
-        }
-
-        const enriched = leaderboard.map((a) => ({
-          ...a,
-          npn: npnMap[a.agentNumber] || "",
-        }));
-
-        return jsonResponse({ leaderboard: enriched });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "delete-policies": {
-        const { ids } = body;
-        if (!ids || !Array.isArray(ids) || ids.length === 0) {
-          return jsonResponse({ error: "Policy IDs are required" }, 400);
-        }
-
-        const { error } = await supabase
-          .from("form_submissions")
-          .delete()
-          .in("id", ids);
-
-        if (error) throw error;
-
-        return jsonResponse({ success: true, deletedCount: ids.length });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "get-submissions": {
-        const { data, error } = await supabase
-          .from("form_submissions")
-          .select("*")
-          .order("created_at", { ascending: false });
-
-        if (error) throw error;
-
-        return jsonResponse({ submissions: data || [] });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "get-intake-submissions": {
         const { startDate, endDate, agentFilter, npnFilter, agencyFilter, page = 1, pageSize = 20 } = body;
         if (!startDate || !endDate) {
@@ -1507,6 +1261,11 @@ Deno.serve(async (req: Request) => {
         if (fetchErr) throw fetchErr;
         if (!existing) {
           return jsonResponse({ error: "Submission not found" }, 404);
+        }
+        // Bucket 5 guard: writes are only permitted on intake-form rows (2026-07-20).
+        // UNL/Max's DB rows must not be modified here — Max's DB is the source of truth.
+        if ((existing as Record<string, unknown>).source !== "Intake Form") {
+          return jsonResponse({ error: "Only Intake Form submissions may be edited here." }, 403);
         }
 
         const changes: Record<string, { old: unknown; new: unknown }> = {};
@@ -2443,661 +2202,20 @@ Deno.serve(async (req: Request) => {
       }
 
       case "finalize-source-upload": {
-        const { uploadId: finUploadId } = body;
-        if (!finUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
-
-        const { data: finUpload, error: finFetchErr } = await supabase
-          .from("source_uploads")
-          .select("*")
-          .eq("id", finUploadId)
-          .maybeSingle();
-        if (finFetchErr || !finUpload) return jsonResponse({ error: "Upload not found" }, 404);
-
-        const finCarrier = finUpload.carrier;
-
-        // Fetch all source_records in pages (bypass 1000-row default)
-        const allSourceRecs: Array<{ mapped_data: Record<string, string> | null }> = [];
-        let rangeStart = 0;
-        const pageSize = 5000;
-        while (true) {
-          const { data: page } = await supabase
-            .from("source_records")
-            .select("mapped_data")
-            .eq("source_upload_id", finUploadId)
-            .eq("processing_status", "imported")
-            .range(rangeStart, rangeStart + pageSize - 1);
-          if (!page || page.length === 0) break;
-          allSourceRecs.push(...page);
-          if (page.length < pageSize) break;
-          rangeStart += pageSize;
-        }
-
-        // --- Agent Sync ---
-        let agentsAdded = 0;
-        let agentsUpdated = 0;
-        try {
-          const agentMap = new Map<string, { name: string; agency: string }>();
-          const agentDownlineCounts = new Map<string, { total: number; withDownline: number }>();
-          for (const rec of allSourceRecs) {
-            const md = rec.mapped_data;
-            if (!md) continue;
-            const code = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-            if (!code) continue;
-            const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-            const counts = agentDownlineCounts.get(code) || { total: 0, withDownline: 0 };
-            counts.total++;
-            if (downline) counts.withDownline++;
-            agentDownlineCounts.set(code, counts);
-            if (agentMap.has(code)) continue;
-            const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-            agentMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
-          }
-          for (const [code, entry] of agentMap) {
-            if (!entry.agency) {
-              const counts = agentDownlineCounts.get(code);
-              if (counts && counts.withDownline > 0) {
-                for (const rec of allSourceRecs) {
-                  const md = rec.mapped_data;
-                  if (!md) continue;
-                  const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-                  if (rc !== code) continue;
-                  const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-                  if (dl) { entry.agency = toProperCase(dl); break; }
-                }
-              }
-              if (!entry.agency) entry.agency = "FYM";
-            }
-          }
-
-          // Batch-fetch existing agents
-          const allCodes = Array.from(agentMap.keys());
-          const existingAgentsMap = new Map<string, { id: string; agency: string; agency_locked: boolean; source: string }>();
-          for (let i = 0; i < allCodes.length; i += 200) {
-            const batch = allCodes.slice(i, i + 200);
-            const { data: existing } = await supabase
-              .from("agents")
-              .select("id, unl_writing_number, agency, agency_locked, source")
-              .in("unl_writing_number", batch);
-            for (const a of existing || []) {
-              existingAgentsMap.set(a.unl_writing_number.toUpperCase(), a);
-            }
-          }
-
-          // Check aliases for codes not found directly
-          const missingCodes = allCodes.filter(c => !existingAgentsMap.has(c));
-          if (missingCodes.length > 0) {
-            for (let i = 0; i < missingCodes.length; i += 200) {
-              const batch = missingCodes.slice(i, i + 200);
-              const { data: aliasHits } = await supabase
-                .from("agent_writing_numbers")
-                .select("writing_number, agent_id")
-                .in("writing_number", batch);
-              if (aliasHits && aliasHits.length > 0) {
-                const agentIds = [...new Set(aliasHits.map(h => h.agent_id))];
-                const { data: aliasedAgents } = await supabase
-                  .from("agents")
-                  .select("id, unl_writing_number, agency, agency_locked, source")
-                  .in("id", agentIds);
-                for (const hit of aliasHits) {
-                  const agent = (aliasedAgents || []).find(a => a.id === hit.agent_id);
-                  if (agent) {
-                    existingAgentsMap.set(hit.writing_number.toUpperCase(), agent);
-                  }
-                }
-              }
-            }
-          }
-
-          const agentsToInsert: Array<Record<string, unknown>> = [];
-          for (const [code, { name, agency }] of agentMap) {
-            const nameParts = name.split(/\s+/).filter(Boolean);
-            if (nameParts.length === 0) continue;
-            const firstName = toProperCase(nameParts[0]);
-            const lastName = toProperCase(nameParts[nameParts.length - 1]);
-            if (!firstName || !lastName) continue;
-
-            const existing = existingAgentsMap.get(code);
-            if (existing) {
-              if (existing.source === "Contracting Portal") continue;
-              if (existing.agency_locked) continue;
-              if (agency && existing.agency !== agency) {
-                await supabase
-                  .from("agents")
-                  .update({ agency, updated_at: new Date().toISOString() })
-                  .eq("id", existing.id);
-                agentsUpdated++;
-              }
-            } else {
-              agentsToInsert.push({
-                first_name: firstName,
-                last_name: lastName,
-                unl_writing_number: code,
-                agency: agency || "FYM",
-                source: "Data Source",
-              });
-            }
-          }
-          for (let i = 0; i < agentsToInsert.length; i += 200) {
-            const batch = agentsToInsert.slice(i, i + 200);
-            const { error: batchErr } = await supabase.from("agents").insert(batch);
-            if (!batchErr) agentsAdded += batch.length;
-          }
-        } catch (_syncErr) {
-          // best-effort
-        }
-
-        // --- Policy Sync (wipe-and-replace + supersede) ---
-        let policiesSynced = 0;
-        let recordsReplaced = 0;
-        let recordsSuperseded = 0;
-        let replacedSnapshot: Record<string, unknown>[] = [];
-        let supersededSnapshot: Record<string, unknown>[] = [];
-        try {
-          const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
-          const parseDateYMD = (d: string): string | null => {
-            if (!d || d.length < 8) return null;
-            return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
-          };
-
-          const { data: agentsList } = await supabase
-            .from("agents")
-            .select("unl_writing_number, agency")
-            .range(0, 9999);
-          const agencyLookup = new Map<string, string>();
-          for (const a of agentsList || []) {
-            if (a.unl_writing_number) agencyLookup.set(a.unl_writing_number.toUpperCase(), a.agency || "");
-          }
-
-          // Roster-based agency lookup (takes priority over legacy logic)
-          const { data: rosterEntries } = await supabase
-            .from("agency_rosters")
-            .select("writing_number, agency_id, agencies:agency_id(name)")
-            .eq("match_status", "confirmed")
-            .eq("status", "active");
-          const rosterAgencyLookup = new Map<string, string>();
-          for (const r of rosterEntries || []) {
-            if (r.writing_number && r.agencies) {
-              rosterAgencyLookup.set(r.writing_number.toUpperCase(), (r.agencies as { name: string }).name);
-            }
-          }
-
-          // --- Wipe previous upload's records ---
-          // Find the previous upload for this source+carrier (now deactivated)
-          const { data: prevUploadData } = await supabase
-            .from("source_uploads")
-            .select("id")
-            .eq("data_source_id", finUpload.data_source_id)
-            .eq("carrier", finCarrier)
-            .eq("is_active", false)
-            .neq("id", finUploadId)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          if (prevUploadData) {
-            // Snapshot the records being replaced (limit to essential fields for history)
-            const prevRecords: Record<string, unknown>[] = [];
-            let snapOffset = 0;
-            while (true) {
-              const { data: snapPage } = await supabase
-                .from("form_submissions")
-                .select("id, policy_number, agent_number, client_first_name, client_last_name, zip, plan_name, plan_premium, status, policy_effective_date")
-                .eq("source_upload_id", prevUploadData.id)
-                .range(snapOffset, snapOffset + 4999);
-              if (!snapPage || snapPage.length === 0) break;
-              prevRecords.push(...snapPage);
-              if (snapPage.length < 5000) break;
-              snapOffset += 5000;
-            }
-            replacedSnapshot = prevRecords;
-            recordsReplaced = prevRecords.length;
-
-            // Delete previous upload's form_submissions
-            await supabase
-              .from("form_submissions")
-              .delete()
-              .eq("source_upload_id", prevUploadData.id);
-          }
-
-          const policyRows: Array<Record<string, unknown>> = [];
-          for (const rec of allSourceRecs) {
-            const md = rec.mapped_data;
-            if (!md) continue;
-            const policyNumber = (md["Policy Number"] || "").trim();
-            if (!policyNumber) continue;
-
-            const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-            const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-            const agentParts = writingAgent.split(/\s+/).filter(Boolean);
-            const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
-            const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
-
-            const annualPremium = parseFloat(md["Annual Premium"] || "0");
-            const monthlyPremium = isNaN(annualPremium) ? 0 : Math.round((annualPremium / 12) * 100) / 100;
-            const planCode = (md["Plan Code"] || "").trim();
-            const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
-            const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
-            const status = CONTRACT_STATUS[contractCode] || "pending";
-            const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-            // Roster takes priority > downline agency from data > agent lookup > FYM default
-            const agency = rosterAgencyLookup.get(agentCode)
-              || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
-
-            policyRows.push({
-              policy_number: policyNumber,
-              agent_number: agentCode,
-              agent_first_name: agentFirst,
-              agent_last_name: agentLast,
-              client_first_name: toProperCase(md["First Name"] || ""),
-              client_last_name: toProperCase(md["Last Name"] || ""),
-              phone: (md["Phone"] || "").trim(),
-              email: "",
-              address: "",
-              city: "",
-              state: (md["State"] || "").trim(),
-              zip: (md["Zip"] || "").trim(),
-              plan_name: planCode,
-              plan_premium: monthlyPremium,
-              policy_effective_date: parseDateYMD(md["Effective Date"] || ""),
-              app_submit_date: parseDateYMD(md["Submit Date"] || ""),
-              paid_to_date: parseDateYMD(md["Paid To Date"] || ""),
-              status,
-              carrier: finCarrier,
-              product_type: productType,
-              agency,
-              billing_form: (md["Billing Form"] || "").trim() || null,
-              billing_mode: (md["Billing Mode"] || "").trim() || null,
-              contract_code: (md["Contract Code"] || "").trim() || null,
-              source: "Data Source",
-              source_upload_id: finUploadId,
-            });
-          }
-
-          // Deduplicate by policy_number (keep last occurrence)
-          const deduped = new Map<string, Record<string, unknown>>();
-          for (const row of policyRows) {
-            deduped.set(row.policy_number as string, row);
-          }
-          const uniquePolicies = Array.from(deduped.values());
-
-          // Bulk upsert in batches of 500
-          const upsertBatchSize = 500;
-          for (let i = 0; i < uniquePolicies.length; i += upsertBatchSize) {
-            const batch = uniquePolicies.slice(i, i + upsertBatchSize);
-            const { error: upsertErr, count } = await supabase
-              .from("form_submissions")
-              .upsert(batch, { onConflict: "policy_number", count: "exact" });
-            if (!upsertErr) policiesSynced += (count || batch.length);
-          }
-
-          // --- Supersede Intake Form/BoB records that now have matching Data Source records ---
-          // Build a set of (agent_number, lower_first, lower_last, zip) from new data
-          const dsKeys = new Set<string>();
-          for (const row of uniquePolicies) {
-            const firstWord = ((row.client_first_name as string) || "").toLowerCase().split(/\s+/)[0];
-            const key = `${(row.agent_number as string || "").toUpperCase()}|${firstWord}|${(row.client_last_name as string || "").toLowerCase()}|${row.zip || ""}`;
-            dsKeys.add(key);
-          }
-
-          // Find Intake Form/BoB records to supersede
-          const formBobRecords: Array<{ id: string; agent_number: string; client_first_name: string; client_last_name: string; zip: string; [key: string]: unknown }> = [];
-          let fbOffset = 0;
-          while (true) {
-            const { data: fbPage } = await supabase
-              .from("form_submissions")
-              .select("id, agent_number, client_first_name, client_last_name, zip, plan_name, status, source, policy_effective_date")
-              .eq("source", "Intake Form")
-              .not("status", "in", "(duplicate,superseded)")
-              .range(fbOffset, fbOffset + 4999);
-            if (!fbPage || fbPage.length === 0) break;
-            formBobRecords.push(...(fbPage as typeof formBobRecords));
-            if (fbPage.length < 5000) break;
-            fbOffset += 5000;
-          }
-
-          const toSupersede: string[] = [];
-          const supersededRecs: Record<string, unknown>[] = [];
-          for (const rec of formBobRecords) {
-            const firstWord = (rec.client_first_name || "").toLowerCase().split(/\s+/)[0];
-            const key = `${(rec.agent_number || "").toUpperCase()}|${firstWord}|${(rec.client_last_name || "").toLowerCase()}|${rec.zip || ""}`;
-            if (dsKeys.has(key)) {
-              toSupersede.push(rec.id);
-              supersededRecs.push(rec);
-            }
-          }
-
-          // Mark as superseded in batches
-          for (let i = 0; i < toSupersede.length; i += 200) {
-            const batch = toSupersede.slice(i, i + 200);
-            await supabase
-              .from("form_submissions")
-              .update({ status: "superseded", duplicate_flag: true })
-              .in("id", batch);
-          }
-          recordsSuperseded = toSupersede.length;
-          supersededSnapshot = supersededRecs;
-
-        } catch (policySyncErr) {
-          await supabase
-            .from("source_uploads")
-            .update({ status: "error" })
-            .eq("id", finUploadId);
-          return jsonResponse({
-            error: `Policy sync failed: ${policySyncErr instanceof Error ? policySyncErr.message : "Unknown error"}`,
-            agentsAdded,
-            agentsUpdated,
-            policiesSynced,
-          }, 500);
-        }
-
-        await supabase
-          .from("source_uploads")
-          .update({ status: "complete" })
-          .eq("id", finUploadId);
-
-        // --- Log to upload_history_log ---
-        try {
-          await supabase.from("upload_history_log").insert({
-            source_upload_id: finUploadId,
-            source: "Data Source",
-            action: "upload",
-            carrier: finCarrier,
-            filename: finUpload.filename,
-            records_inserted: policiesSynced,
-            records_replaced: recordsReplaced,
-            records_superseded: recordsSuperseded,
-            replaced_data: replacedSnapshot.length > 0 ? replacedSnapshot : null,
-            superseded_data: supersededSnapshot.length > 0 ? supersededSnapshot : null,
-            uploaded_by: session.email,
-          });
-        } catch (_logErr) {
-          // best-effort logging
-        }
-
-        return jsonResponse({
-          success: true,
-          uploadId: finUploadId,
-          agentsAdded,
-          agentsUpdated,
-          policiesSynced,
-          recordsReplaced,
-          recordsSuperseded,
-        });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "revert-source-upload": {
-        const { uploadId: revertUploadId } = body;
-        if (!revertUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
-
-        // Fetch the upload to revert
-        const { data: revertUpload } = await supabase
-          .from("source_uploads")
-          .select("*")
-          .eq("id", revertUploadId)
-          .maybeSingle();
-        if (!revertUpload) return jsonResponse({ error: "Upload not found" }, 404);
-        if (!revertUpload.is_active) return jsonResponse({ error: "Can only revert the active upload" }, 400);
-
-        // Delete form_submissions rows created by this upload
-        const { count: removedCount } = await supabase
-          .from("form_submissions")
-          .delete({ count: "exact" })
-          .eq("source_upload_id", revertUploadId);
-
-        // Restore overwritten rows if any
-        let restoredCount = 0;
-        const overwritten = revertUpload.overwritten_data as Record<string, unknown>[] | null;
-        if (overwritten && overwritten.length > 0) {
-          const restoreBatchSize = 200;
-          for (let i = 0; i < overwritten.length; i += restoreBatchSize) {
-            const batch = overwritten.slice(i, i + restoreBatchSize);
-            // Remove any fields that might conflict, then upsert by policy_number
-            const cleanBatch = batch.map((row) => {
-              const { id: _id, created_at: _ca, ...rest } = row as Record<string, unknown>;
-              return { ...rest, source_upload_id: null };
-            });
-            const { error: restoreErr } = await supabase
-              .from("form_submissions")
-              .upsert(cleanBatch, { onConflict: "policy_number" });
-            if (!restoreErr) restoredCount += batch.length;
-          }
-        }
-
-        // Mark this upload as reverted
-        await supabase
-          .from("source_uploads")
-          .update({ is_active: false, status: "reverted" })
-          .eq("id", revertUploadId);
-
-        // Re-activate the previous upload for this source+carrier
-        const { data: prevUpload } = await supabase
-          .from("source_uploads")
-          .select("id")
-          .eq("data_source_id", revertUpload.data_source_id)
-          .eq("carrier", revertUpload.carrier)
-          .eq("status", "complete")
-          .neq("id", revertUploadId)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (prevUpload) {
-          await supabase
-            .from("source_uploads")
-            .update({ is_active: true })
-            .eq("id", prevUpload.id);
-        }
-
-        return jsonResponse({
-          success: true,
-          removed: removedCount || 0,
-          restored: restoredCount,
-        });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "resync-policies": {
-        // Delegates to the sql-import-cron keyset sync (error-safe, resumable,
-        // with completeness gate + reconciliation). The old offset loop here
-        // treated a failed staging query as end-of-data and marked uploads
-        // complete early.
-        const { uploadId: rsUploadId } = body;
-        if (!rsUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
-
-        const { data: rsUpload } = await supabase
-          .from("source_uploads")
-          .select("id, data_source_id")
-          .eq("id", rsUploadId)
-          .maybeSingle();
-        if (!rsUpload) return jsonResponse({ error: "Upload not found" }, 404);
-
-        const { count: rsStaged } = await supabase
-          .from("source_records")
-          .select("*", { count: "exact", head: true })
-          .eq("source_upload_id", rsUploadId);
-        if (!rsStaged) {
-          return jsonResponse({ error: "No staged records remain for this upload. Run a fresh Import Data instead \u2014 Re-sync only reprocesses the staged snapshot; it does not pull from the source database." }, 400);
-        }
-
-        await supabase
-          .from("source_uploads")
-          .update({ status: "processing", resync_progress: { phase: "sync", synced: 0 } })
-          .eq("id", rsUploadId);
-
-        const rsFnUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/sql-import-cron`;
-        const rsP = fetch(rsFnUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-          },
-          body: JSON.stringify({ phase: "sync", sourceId: rsUpload.data_source_id, uploadId: rsUploadId }),
-        }).catch(() => {});
-        const rsRuntime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
-        if (rsRuntime?.waitUntil) rsRuntime.waitUntil(rsP);
-
-        // done:true keeps any stale cached frontend's polling loop from spinning;
-        // the new UI polls get-import-progress instead.
-        return jsonResponse({ success: true, started: true, done: true, total: rsStaged, policiesSynced: 0, nextOffset: 0 });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "delete-source-upload": {
-        const { uploadId: delUploadId } = body;
-        if (!delUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
-
-        const { data: delUpload } = await supabase
-          .from("source_uploads")
-          .select("id")
-          .eq("id", delUploadId)
-          .maybeSingle();
-        if (!delUpload) return jsonResponse({ error: "Upload not found" }, 404);
-
-        // Delete form_submissions linked to this upload
-        const { count: deletedPolicies } = await supabase
-          .from("form_submissions")
-          .delete({ count: "exact" })
-          .eq("source_upload_id", delUploadId);
-
-        // Delete source_records for this upload
-        const { count: deletedRecords } = await supabase
-          .from("source_records")
-          .delete({ count: "exact" })
-          .eq("source_upload_id", delUploadId);
-
-        // Delete the upload itself
-        await supabase
-          .from("source_uploads")
-          .delete()
-          .eq("id", delUploadId);
-
-        return jsonResponse({
-          success: true,
-          deletedPolicies: deletedPolicies || 0,
-          deletedRecords: deletedRecords || 0,
-        });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "sync-policies-from-source": {
-        // Re-sync all imported source records into form_submissions (for existing data)
-        const { data: allUploads } = await supabase
-          .from("source_uploads")
-          .select("id, carrier")
-          .eq("status", "complete");
-
-        const CONTRACT_STATUS_SYNC: Record<string, string> = {
-          A: "active",
-          T: "terminated",
-          P: "pending",
-          S: "suspended",
-        };
-
-        const parseDateSync = (d: string): string | null => {
-          if (!d || d.length < 8) return null;
-          return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
-        };
-
-        const { data: agentsListSync } = await supabase
-          .from("agents")
-          .select("unl_writing_number, agency")
-          .range(0, 9999);
-        const agencyLookupSync = new Map<string, string>();
-        for (const a of agentsListSync || []) {
-          if (a.unl_writing_number) agencyLookupSync.set(a.unl_writing_number.toUpperCase(), a.agency || "");
-        }
-
-        // Roster-based agency lookup (takes priority)
-        const { data: rosterEntriesSync } = await supabase
-          .from("agency_rosters")
-          .select("writing_number, agency_id, agencies:agency_id(name)")
-          .eq("match_status", "confirmed")
-          .eq("status", "active");
-        const rosterAgencyLookupSync = new Map<string, string>();
-        for (const r of rosterEntriesSync || []) {
-          if (r.writing_number && r.agencies) {
-            rosterAgencyLookupSync.set(r.writing_number.toUpperCase(), (r.agencies as { name: string }).name);
-          }
-        }
-
-        let totalSynced = 0;
-
-        for (const upl of allUploads || []) {
-          const { data: recs } = await supabase
-            .from("source_records")
-            .select("mapped_data")
-            .eq("source_upload_id", upl.id)
-            .eq("processing_status", "imported");
-
-          const rows: Array<Record<string, unknown>> = [];
-          for (const rec of recs || []) {
-            const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
-
-            const policyNumber = (md["Policy Number"] || "").trim();
-            if (!policyNumber) continue;
-
-            const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
-            const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-            const agentParts = writingAgent.split(/\s+/).filter(Boolean);
-            const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
-            const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
-
-            const annualPremium = parseFloat(md["Annual Premium"] || "0");
-            const monthlyPremium = isNaN(annualPremium) ? 0 : Math.round((annualPremium / 12) * 100) / 100;
-
-            const planCode = (md["Plan Code"] || "").trim();
-            const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
-            const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
-            const status = CONTRACT_STATUS_SYNC[contractCode] || "pending";
-            const downlineAgencySync = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
-            const agency = rosterAgencyLookupSync.get(agentCode)
-              || (downlineAgencySync ? toProperCase(downlineAgencySync) : (agencyLookupSync.get(agentCode) || "FYM"));
-
-            rows.push({
-              policy_number: policyNumber,
-              agent_number: agentCode,
-              agent_first_name: agentFirst,
-              agent_last_name: agentLast,
-              client_first_name: toProperCase(md["First Name"] || ""),
-              client_last_name: toProperCase(md["Last Name"] || ""),
-              phone: (md["Phone"] || "").trim(),
-              email: "",
-              address: "",
-              city: "",
-              state: (md["State"] || "").trim(),
-              zip: (md["Zip"] || "").trim(),
-              plan_name: planCode,
-              plan_premium: monthlyPremium,
-              policy_effective_date: parseDateSync(md["Effective Date"] || ""),
-              app_submit_date: parseDateSync(md["Submit Date"] || ""),
-              paid_to_date: parseDateSync(md["Paid To Date"] || ""),
-              status,
-              carrier: upl.carrier,
-              product_type: productType,
-              agency,
-              billing_form: (md["Billing Form"] || "").trim() || null,
-              billing_mode: (md["Billing Mode"] || "").trim() || null,
-              contract_code: (md["Contract Code"] || "").trim() || null,
-              source: "Data Source",
-            });
-          }
-
-          // Deduplicate by policy_number
-          const dedupedSync = new Map<string, Record<string, unknown>>();
-          for (const row of rows) {
-            dedupedSync.set(row.policy_number as string, row);
-          }
-          const uniqueRows = Array.from(dedupedSync.values());
-
-          for (let i = 0; i < uniqueRows.length; i += 200) {
-            const batch = uniqueRows.slice(i, i + 200);
-            const { error: upsErr } = await supabase
-              .from("form_submissions")
-              .upsert(batch, { onConflict: "policy_number" });
-            if (!upsErr) totalSynced += batch.length;
-          }
-        }
-
-        return jsonResponse({ success: true, policiesSynced: totalSynced });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "get-source-uploads": {
         const { sourceId: suSourceId } = body;
         if (!suSourceId) return jsonResponse({ error: "Source ID required" }, 400);
@@ -3429,32 +2547,58 @@ Deno.serve(async (req: Request) => {
 
 
       case "billing-mode-breakdown": {
+        // Queries Max's DB directly (2026-07-20).
         const { agencyFilter, agencies, startDate, endDate, agentNumber } = body;
 
-        let query = supabase
-          .from("form_submissions")
-          .select("billing_mode, contract_code")
-          .not("billing_mode", "is", null)
-          .not("contract_code", "is", null);
-
+        // Resolve writing numbers for scope filter
+        let scopeWns: string[] = [];
         if (agentNumber) {
-          query = query.eq("agent_number", agentNumber);
+          scopeWns = [(agentNumber as string).trim().toUpperCase()];
         } else if (agencies && Array.isArray(agencies) && agencies.length > 0) {
-          query = query.in("agency", agencies);
+          // agencies is an array of agency names — look up writing numbers
+          const { data: awnBm } = await supabase
+            .from("agency_writing_numbers")
+            .select("writing_number, agencies(name)")
+          for (const r of awnBm || []) {
+            const name = (r.agencies as { name: string } | null)?.name ?? "";
+            if ((agencies as string[]).includes(name)) {
+              scopeWns.push(((r.writing_number as string) ?? "").trim().toUpperCase());
+            }
+          }
         } else if (agencyFilter) {
-          query = query.eq("agency", agencyFilter);
+          const { data: awnBm2 } = await supabase
+            .from("agency_writing_numbers")
+            .select("writing_number, agencies(name)")
+          for (const r of awnBm2 || []) {
+            const name = (r.agencies as { name: string } | null)?.name ?? "";
+            if (name === agencyFilter) scopeWns.push(((r.writing_number as string) ?? "").trim().toUpperCase());
+          }
         }
 
-        if (startDate) query = query.gte("app_submit_date", startDate);
-        if (endDate) query = query.lte("app_submit_date", endDate);
-
-        const { data: rows, error: bmError } = await query;
-        if (bmError) throw bmError;
+        const maxDbBm = await openMaxDb();
+        let bmRows: Array<{ billing_mode: number | null; cntrct_code: string | null }> = [];
+        try {
+          let whereClause = "WHERE t.billing_mode IS NOT NULL AND t.cntrct_code IS NOT NULL";
+          const params: unknown[] = [];
+          if (scopeWns.length > 0) {
+            whereClause += ` AND TRIM(UPPER(t.wa)) = ANY(${ scopeWns.map((_: unknown, i: number) => `$${i + 1}`).join(",") })`;
+            params.push(...scopeWns);
+          }
+          if (startDate) { whereClause += ` AND t.app_recvd_date >= $${params.length + 1}::date`; params.push(startDate); }
+          if (endDate)   { whereClause += ` AND t.app_recvd_date <= $${params.length + 1}::date`; params.push(endDate); }
+          bmRows = await maxDbBm.unsafe(
+            `SELECT t.billing_mode, TRIM(t.cntrct_code) AS cntrct_code FROM typed.unl_fym_policy_latest_load t ${whereClause}`,
+            params
+          ) as Array<{ billing_mode: number | null; cntrct_code: string | null }>;
+        } finally {
+          try { await maxDbBm.end(); } catch { /* ignore */ }
+        }
 
         const modeMap: Record<string, Record<string, number>> = {};
-        for (const row of rows || []) {
-          const mode = row.billing_mode;
-          const code = row.contract_code;
+        for (const row of bmRows) {
+          const mode = String(row.billing_mode ?? "");
+          const code = (row.cntrct_code ?? "").trim();
+          if (!mode || !code) continue;
           if (!modeMap[mode]) modeMap[mode] = {};
           modeMap[mode][code] = (modeMap[mode][code] || 0) + 1;
         }
@@ -4698,420 +3842,26 @@ Deno.serve(async (req: Request) => {
       }
 
       case "confirm-auto-import": {
-        const { sourceId: caiSourceId } = body;
-        if (!caiSourceId) return jsonResponse({ error: "Source ID required" }, 400);
-
-        const { data: caiMappings } = await supabase
-          .from("column_mappings")
-          .select("source_column, target_field")
-          .eq("data_source_id", caiSourceId)
-          .order("source_column");
-
-        if (!caiMappings || caiMappings.length === 0) {
-          return jsonResponse({ error: "No column mappings configured for this source" }, 400);
-        }
-
-        const snapshot = caiMappings.map((m: { source_column: string; target_field: string }) => ({
-          source_column: m.source_column,
-          target_field: m.target_field,
-        }));
-
-        const { error: caiErr } = await supabase
-          .from("data_sources")
-          .update({
-            auto_cron_enabled: true,
-            auto_cron_confirmed_at: new Date().toISOString(),
-            auto_cron_confirmed_by: session.email,
-            auto_cron_mapping_snapshot: snapshot,
-          })
-          .eq("id", caiSourceId);
-
-        if (caiErr) throw caiErr;
-
-        await supabase.from("upload_history_log").insert({
-          action: "auto_import_confirmed",
-          details: { source_id: caiSourceId, confirmed_by: session.email, mapping_count: snapshot.length },
-        });
-
-        return jsonResponse({ success: true, mappingCount: snapshot.length });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "disable-auto-import": {
-        const { sourceId: daiSourceId } = body;
-        if (!daiSourceId) return jsonResponse({ error: "Source ID required" }, 400);
-
-        const { error: daiErr } = await supabase
-          .from("data_sources")
-          .update({ auto_cron_enabled: false })
-          .eq("id", daiSourceId);
-
-        if (daiErr) throw daiErr;
-        return jsonResponse({ success: true });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "start-sql-import": {
-        // Server-side import: creates the upload and hands off to the sql-import-cron
-        // pipeline (keyset fetch + keyset sync) — the same path the scheduled imports use.
-        const { sourceId: ssiSourceId, carrier: ssiCarrier } = body;
-        if (!ssiSourceId) return jsonResponse({ error: "Source ID required" }, 400);
-
-        const { data: ssiSource } = await supabase
-          .from("data_sources")
-          .select("*")
-          .eq("id", ssiSourceId)
-          .maybeSingle();
-        if (!ssiSource) return jsonResponse({ error: "Data source not found" }, 404);
-        if (!ssiSource.db_host || !ssiSource.db_table) {
-          return jsonResponse({ error: "Database connection not configured" }, 400);
-        }
-
-        const ssiCarrierFinal = (ssiCarrier as string) || ssiSource.default_carrier || "UNL";
-
-        await supabase
-          .from("source_uploads")
-          .update({ is_active: false })
-          .eq("data_source_id", ssiSourceId)
-          .eq("carrier", ssiCarrierFinal)
-          .eq("is_active", true);
-
-        const { data: ssiUpload, error: ssiErr } = await supabase
-          .from("source_uploads")
-          .insert({
-            data_source_id: ssiSourceId,
-            carrier: ssiCarrierFinal,
-            filename: `db-import-${new Date().toISOString().slice(0, 10)}`,
-            row_count: 0,
-            status: "processing",
-            uploaded_by: "admin-ui",
-            is_active: true,
-          })
-          .select()
-          .single();
-        if (ssiErr || !ssiUpload) {
-          return jsonResponse({ error: ssiErr?.message || "Failed to create upload" }, 500);
-        }
-
-        // Purge staging rows from prior uploads for this data source
-        const { data: ssiOld } = await supabase
-          .from("source_uploads")
-          .select("id")
-          .eq("data_source_id", ssiSourceId)
-          .neq("id", ssiUpload.id);
-        const ssiOldIds = (ssiOld || []).map((u: { id: string }) => u.id);
-        for (let i = 0; i < ssiOldIds.length; i += 50) {
-          await supabase
-            .from("source_records")
-            .delete()
-            .in("source_upload_id", ssiOldIds.slice(i, i + 50));
-        }
-
-        const ssiFnUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/sql-import-cron`;
-        const ssiP = fetch(ssiFnUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-          },
-          body: JSON.stringify({ phase: "fetch", sourceId: ssiSourceId, uploadId: ssiUpload.id }),
-        }).catch(() => {});
-        const ssiRuntime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
-        if (ssiRuntime?.waitUntil) ssiRuntime.waitUntil(ssiP);
-
-        return jsonResponse({ success: true, uploadId: ssiUpload.id });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "get-import-progress": {
-        const { uploadId: gipUploadId } = body;
-        if (!gipUploadId) return jsonResponse({ error: "Upload ID required" }, 400);
-        const { data: gipUpload } = await supabase
-          .from("source_uploads")
-          .select("id, status, row_count, resync_progress")
-          .eq("id", gipUploadId)
-          .maybeSingle();
-        if (!gipUpload) return jsonResponse({ error: "Upload not found" }, 404);
-        return jsonResponse({ success: true, upload: gipUpload });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "sql-import-count": {
-        const { sourceId: sicSourceId } = body;
-        if (!sicSourceId) return jsonResponse({ error: "Source ID required" }, 400);
-
-        const { data: sicSource, error: sicErr } = await supabase
-          .from("data_sources")
-          .select("*")
-          .eq("id", sicSourceId)
-          .maybeSingle();
-        if (sicErr) throw sicErr;
-        if (!sicSource) return jsonResponse({ error: "Data source not found" }, 404);
-        if (!sicSource.db_host || !sicSource.db_table) {
-          return jsonResponse({ error: "Database connection not configured" }, 400);
-        }
-
-        const sicPassword = sicSource.db_password_secret_name
-          ? resolveSecret(sicSource.db_password_secret_name)
-          : "";
-
-        try {
-          const { default: postgres } = await import("npm:postgres@3.4.5");
-          const sql = postgres({
-            host: sicSource.db_host,
-            port: sicSource.db_port || 5432,
-            database: sicSource.db_name || "postgres",
-            username: sicSource.db_user || "postgres",
-            password: sicPassword,
-            ssl: { ca: AKAMAI_CA_CERT },
-            connect_timeout: 10,
-            max: 1,
-            idle_timeout: 5,
-          });
-
-          const schemaName = sicSource.db_schema || "public";
-          const tableName = sicSource.db_table;
-
-          // Use estimated count for large tables (fast), fall back to exact if estimate is 0
-          let total = 0;
-          try {
-            const estResult = await sql.unsafe(
-              `SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = $1`,
-              [tableName]
-            );
-            total = parseInt(String(estResult[0]?.estimate ?? "0"), 10);
-          } catch { /* ignore */ }
-          if (total <= 0) {
-            // Fallback: exact count with a timeout to avoid edge function death
-            try {
-              await sql.unsafe(`SET statement_timeout = '20s'`);
-              const countResult = await sql.unsafe(
-                `SELECT COUNT(*) as total FROM "${schemaName}"."${tableName}"`
-              );
-              total = parseInt(String(countResult[0]?.total ?? "0"), 10);
-              await sql.unsafe(`RESET statement_timeout`);
-            } catch {
-              total = -1; // unknown
-            }
-          }
-
-          const colResult = await sql`
-            SELECT column_name FROM information_schema.columns
-            WHERE table_schema = ${schemaName} AND table_name = ${tableName}
-            ORDER BY ordinal_position
-          `;
-          const columns = colResult.map((r: { column_name: string }) => r.column_name);
-
-          const sampleResult = await sql.unsafe(
-            `SELECT * FROM "${schemaName}"."${tableName}" LIMIT 5`
-          );
-          const sampleRows = sampleResult.map((row: Record<string, unknown>) => {
-            const strRow: Record<string, string> = {};
-            for (const [k, v] of Object.entries(row)) {
-              strRow[k] = v == null ? "" : String(v);
-            }
-            return strRow;
-          });
-
-          await sql.end();
-          return jsonResponse({ success: true, total, columns, sampleRows });
-        } catch (connErr: unknown) {
-          const msg = connErr instanceof Error ? connErr.message : "Connection failed";
-          return jsonResponse({ error: msg }, 502);
-        }
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "sql-import-batch": {
-        const { sourceId: sibSourceId, offset: sibOffset, batchSize: sibBatchSize } = body;
-        if (!sibSourceId) return jsonResponse({ error: "Source ID required" }, 400);
-
-        const batchOffset = parseInt(sibOffset || "0", 10);
-        const batchLimit = Math.min(parseInt(sibBatchSize || "1000", 10), 2000);
-
-        const { data: sibSource, error: sibErr } = await supabase
-          .from("data_sources")
-          .select("*")
-          .eq("id", sibSourceId)
-          .maybeSingle();
-        if (sibErr) throw sibErr;
-        if (!sibSource) return jsonResponse({ error: "Data source not found" }, 404);
-        if (!sibSource.db_host || !sibSource.db_table) {
-          return jsonResponse({ error: "Database connection not configured" }, 400);
-        }
-
-        const sibPassword = sibSource.db_password_secret_name
-          ? resolveSecret(sibSource.db_password_secret_name)
-          : "";
-
-        try {
-          const { default: postgres } = await import("npm:postgres@3.4.5");
-          const sql = postgres({
-            host: sibSource.db_host,
-            port: sibSource.db_port || 5432,
-            database: sibSource.db_name || "postgres",
-            username: sibSource.db_user || "postgres",
-            password: sibPassword,
-            ssl: { ca: AKAMAI_CA_CERT },
-            connect_timeout: 30,
-            max: 1,
-            idle_timeout: 5,
-          });
-
-          const schemaName = sibSource.db_schema || "public";
-          const tableName = sibSource.db_table;
-
-          // Legacy path kept for stale cached frontends. Without ORDER BY,
-          // LIMIT/OFFSET returns arbitrary rows per query — guaranteeing
-          // duplicates and skips across batches.
-          const sibColCheck = await sql`
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = ${schemaName} AND table_name = ${tableName} AND column_name = '_dlt_id'
-          `;
-          const sibOrderClause = sibColCheck.length > 0 ? `ORDER BY "_dlt_id"` : "";
-
-          const result = await sql.unsafe(
-            `SELECT * FROM "${schemaName}"."${tableName}" ${sibOrderClause} LIMIT $1 OFFSET $2`,
-            [batchLimit, batchOffset]
-          );
-
-          const rows = result.map((row: Record<string, unknown>) => {
-            const strRow: Record<string, string> = {};
-            for (const [k, v] of Object.entries(row)) {
-              strRow[k] = v == null ? "" : String(v);
-            }
-            return strRow;
-          });
-
-          await sql.end();
-          return jsonResponse({
-            success: true,
-            rows,
-            count: rows.length,
-            offset: batchOffset,
-            hasMore: rows.length === batchLimit,
-          });
-        } catch (connErr: unknown) {
-          const msg = connErr instanceof Error ? connErr.message : "Connection failed";
-          return jsonResponse({ error: msg }, 502);
-        }
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "prune-source-records": {
-        const { dryRun = true, retentionDays = 7 } = body;
-
-        const cutoff = new Date(Date.now() - (retentionDays as number) * 24 * 60 * 60 * 1000).toISOString();
-
-        // Find the most recent active+complete upload per data_source_id+carrier (always protected)
-        const { data: allUploadsForPrune } = await supabase
-          .from("source_uploads")
-          .select("id, data_source_id, carrier, filename, status, is_active, row_count, created_at")
-          .order("created_at", { ascending: false });
-
-        const protectedIds = new Set<string>();
-        const seenKeys = new Set<string>();
-        for (const u of allUploadsForPrune || []) {
-          const key = `${u.data_source_id}::${u.carrier}`;
-          if (!seenKeys.has(key) && u.is_active && u.status === "complete") {
-            protectedIds.add(u.id);
-            seenKeys.add(key);
-          }
-        }
-
-        // Candidates: older than cutoff, not the protected latest, not currently processing
-        const candidates: Array<{
-          uploadId: string; filename: string; carrier: string;
-          completedAt: string; isActive: boolean; sourceRecordCount: number;
-        }> = [];
-
-        for (const u of allUploadsForPrune || []) {
-          if (protectedIds.has(u.id)) continue;
-          if (u.status === "processing") continue;
-          if (new Date(u.created_at) >= new Date(cutoff)) continue;
-
-          const { count } = await supabase
-            .from("source_records")
-            .select("id", { count: "exact", head: true })
-            .eq("source_upload_id", u.id);
-
-          candidates.push({
-            uploadId: u.id,
-            filename: u.filename,
-            carrier: u.carrier,
-            completedAt: u.created_at,
-            isActive: u.is_active,
-            sourceRecordCount: count || 0,
-          });
-        }
-
-        const totalRowsWouldDelete = candidates.reduce((sum, c) => sum + c.sourceRecordCount, 0);
-        const remainingUploads = (allUploadsForPrune || []).length - candidates.length;
-
-        // Safety guards
-        if (remainingUploads <= 0) {
-          return jsonResponse({
-            aborted: true,
-            reason: "Pruning would leave zero uploads -- aborting",
-            candidates,
-            totalRowsWouldDelete,
-          });
-        }
-
-        const { count: currentTotalRecords } = await supabase
-          .from("source_records")
-          .select("id", { count: "exact", head: true });
-
-        if ((currentTotalRecords || 0) - totalRowsWouldDelete <= 0) {
-          return jsonResponse({
-            aborted: true,
-            reason: "Pruning would leave zero source_records -- aborting",
-            candidates,
-            totalRowsWouldDelete,
-          });
-        }
-
-        if (dryRun) {
-          return jsonResponse({
-            dryRun: true,
-            retentionDays,
-            cutoffDate: cutoff,
-            candidates,
-            totalRowsWouldDelete,
-            remainingUploads,
-            remainingRecords: (currentTotalRecords || 0) - totalRowsWouldDelete,
-          });
-        }
-
-        // Actual deletion (same path as delete-source-upload)
-        let totalDeletedPolicies = 0;
-        let totalDeletedRecords = 0;
-        let uploadsDeleted = 0;
-
-        for (const candidate of candidates) {
-          const { count: delPolicies } = await supabase
-            .from("form_submissions")
-            .delete({ count: "exact" })
-            .eq("source_upload_id", candidate.uploadId);
-
-          const { count: delRecords } = await supabase
-            .from("source_records")
-            .delete({ count: "exact" })
-            .eq("source_upload_id", candidate.uploadId);
-
-          await supabase
-            .from("source_uploads")
-            .delete()
-            .eq("id", candidate.uploadId);
-
-          totalDeletedPolicies += delPolicies || 0;
-          totalDeletedRecords += delRecords || 0;
-          uploadsDeleted++;
-        }
-
-        return jsonResponse({
-          dryRun: false,
-          uploadsDeleted,
-          totalDeletedPolicies,
-          totalDeletedRecords,
-          remainingUploads,
-        });
+        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
       }
-
       case "get-lead-vendors": {
         const { data: vendors, error: vErr } = await supabase
           .from("lead_vendors")
@@ -5344,78 +4094,140 @@ Deno.serve(async (req: Request) => {
       // ----- Manager-role data endpoints (role = 'manager') -----
       case "mgr-at-risk-worklist": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
-        // Data-driven at-risk lane. A policy is at-risk when it is still active
-        // but its premium is past due — i.e. a draft was missed. We compute this
-        // straight from policy state instead of waiting on a manual flag row, so
-        // the board reflects reality the moment the daily UNL file lands.
-        //
+        // Data-driven at-risk lane — queries Max's DB directly (2026-07-20).
         // Definition (locked w/ Charlie 2026-06-30):
-        //   status = 'active' AND billing_form = 'DIR' AND paid_to_date < today
-        // Only direct-bill (DIR) policies count — a past-due DIR is a genuinely
-        // missed auto-draft. This mirrors the dashboard's at-risk KPI so the
-        // manager pipeline and the internal dashboard report the same number.
+        //   cntrct_code = 'A' AND billing_form = 'DIR' AND paid_to_date < today
+        // Only direct-bill (DIR) policies count — a past-due DIR is a missed auto-draft.
         // Flags/dispositions are an ACTION layer on top, never the entry gate.
-        const todayIso = new Date().toISOString().slice(0, 10);
-        const { data: agencyPolicies, error: apErr } = await supabase
-          .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, contract_reason")
-          .eq("agency_id", session.agency_id)
-          .eq("status", "active")
-          .eq("billing_form", "DIR")
-          .lt("paid_to_date", todayIso);
-        if (apErr) throw apErr;
-        const policyIds = (agencyPolicies || []).map((p: { id: string }) => p.id);
-        if (policyIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
 
-        // Disposition + agent-handoff state overlays the computed list so a
-        // manager's (and agent's) progress on a policy persists across refreshes.
+        // Resolve writing numbers for this agency to scope the Max DB query
+        const { data: awnRows } = await supabase
+          .from("agency_writing_numbers")
+          .select("writing_number")
+          .eq("agency_id", session.agency_id);
+        const agencyWns = (awnRows || []).map((r: { writing_number: string }) =>
+          (r.writing_number || "").trim().toUpperCase()
+        ).filter(Boolean);
+        if (agencyWns.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const maxDb = await openMaxDb();
+        let agencyPolicies: Record<string, unknown>[] = [];
+        try {
+          agencyPolicies = await maxDb.unsafe(`
+            SELECT
+              TRIM(t.policy_nbr)        AS policy_number,
+              TRIM(t.first_name)        AS client_first_name,
+              TRIM(t.last_name)         AS client_last_name,
+              TRIM(t.wa_name)           AS agent_full_name,
+              TRIM(t.wa)                AS agent_number,
+              TRIM(t.plan_code)         AS product_type,
+              TRIM(t.carrier)           AS carrier,
+              t.annual_premium          AS plan_premium,
+              t.paid_to_date,
+              t.issue_date              AS policy_effective_date,
+              TRIM(t.phone_nbr::text)    AS phone,
+              TRIM(t.cntrct_code)       AS contract_code,
+              TRIM(t.cntrct_reason)     AS contract_reason,
+              TRIM(t.billing_form)      AS billing_form
+            FROM typed.unl_fym_policy_latest_load t
+            WHERE TRIM(UPPER(t.wa)) = ANY(${ agencyWns.map((_: string, i: number) => `$${i + 1}`).join(",") })
+              AND t.cntrct_code = 'A'
+              AND t.billing_form = 'DIR'
+              AND t.paid_to_date < ${ agencyWns.length + 1 }::date
+          `, [...agencyWns, todayIso]) as Record<string, unknown>[];
+        } finally {
+          try { await maxDb.end(); } catch { /* ignore */ }
+        }
+
+        if (agencyPolicies.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        // Overlay dispositions keyed on policy_nbr (added 2026-07-20)
+        const policyNbrs = agencyPolicies.map((p) => p.policy_number as string).filter(Boolean);
         const { data: disps } = await supabase
           .from("policy_dispositions")
-          .select("policy_id, disposition, follow_up_at, set_at, agent_id, agent_outreach_at, agent_contacted_at, agent_saved_at, manager_approved_at")
-          .in("policy_id", policyIds);
+          .select("policy_nbr, disposition, follow_up_at, set_at, agent_id, agent_outreach_at, agent_contacted_at, agent_saved_at, manager_approved_at")
+          .in("policy_nbr", policyNbrs);
         const dispByPolicy = new Map(
-          (disps || []).map((d: { policy_id: string }) => [d.policy_id, d])
+          (disps || []).map((d: { policy_nbr: string }) => [d.policy_nbr, d])
         );
-        const worklist = (agencyPolicies || []).map((p: Record<string, unknown>) => {
-          const disp = dispByPolicy.get(p.id as string) || null;
-          const computed = computeAtRiskStage((p.paid_to_date as string | null) ?? null, disp as DispRow);
-          return { ...shapeWorklistRow(p, disp), ...computed };
+        const worklist = agencyPolicies.map((p: Record<string, unknown>) => {
+          const disp = dispByPolicy.get(p.policy_number as string) || null;
+          const ptd = p.paid_to_date instanceof Date
+            ? (p.paid_to_date as Date).toISOString().slice(0, 10)
+            : String(p.paid_to_date ?? "").slice(0, 10);
+          const computed = computeAtRiskStage(ptd || null, disp as DispRow);
+          return { ...shapeWorklistRow({ ...p, paid_to_date: ptd }, disp), ...computed };
         });
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
       case "mgr-terminated-worklist": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
-        // Terminated policies for this manager's agency — the win-back lane.
-        // Membership comes from the imported data source (status='terminated').
-        // We auto-drop policies terminated more than TERMINATED_WINDOW_DAYS ago
-        // so the lane stays a fresh, workable list, using the carrier's real
-        // Term Date from the UNL source (form_submissions.terminated_date) —
-        // not a derived date.
-        const TERMINATED_WINDOW_DAYS = 45;
-        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000)
-          .toISOString()
-          .slice(0, 10);
-        const { data: termPolicies, error: tpErr } = await supabase
-          .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, contract_reason, terminated_date")
-          .eq("agency_id", session.agency_id)
-          .eq("status", "terminated")
-          .gte("terminated_date", termCutoff);
-        if (tpErr) throw tpErr;
-        const termIds = (termPolicies || []).map((p: { id: string }) => p.id);
-        if (termIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+        // Terminated policies — win-back lane. Queries Max's DB directly (2026-07-20).
+        // Window: terminated within last 45 days (term_date >= cutoff).
 
+        const { data: awnRowsTerm } = await supabase
+          .from("agency_writing_numbers")
+          .select("writing_number")
+          .eq("agency_id", session.agency_id);
+        const agencyWnsTerm = (awnRowsTerm || []).map((r: { writing_number: string }) =>
+          (r.writing_number || "").trim().toUpperCase()
+        ).filter(Boolean);
+        if (agencyWnsTerm.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const TERMINATED_WINDOW_DAYS = 45;
+        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
+        const maxDbTerm = await openMaxDb();
+        let termPolicies: Record<string, unknown>[] = [];
+        try {
+          termPolicies = await maxDbTerm.unsafe(`
+            SELECT
+              TRIM(t.policy_nbr)        AS policy_number,
+              TRIM(t.first_name)        AS client_first_name,
+              TRIM(t.last_name)         AS client_last_name,
+              TRIM(t.wa_name)           AS agent_full_name,
+              TRIM(t.wa)                AS agent_number,
+              TRIM(t.plan_code)         AS product_type,
+              TRIM(t.carrier)           AS carrier,
+              t.annual_premium          AS plan_premium,
+              t.paid_to_date,
+              t.issue_date              AS policy_effective_date,
+              t.term_date               AS terminated_date,
+              TRIM(t.phone_nbr::text)    AS phone,
+              TRIM(t.cntrct_code)       AS contract_code,
+              TRIM(t.cntrct_reason)     AS contract_reason
+            FROM typed.unl_fym_policy_latest_load t
+            WHERE TRIM(UPPER(t.wa)) = ANY(${ agencyWnsTerm.map((_: string, i: number) => `$${i + 1}`).join(",") })
+              AND t.cntrct_code = 'T'
+              AND t.term_date >= ${ agencyWnsTerm.length + 1 }::date
+          `, [...agencyWnsTerm, termCutoff]) as Record<string, unknown>[];
+        } finally {
+          try { await maxDbTerm.end(); } catch { /* ignore */ }
+        }
+
+        if (termPolicies.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const termNbrs = termPolicies.map((p) => p.policy_number as string).filter(Boolean);
         const { data: termDisps } = await supabase
           .from("policy_dispositions")
-          .select("policy_id, disposition, follow_up_at, set_at")
-          .in("policy_id", termIds);
+          .select("policy_nbr, disposition, follow_up_at, set_at")
+          .in("policy_nbr", termNbrs);
         const termDispByPolicy = new Map(
-          (termDisps || []).map((d: { policy_id: string }) => [d.policy_id, d])
+          (termDisps || []).map((d: { policy_nbr: string }) => [d.policy_nbr, d])
         );
-        const worklist = (termPolicies || []).map((p: Record<string, unknown>) =>
-          shapeWorklistRow(p, termDispByPolicy.get(p.id as string) || null)
-        );
+        const worklist = termPolicies.map((p: Record<string, unknown>) => {
+          const ptd = p.paid_to_date instanceof Date
+            ? (p.paid_to_date as Date).toISOString().slice(0, 10)
+            : String(p.paid_to_date ?? "").slice(0, 10);
+          const tdate = p.terminated_date instanceof Date
+            ? (p.terminated_date as Date).toISOString().slice(0, 10)
+            : String(p.terminated_date ?? "").slice(0, 10);
+          return shapeWorklistRow(
+            { ...p, paid_to_date: ptd, terminated_date: tdate },
+            termDispByPolicy.get(p.policy_number as string) || null
+          );
+        });
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
@@ -5663,17 +4475,56 @@ Deno.serve(async (req: Request) => {
       // agency-wide rollup + trend for the header line.
       case "mgr-agent-persistency": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
-        const { data: rows, error: pErr } = await supabase
-          .from("form_submissions")
-          .select("agent_number, agent_first_name, agent_last_name, policy_effective_date, paid_to_date, billing_mode, product_type")
-          .eq("agency_id", session.agency_id)
-          .in("product_type", ["HI", "HHC"]);
-        if (pErr) throw pErr;
+        // Queries Max's DB directly (2026-07-20). LOB filter via plan_code prefix.
+        const { data: awnRowsPers } = await supabase
+          .from("agency_writing_numbers")
+          .select("writing_number")
+          .eq("agency_id", session.agency_id);
+        const agencyWnsPers = (awnRowsPers || []).map((r: { writing_number: string }) =>
+          (r.writing_number || "").trim().toUpperCase()
+        ).filter(Boolean);
+
         type FsRow = {
           agent_number?: string | null; agent_first_name?: string | null; agent_last_name?: string | null;
           policy_effective_date?: string | null; paid_to_date?: string | null; billing_mode?: string | null;
         };
-        const all = (rows || []) as FsRow[];
+        let all: FsRow[] = [];
+        if (agencyWnsPers.length > 0) {
+          const maxDbPers = await openMaxDb();
+          try {
+            const persRows = await maxDbPers.unsafe(`
+              SELECT
+                TRIM(t.wa)                            AS agent_number,
+                TRIM(SPLIT_PART(t.wa_name, ' ', 1))  AS agent_first_name,
+                TRIM(SUBSTRING(t.wa_name FROM POSITION(' ' IN t.wa_name) + 1)) AS agent_last_name,
+                t.issue_date   AS policy_effective_date,
+                t.paid_to_date,
+                t.billing_mode::text AS billing_mode,
+                CASE
+                  WHEN t.plan_code ILIKE '%HHC%' THEN 'HHC'
+                  ELSE 'HI'
+                END AS product_type
+              FROM typed.unl_fym_policy_latest_load t
+              WHERE TRIM(UPPER(t.wa)) = ANY(${ agencyWnsPers.map((_: string, i: number) => `$${i + 1}`).join(",") })
+                AND (t.plan_code ILIKE '%HI%' OR t.plan_code ILIKE '%HIP%'
+                     OR t.plan_code ILIKE '%GHI%' OR t.plan_code ILIKE '%HHC%')
+            `, agencyWnsPers) as Record<string, unknown>[];
+            all = persRows.map((r) => ({
+              agent_number:          String(r.agent_number ?? ""),
+              agent_first_name:      String(r.agent_first_name ?? ""),
+              agent_last_name:       String(r.agent_last_name ?? ""),
+              policy_effective_date: r.policy_effective_date instanceof Date
+                ? (r.policy_effective_date as Date).toISOString().slice(0, 10)
+                : String(r.policy_effective_date ?? "").slice(0, 10),
+              paid_to_date: r.paid_to_date instanceof Date
+                ? (r.paid_to_date as Date).toISOString().slice(0, 10)
+                : String(r.paid_to_date ?? "").slice(0, 10),
+              billing_mode:  String(r.billing_mode ?? ""),
+            }));
+          } finally {
+            try { await maxDbPers.end(); } catch { /* ignore */ }
+          }
+        }
 
         // 6-month effective-cohort buckets (only cohorts old enough to be eligible).
         const now = new Date();
