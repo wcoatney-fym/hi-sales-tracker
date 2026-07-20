@@ -378,121 +378,262 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Resolve agency name for payload
+    // ── Resolve agency metadata from Supabase ─────────────────────────────
     const { data: agencyRow } = await supabase
       .from("agencies")
-      .select("name")
+      .select("name, ghl_api_key, ghl_location_id")
       .eq("id", backfillAgencyId)
       .maybeSingle();
-    const agencyName = (agencyRow?.name as string) ?? "";
-
-    // Build NPN map from agents + agency_rosters
-    const npnByWn = new Map<string, string>();
-    const { data: agentRows } = await supabase
-      .from("agents")
-      .select("unl_writing_number, npn")
-      .range(0, 9999);
-    for (const a of agentRows ?? []) {
-      const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
-      if (wn && a.npn) npnByWn.set(wn, a.npn as string);
+    if (!agencyRow) {
+      return new Response(
+        JSON.stringify({ error: `agency ${backfillAgencyId} not found` }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      );
     }
-    const { data: rosterRows } = await supabase
-      .from("agency_rosters")
-      .select("writing_number, npn")
-      .eq("status", "active");
-    for (const r of rosterRows ?? []) {
-      const wn = (r.writing_number as string ?? "").trim().toUpperCase();
-      if (wn && r.npn && !npnByWn.has(wn)) npnByWn.set(wn, r.npn as string);
+    const agencyName = (agencyRow.name as string) ?? "";
+
+    // ── Build NPN map (same as main path) ────────────────────────────────
+    const bfNpnByWn = new Map<string, string>();
+    const bfNameByWn = new Map<string, { first: string; full: string }>();
+    {
+      const AN = 1000; let anOff = 0;
+      while (true) {
+        const { data: ar } = await supabase
+          .from("agents")
+          .select("unl_writing_number, npn, first_name, last_name")
+          .range(anOff, anOff + AN - 1);
+        for (const a of ar ?? []) {
+          const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
+          if (!wn) continue;
+          if (a.npn) bfNpnByWn.set(wn, a.npn as string);
+          const first = (a.first_name as string ?? "").trim();
+          const full  = `${first} ${(a.last_name as string ?? "").trim()}`.trim();
+          bfNameByWn.set(wn, { first, full });
+        }
+        if (!ar || ar.length < AN) break;
+        anOff += AN;
+      }
+      const { data: rr } = await supabase
+        .from("agency_rosters")
+        .select("writing_number, npn, agent_name")
+        .eq("status", "active");
+      for (const r of rr ?? []) {
+        const wn = (r.writing_number as string ?? "").trim().toUpperCase();
+        if (!wn) continue;
+        if (r.npn && !bfNpnByWn.has(wn)) bfNpnByWn.set(wn, r.npn as string);
+        if (!bfNameByWn.has(wn) && r.agent_name) {
+          const parts = (r.agent_name as string).trim().split(/\s+/);
+          bfNameByWn.set(wn, { first: parts[0] ?? "", full: (r.agent_name as string).trim() });
+        }
+      }
     }
 
-    // Fetch all form_submissions for this agency since date_from
-    const allSubmissions: Record<string, unknown>[] = [];
-    let offset = 0;
-    while (true) {
-      const { data: batch } = await supabase
-        .from("form_submissions")
-        .select("policy_number,client_first_name,client_last_name,phone,email,address,city,state,zip,plan_name,plan_premium,status,product_type,app_submit_date,policy_effective_date,paid_to_date,billing_mode,contract_reason,terminated_date,agent_number,agent_first_name,agent_last_name,carrier")
-        .eq("agency_id", backfillAgencyId)
-        .gte("app_submit_date", backfillDateFrom)
-        .range(offset, offset + 499);
-      if (!batch || batch.length === 0) break;
-      allSubmissions.push(...batch);
-      if (batch.length < 500) break;
-      offset += 500;
+    // ── Query Max's DB for agency policies since date_from ────────────────
+    // Backfill uses the same trigger-query pattern as the main path, but:
+    //   - scoped to one agency (wa IN agency writing numbers for this agency)
+    //   - date window uses app_recvd_date >= date_from instead of CURRENT_DATE - 3 days
+    //   - fires ALL current-state rows (not just pending triggers) so GHL is fully seeded
+    //   - fired_triggers NOT EXISTS gate is preserved — safe to re-run
+    const { default: pgBf } = await import("npm:postgres@3.4.5");
+    const sqlBf = pgBf({
+      host:     cleanHost(Deno.env.get("PROD_DB_HOST")!),
+      port:     Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
+      database: Deno.env.get("PROD_DB_NAME")!,
+      username: Deno.env.get("PROD_DB_USER")!,
+      password: Deno.env.get("PROD_DB_PASSWORD")!,
+      ssl:      { ca: AKAMAI_CA_CERT },
+      connect_timeout: 30,
+      max: 1,
+      idle_timeout: 20,
+    });
+
+    // Fetch agency writing numbers from Supabase to scope the Max query.
+    const { data: wns } = await supabase
+      .from("agency_writing_numbers")
+      .select("writing_number")
+      .eq("agency_id", backfillAgencyId);
+    const agencyWns = (wns ?? []).map((r) => (r.writing_number as string).trim().toUpperCase()).filter(Boolean);
+
+    let bfRows: ProdRow[] = [];
+    try {
+      await sqlBf.unsafe("SET statement_timeout = '120s'");
+      const PLAN_FILTER = `(
+        t.plan_code ILIKE '%HI%' OR t.plan_code ILIKE '%HHC%'
+        OR t.plan_code ILIKE '%GHI%' OR t.plan_code ILIKE '%HIP%'
+      )`;
+      if (agencyWns.length === 0) {
+        console.warn(`[lifecycle-direct:backfill] no writing numbers for agency ${backfillAgencyId} — skipping Max query`);
+      } else {
+        // Use the full current-state row for each policy; trigger is always 'submission'
+        // for a backfill (seeding GHL from scratch, not diff-based).
+        bfRows = await sqlBf.unsafe(`
+          SELECT
+            TRIM(t.policy_nbr)          AS policy_nbr,
+            TRIM(t.first_name)          AS first_name,
+            TRIM(t.last_name)           AS last_name,
+            TRIM(t.phone_nbr::text)      AS phone_nbr,
+            TRIM(t.cntrct_code)         AS cntrct_code,
+            TRIM(t.cntrct_reason)       AS cntrct_reason,
+            t.issue_date, t.app_recvd_date, t.paid_to_date, t.term_date,
+            t.billing_mode, t.annual_premium,
+            TRIM(t.plan_code)           AS plan_code,
+            TRIM(t.billing_form)        AS billing_form,
+            t.at_risk_policy,
+            t.roster_hierarchy_json,
+            t._dlt_load_id,
+            TRIM(t.wa)                  AS wa,
+            TRIM(t.wa_name)             AS wa_name
+          FROM typed.unl_fym_policy_latest_load t
+          WHERE ${PLAN_FILTER}
+            AND TRIM(UPPER(t.wa)) = ANY(${ agencyWns.map((_, i) => `$${i + 1}`).join(",") })
+            AND t.app_recvd_date >= ${ agencyWns.length + 1 }::date
+            AND NOT EXISTS (
+              SELECT 1 FROM generate_series(1,1)
+              -- fired_triggers gate applied in app code below (cross-DB)
+            )
+        `, [...agencyWns, backfillDateFrom]) as ProdRow[];
+        console.log(`[lifecycle-direct:backfill] Max query returned ${bfRows.length} rows for agency ${agencyName}`);
+      }
+    } finally {
+      try { await sqlBf.end(); } catch { /* ignore */ }
+    }
+
+    // ── Load fired_triggers for this agency (backfill scope) ──────────────
+    // Only need submission entries for the policies we're about to process.
+    const bfPolicyNbrs = bfRows.map((r) => (r.policy_nbr ?? "").trim()).filter(Boolean);
+    const bfFiredSet = new Set<string>();
+    if (bfPolicyNbrs.length > 0) {
+      const FT = 1000; let ftOff = 0;
+      while (true) {
+        const { data: ftRows } = await supabase
+          .from("fired_triggers")
+          .select("policy_nbr, trigger_type, changed_on")
+          .in("policy_nbr", bfPolicyNbrs.slice(0, 500)) // PostgREST IN limit safety
+          .eq("trigger_type", "submission")
+          .range(ftOff, ftOff + FT - 1);
+        for (const r of ftRows ?? []) {
+          bfFiredSet.add(`${r.policy_nbr}|${r.trigger_type}|${r.changed_on}`);
+        }
+        if (!ftRows || ftRows.length < FT) break;
+        ftOff += FT;
+      }
     }
 
     const bfAudit: Record<string, unknown>[] = [];
+    const bfFiredInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
     let bfFired = 0;
     let bfFailed = 0;
+    let bfHeld = 0;
 
-    for (const row of allSubmissions) {
-      const pn        = String(row.policy_number ?? "").trim();
-      const pt        = String(row.product_type  ?? "").trim().toUpperCase();
-      const planType  = pt === "HHC" ? "HHC" : pt === "HI" || pt === "HIP" ? "HI" : pt;
-      const wn        = String(row.agent_number   ?? "").trim().toUpperCase();
-      const npn       = npnByWn.get(wn) ?? wn;
-      const firstName = String(row.client_first_name ?? "").trim();
-      const nameParts = splitMiddleInitial(firstName);
-      const agentFirst = String(row.agent_first_name ?? "").trim();
-      const agentLast  = String(row.agent_last_name  ?? "").trim();
-      const agentFull  = `${agentFirst} ${agentLast}`.trim();
-      const statusRaw  = String(row.status ?? "").trim().toLowerCase();
-      const clientStatus = statusRaw === "active" ? "Active" : statusRaw === "pending" ? "Pending" : statusRaw === "terminated" ? "Terminated" : String(row.status ?? "");
+    for (const row of bfRows) {
+      const pn = (row.policy_nbr ?? "").trim();
+      if (!pn) continue;
+
+      // changed_on for backfill submission = app_recvd_date
+      const changedOnIso = (row.app_recvd_date instanceof Date
+        ? row.app_recvd_date.toISOString()
+        : String(row.app_recvd_date ?? "")).slice(0, 10);
+      if (!changedOnIso) continue;
+
+      // fired_triggers idempotency gate
+      const bfKey = `${pn}|submission|${changedOnIso}`;
+      if (bfFiredSet.has(bfKey)) continue;
+
+      // Resolve writing number and NPN from wa column (Max's DB)
+      const wa  = ("wa" in row ? String((row as Record<string, unknown>).wa ?? "") : "").trim().toUpperCase();
+      const npn = bfNpnByWn.get(wa) ?? "";
+      if (!npn) {
+        console.log(`[lifecycle-direct:backfill] NPN hold: ${pn} wa=${wa}`);
+        bfHeld++;
+        continue;
+      }
+
+      const rosterName  = bfNameByWn.get(wa);
+      const nameParts   = splitMiddleInitial((row.first_name ?? "").trim());
+      const planName    = resolvePlanName(row.plan_code);
+      const planType    = derivePlanType(planName || row.plan_code);
+      const monthly     = perPaymentPremium(row.annual_premium, row.billing_mode, pn);
+      const clientStatus = CONTRACT_STATUS[row.cntrct_code?.trim() ?? ""] ?? (row.cntrct_code ?? "");
+
+      // wa_name from Max's DB (confirmed field in migration_mock_up.md)
+      const waName     = ("wa_name" in row ? String((row as Record<string, unknown>).wa_name ?? "") : "").trim();
+      const agentFirst = rosterName?.first ?? (waName ? waName.split(/\s+/)[0] : "");
+      const agentFull  = rosterName?.full  ?? waName;
 
       const payload: LifecyclePayload = {
         client_first_name:    nameParts.first,
         middle_initial:       nameParts.middleInitial,
-        client_last_name:     titleCase(String(row.client_last_name ?? "").trim()),
-        phone:                String(row.phone ?? "").trim(),
-        email:                String(row.email ?? "").trim(),
-        address:              String(row.address ?? "").trim(),
-        city:                 String(row.city   ?? "").trim(),
-        state:                String(row.state  ?? "").trim(),
-        zip:                  String(row.zip    ?? "").trim(),
-        plan_name:            String(row.plan_name ?? "").trim(),
+        client_last_name:     titleCase((row.last_name ?? "").trim()),
+        phone:                (row.phone_nbr ?? "").trim(),
+        email:                "",
+        address:              "",
+        city:                 "",
+        state:                "",
+        zip:                  "",
+        plan_name:            planName,
         plan_type:            planType,
-        plan_premium:         String(row.plan_premium ?? "").trim(),
-        submission_date:      String(row.app_submit_date         ?? "").trim(),
-        effective_date:       String(row.policy_effective_date   ?? "").trim(),
-        paid_to_date:         String(row.paid_to_date            ?? "").trim(),
-        billing_mode:         String(row.billing_mode            ?? "").trim(),
-        at_risk_status:       false,
+        plan_premium:         String(monthly),
+        submission_date:      usDate(row.app_recvd_date),
+        effective_date:       usDate(row.issue_date),
+        paid_to_date:         usDate(row.paid_to_date),
+        billing_mode:         billingModeLabel(row.billing_mode),
+        at_risk_status:       row.at_risk_policy,
         client_status:        clientStatus,
         policy_number:        pn,
-        termination_date:     String(row.terminated_date         ?? "").trim(),
-        contract_reason:      String(row.contract_reason         ?? "").trim(),
+        termination_date:     usDate(row.term_date),
+        contract_reason:      contractReasonLabel(row.cntrct_reason ?? null),
         agent_npn:            npn,
         agency:               agencyName,
-        carrier:              String(row.carrier ?? "UNL").trim(),
+        carrier:              "UNL",
         agent_first_name:     agentFirst,
         agent_full_name:      agentFull,
-        agent_writing_number: wn,
+        agent_writing_number: wa,
         trigger:              "submission",
       };
 
       if (dry) {
         console.log(`[lifecycle-direct:backfill:dry] ${pn}`, JSON.stringify(buildGhlContactBody(payload, ghlCfg.locationId)));
         bfFired++;
+        bfFiredSet.add(bfKey);
         continue;
       }
 
       const ghlBody = buildGhlContactBody(payload, ghlCfg.locationId);
       const result  = await pushContactToGhl(ghlCfg, ghlBody);
-      bfAudit.push({ policy_number: pn, trigger: "submission", ok: result.ok, dry_run: false, error: result.error, http_status: result.http_status, agency_id: backfillAgencyId, risk_signal: null, previous_contract_code: null, contract_code: null, contract_reason: null, upload_id: null });
-      if (result.ok) { bfFired++; } else { bfFailed++; }
+      bfAudit.push({ policy_number: pn, trigger: "submission", ok: result.ok, dry_run: false, error: result.error, http_status: result.http_status, agency_id: backfillAgencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
+      if (result.ok) {
+        bfFired++;
+        bfFiredInserts.push({ policy_nbr: pn, trigger_type: "submission", changed_on: changedOnIso });
+        bfFiredSet.add(bfKey);
+      } else {
+        bfFailed++;
+      }
       console.log(`[lifecycle-direct:backfill] ${pn} ok=${result.ok} http=${result.http_status}`);
     }
 
-    if (bfAudit.length > 0) {
-      try {
-        for (let i = 0; i < bfAudit.length; i += 500) {
-          await supabase.from("lifecycle_event_log").insert(bfAudit.slice(i, i + 500));
-        }
-      } catch (e) { console.error("[lifecycle-direct] backfill audit write failed:", e); }
+    // Persist fired_triggers + audit
+    if (!dry) {
+      if (bfFiredInserts.length > 0) {
+        try {
+          for (let i = 0; i < bfFiredInserts.length; i += 500) {
+            const { error: ftErr } = await supabase
+              .from("fired_triggers")
+              .upsert(bfFiredInserts.slice(i, i + 500), { onConflict: "policy_nbr,trigger_type,changed_on", ignoreDuplicates: true });
+            if (ftErr) console.error(`[lifecycle-direct:backfill] fired_triggers write failed: ${ftErr.message}`);
+          }
+        } catch (e) { console.error("[lifecycle-direct:backfill] fired_triggers write error (non-fatal):", e); }
+      }
+      if (bfAudit.length > 0) {
+        try {
+          for (let i = 0; i < bfAudit.length; i += 500) {
+            await supabase.from("lifecycle_event_log").insert(bfAudit.slice(i, i + 500));
+          }
+        } catch (e) { console.error("[lifecycle-direct:backfill] audit write failed:", e); }
+      }
     }
 
     return new Response(
-      JSON.stringify({ ok: true, mode: "backfill", agency: agencyName, total: allSubmissions.length, fired: bfFired, failed: bfFailed, dry }),
+      JSON.stringify({ ok: true, mode: "backfill", agency: agencyName, total: bfRows.length, fired: bfFired, failed: bfFailed, held: bfHeld, dry }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -864,7 +1005,7 @@ Deno.serve(async (req: Request) => {
 
   await writeCronRun({ fired, skipped });
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
