@@ -5725,6 +5725,78 @@ Deno.serve(async (req: Request) => {
         });
       }
 
+      // ── NPN Holds / Proposed Fires ─────────────────────────────────────────
+      case "get-npn-holds": {
+        // Returns npn_holds (status='held') + proposed_fires (approved_at IS NULL)
+        // for the admin portal NPN Holds tab. Reads from tracker DB (lryxxn).
+        const trackerClient = createClient(
+          Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
+          Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY")!
+        );
+        const PAGE = 200;
+
+        // Page through npn_holds WHERE status='held'
+        const holds: Record<string, unknown>[] = [];
+        let offset = 0;
+        while (true) {
+          const { data, error } = await trackerClient
+            .from("npn_holds")
+            .select("id, policy_nbr, trigger_type, changed_on, agency_name, agent_name, writing_number, held_at, status")
+            .eq("status", "held")
+            .order("held_at", { ascending: false })
+            .range(offset, offset + PAGE - 1);
+          if (error) throw new Error(`npn_holds fetch failed: ${error.message}`);
+          holds.push(...(data ?? []));
+          if ((data ?? []).length < PAGE) break;
+          offset += PAGE;
+        }
+
+        // Page through proposed_fires WHERE approved_at IS NULL
+        const proposed: Record<string, unknown>[] = [];
+        offset = 0;
+        while (true) {
+          const { data, error } = await trackerClient
+            .from("proposed_fires")
+            .select("id, npn_hold_id, policy_nbr, trigger_type, changed_on, agency_id, agent_npn, writing_number, proposed_at, approved_at, fired_at, approved_by")
+            .is("approved_at", null)
+            .is("fired_at", null)
+            .order("proposed_at", { ascending: false })
+            .range(offset, offset + PAGE - 1);
+          if (error) throw new Error(`proposed_fires fetch failed: ${error.message}`);
+          proposed.push(...(data ?? []));
+          if ((data ?? []).length < PAGE) break;
+          offset += PAGE;
+        }
+
+        return jsonResponse({ holds, proposed });
+      }
+
+      case "approve-proposed-fire": {
+        // Sets proposed_fires.approved_at + approved_by for a given id.
+        // The daily proposed-fires-push cron will pick it up at 7:15 AM CT.
+        const { proposed_fire_id, approved_by: approver } = body;
+        if (!proposed_fire_id) return jsonResponse({ error: "proposed_fire_id required" }, 400);
+
+        const trackerClient = createClient(
+          Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
+          Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY")!
+        );
+
+        const { data, error } = await trackerClient
+          .from("proposed_fires")
+          .update({
+            approved_at: new Date().toISOString(),
+            approved_by: approver ?? "crm-admin",
+          })
+          .eq("id", proposed_fire_id)
+          .is("approved_at", null)   // idempotent — don't double-approve
+          .select("id, policy_nbr, trigger_type, approved_at, approved_by")
+          .single();
+
+        if (error) throw new Error(`approve-proposed-fire failed: ${error.message}`);
+        return jsonResponse({ ok: true, row: data });
+      }
+
       default:
         return jsonResponse({ error: "Unknown action" }, 400);
     }
