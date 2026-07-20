@@ -261,7 +261,11 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: 'Prod run requires { "prodConfirmed": true }.' }, 400);
   }
 
-  const dryRun = body.dryRun !== false;
+  const dryRun     = body.dryRun !== false;
+  // Mock overrides — for test runs only. Override agency name and agent NPN
+  // on every push without touching real DB values.
+  const mockAgency  = typeof body.mockAgency === "string" ? body.mockAgency : null;
+  const mockNpn     = typeof body.mockNpn    === "string" ? body.mockNpn    : null;
 
   // GHL creds — always Sunfire
   const ghlToken      = Deno.env.get("GHL_API_KEY_SUNFIRE");
@@ -418,9 +422,12 @@ Deno.serve(async (req: Request) => {
     }
 
     const wa  = (row.wa ?? "").trim().toUpperCase();
-    const npn = npnByWn.get(wa) ?? "";
+    const npn = mockNpn ?? npnByWn.get(wa) ?? "";
+    const resolvedAgencyMap = mockAgency
+      ? new Map([[wa, mockAgency]]) as typeof agencyMap
+      : agencyMap;
     const omittedFields: string[] = [];
-    const contactBody = buildContactBody(row, npn, ghlLocationId, fieldIds, omittedFields, agencyMap);
+    const contactBody = buildContactBody(row, npn, ghlLocationId, fieldIds, omittedFields, resolvedAgencyMap);
     omittedFields.forEach(f => allOmittedFields.add(f));
 
     const result = await ghlPost(`${apiBase}/contacts/`, ghlToken, contactBody);
