@@ -138,17 +138,97 @@ interface ProdRow {
 // ── Field ID map ──────────────────────────────────────────────────────────
 interface FieldIdMap { [fieldKey: string]: string; }
 
-// ── Resolve GHL field IDs at runtime ─────────────────────────────────────
-async function resolveFieldIds(locationId: string, token: string, apiBase: string): Promise<FieldIdMap> {
-  const resp = await fetch(`${apiBase}/locations/${locationId}/customFields`, {
-    headers: { Authorization: `Bearer ${token}`, Version: "2021-07-28", Accept: "application/json" },
-  });
-  if (!resp.ok) { console.error(`[reconcile] field ID resolution failed: HTTP ${resp.status}`); return {}; }
-  const data = await resp.json() as { customFields?: Array<{ id: string; fieldKey: string }> };
-  const map: FieldIdMap = {};
-  for (const f of data.customFields ?? []) { if (f.fieldKey && f.id) map[f.fieldKey] = f.id; }
-  console.log(`[reconcile] resolved ${Object.keys(map).length} field IDs`);
-  return map;
+// Hardcoded field IDs (Sunfire location IQljfeWX6wWHmzUtgSyz).
+// These were captured live and match ghl-client.ts LOB_FIELD_IDS.
+// Avoids a GHL API round-trip at startup that Cloudflare can block from
+// Supabase edge regions.
+const STATIC_FIELD_IDS: FieldIdMap = {
+  // HIP
+  "contact.hip__plan_name":            "0wkHYd9Jfr1mtttt56kf",
+  "contact.hip__plan_premium":         "u04RAp234layEohSc3KC",
+  "contact.hip__submission_date":      "HbKscJYxMujUTWdgkjU9",
+  "contact.hip__effective_date":       "qt4XBL6vrZByGLtkc0Ih",
+  "contact.hip__paid_to_date":         "czhlxaX7aFdHkNOY6KPe",
+  "contact.hip__billing_mode":         "cB6DQmu1gbSY7piS5Wb1",
+  "contact.hip__at_risk_status":       "AHDJArHPmAzZ6IMaIcxw",
+  "contact.hip__client_status":        "GnUA91j0Yj1PXH7CPtT4",
+  "contact.hip__policy_number":        "O7MjvGP1J6PRGhjdwjhj",
+  "contact.hip__carrier_name":         "ujIt1GLYAbrspZ2XgXQy",
+  "contact.hip__agent_first_name":     "V7EV9UnKsQD47LKAqnTs",
+  "contact.hip__agent_full_name":      "4SMzb0SrKt0mkkv8wN5V",
+  "contact.hip__agent_writing_number": "eMkkdSs1mq3R1YETEonE",
+  "contact.hip__terminated_reason":    "YkGHoEC4SdIe6nJyt5YZ",
+  "contact.hip__termination_date":     "xambt0f3vxofw4kt1Pdi",
+  // HHC
+  "contact.hhc__plan_name":            "8hCfNIwfoOdI12Yyvtin",
+  "contact.hhc__plan_premium":         "VJRuOntDk0OW95UU2quk",
+  "contact.hhc__submission_date":      "i1G2mIDxNgbKl5ZPQhbh",
+  "contact.hhc__effective_date":       "2bzz5hCmd7rL8xTCHnHi",
+  "contact.hhc__paid_to_date":         "7rdKra2trtEElzfP0sxL",
+  "contact.hhc__billing_mode":         "JGVCWYaY8IWjdw3umjwX",
+  "contact.hhc__at_risk_status":       "cOhlJ1vFAPk9oyrwn4Qo",
+  "contact.hhc__client_status":        "55lFi7DxNxHHRjZw786Q",
+  "contact.hhc__policy_number":        "9AX6SIbt8GfjuMIHhF30",
+  "contact.hhc__carrier_name":         "qFdK00s2UWyOaWspS6hA",
+  "contact.hhc__agent_first_name":     "OuhQi0UEcV4XQkfVzW8L",
+  "contact.hhc__agent_full_name":      "7AuXjj4UvTfo77sKSTz4",
+  "contact.hhc__agent_writing_number": "aorTF2gLo6xxOiw5LGBx",
+  "contact.hhc__terminated_reason":    "MqNTHQv5VtqvWQDjAtCE",
+  "contact.hhc__termination_date":     "3kavwfssUhNqp1go6Bjs",
+  // Life
+  "contact.life__plan_name":           "u3k0zrN8JCbCXrvUMP5u",
+  "contact.life__plan_premium":        "O7PBZkE2ph4Izt1s9zxt",
+  "contact.life__submission_date":     "VvjKFIuX8S3qSouiLq0D",
+  "contact.life__effective_date":      "kt884Dl3B470YF43rJqO",
+  "contact.life__paid_to_date":        "DfxnsvpMB8JnqQShOIQp",
+  "contact.life__billing_mode":        "Z3eM2nXfhbke32bmpsjw",
+  "contact.life__at_risk_status":      "WC0CIPwCIy7oVzCp4unf",
+  "contact.life__client_status":       "Ieu1LuasCcusfaT16hO2",
+  "contact.life__policy_number":       "DDMuEjHO4rXnjlvLXtro",
+  "contact.life__carrier_name":        "WjJkQRwj2CjsAasdvnHG",
+  "contact.life__agent_first_name":    "tulhcfFHXkOst7ZpmoK0",
+  "contact.life__agent_full_name":     "G66JPd3bh5ipSTj1tYe7",
+  "contact.life__agent_writing_number":"jPPwoWZIHCikCFGl8dav",
+  "contact.life__terminated_reason":   "s5IZFwc2uO7967bgl5zw",
+  "contact.life__termination_date":    "mfEOueJ35gkPL6MLOnQE",
+  // DV
+  "contact.dv__plan_name":             "VXYaVt3ny9mjbBnnCHUt",
+  "contact.dv__plan_premium":          "wjhlbqMimsuhuqSGTXI4",
+  "contact.dv__submission_date":       "rtjEEVIlYET61waijrKw",
+  "contact.dv__effective_date":        "Zpt4ywr1Sxa73p1X4mPQ",
+  "contact.dv__paid_to_date":          "LZVZDeHIlBEGGzsrVquU",
+  "contact.dv__billing_mode":          "xP3DVuX9yF3MkEGOg7XO",
+  "contact.dv__at_risk_status":        "rUfUumYDwb1monhWRZ88",
+  "contact.dv__client_status":         "dK1edrgLZbUQUZ5Pg5J8",
+  "contact.dv__policy_number":         "kZKzqIn6Aon0HR2aQSsj",
+  "contact.dv__carrier_name":          "7BaMsjNLVmlLDnFGEcdM",
+  "contact.dv__agent_first_name":      "IVHUUILreWiYolYr0Ski",
+  "contact.dv__agent_full_name":       "06YqTBfafv1J2h1Espko",
+  "contact.dv__agent_writing_number":  "47QZtcUURgU0J8c9YAuR",
+  "contact.dv__terminated_reason":     "z6PFV8144iU5wqLXUG4q",
+  // Cancer
+  "contact.cancer__plan_name":            "vygQpo1UzPk6HGC8rNFF",
+  "contact.cancer__plan_premium":         "GH6O3TwhWK2afu2pWb95",
+  "contact.cancer__submission_date":      "jljiD2cjqdVLwx2Elptd",
+  "contact.cancer__effective_date":       "KXB2RjuHNm0p4XXR3NCS",
+  "contact.cancer__paid_to_date":         "FU1lw06KVaQ4QpcMucSY",
+  "contact.cancer__billing_mode":         "Fph5DSftKPiwC1X63eS7",
+  "contact.cancer__at_risk_status":       "Silo8oGlarkgLUXYH2Lw",
+  "contact.cancer__client_status":        "JhgLl7vyEYUoiAqw9emI",
+  "contact.cancer__policy_number":        "WL9hnl4eleB2iHCNdJjt",
+  "contact.cancer__carrier_name":         "TV2S9vZ15ZQdaRjLwytX",
+  "contact.cancer__agent_first_name":     "Hcbu8GyHXpDyryp0cyZl",
+  "contact.cancer__agent_full_name":      "gmTwNX6OGPKNAw65otX2",
+  "contact.cancer__agent_writing_number": "qFNEnll9LiaQQCrCiFpC",
+  // Agent NPN (global, all LOBs)
+  "contact.agent_npn":                    "uEFOApsD4JKXsXH3T9E4",
+  // Agency sorting
+  "contact.ancillary_agency__sorting":    "qSHUIp3GfPWHRGbPh1CM",
+};
+
+function resolveFieldIds(): FieldIdMap {
+  console.log(`[reconcile] using ${Object.keys(STATIC_FIELD_IDS).length} hardcoded field IDs`);
+  return STATIC_FIELD_IDS;
 }
 
 // ── Build GHL contact body from Max's DB row ──────────────────────────────
@@ -278,13 +358,8 @@ Deno.serve(async (req: Request) => {
   const agencyMap = await buildAgencyMap(supabase);
 
   // Field IDs (skip on dry run)
-  let fieldIds: FieldIdMap = {};
-  if (!dryRun) {
-    fieldIds = await resolveFieldIds(ghlLocationId, ghlToken, apiBase);
-    if (Object.keys(fieldIds).length === 0) {
-      return jsonResponse({ error: "Failed to resolve Sunfire field IDs." }, 500);
-    }
-  }
+  // Field IDs are hardcoded from STATIC_FIELD_IDS — no GHL round-trip needed
+  const fieldIds: FieldIdMap = dryRun ? {} : resolveFieldIds();
 
   // ── Build policy scope from lifecycle_event_log ───────────────────────
   const testPolicyNumbers =
