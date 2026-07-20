@@ -315,6 +315,7 @@ async function ghlPost(url: string, token: string, body: unknown): Promise<{ ok:
 
 // ── Main handler ──────────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
+  try {
   // Auth
   const supabaseUrl      = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ?? "";
   const serviceRoleKey   = Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ?? "";
@@ -446,7 +447,7 @@ Deno.serve(async (req: Request) => {
           TRIM(t.zip)               AS zip,
           TRIM(t.carrier)           AS carrier
         FROM typed.unl_fym_policy_latest_load t
-        WHERE t.policy_nbr = ANY(${ chunk.map((_, j) => `$${j + 1}`).join(",") })
+        WHERE TRIM(t.policy_nbr) IN (${ chunk.map((_, j) => `$${j + 1}`).join(",") })
       `, chunk) as ProdRow[];
       prodRows = prodRows.concat(rows);
     }
@@ -538,4 +539,9 @@ Deno.serve(async (req: Request) => {
     sample_contact: sampleContact,
     failures: results.filter(r => !r.ok && !r.skipped).slice(0, 20),
   });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[reconcile] unhandled error:", msg);
+    return jsonResponse({ error: "Internal error", detail: msg }, 500);
+  }
 });
