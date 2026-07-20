@@ -236,14 +236,16 @@ async function ghlPost(url: string, token: string, body: unknown): Promise<{ ok:
 // ── Main handler ──────────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
   // Auth
-  const supabaseUrl    = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ?? "";
-  const serviceRoleKey = Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ?? "";
-  const authHeader     = req.headers.get("Authorization") ?? "";
+  const supabaseUrl      = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ?? "";
+  const serviceRoleKey   = Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ?? "";
+  const publishableKey   = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY") ?? "";
+  const authHeader       = req.headers.get("Authorization") ?? "";
   if (!serviceRoleKey || !authHeader.includes(serviceRoleKey)) {
     return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
-  const supabase = createClient(supabaseUrl, serviceRoleKey);
+  // Use publishable key for Supabase client reads (legacy anon/service keys disabled)
+  const supabase = createClient(supabaseUrl, publishableKey || serviceRoleKey);
   const apiBase  = Deno.env.get("GHL_API_BASE") ?? "https://services.leadconnectorhq.com";
 
   let body: Record<string, unknown> = {};
