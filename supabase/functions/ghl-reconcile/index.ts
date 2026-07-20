@@ -285,7 +285,7 @@ function buildContactBody(
     push(`${p}agent_writing_number`, str(row.wa));
     push(`${p}agent_full_name`,      titleCase(str(row.wa_name)));
     push(`${p}agent_first_name`,     titleCase(str((row.wa_name ?? "").split(/\s+/)[0])));
-    push(`${p}carrier_name`,         str(row.carrier));
+    push(`${p}carrier_name`,         str(row.carrier).toUpperCase());
     if (isTerminated) {
       push(`${p}termination_date`,   usDate(row.term_date));
       push(`${p}terminated_reason`,  contractReasonLabel(row.cntrct_reason));
