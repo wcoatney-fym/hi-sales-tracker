@@ -321,8 +321,137 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // ── STUB: Max's DB query will be added in next increment ─────────────
-  // TODO: open postgres connection via PROD_DB_* and SELECT from
-  //       typed.unl_fym_policy_latest_load WHERE policy_nbr = ANY($1)
-  return jsonResponse({ ok: false, error: "STUB — Max DB query not yet implemented" }, 501);
+  // ── Query Max's DB (READ-ONLY) ─────────────────────────────────────────
+  const { default: postgres } = await import("npm:postgres@3.4.5");
+  const sql = postgres({
+    host:            cleanHost(Deno.env.get("PROD_DB_HOST")!),
+    port:            Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
+    database:        Deno.env.get("PROD_DB_NAME")!,
+    username:        Deno.env.get("PROD_DB_USER")!,
+    password:        Deno.env.get("PROD_DB_PASSWORD")!,
+    ssl:             { ca: AKAMAI_CA_CERT },
+    connect_timeout: 30,
+    max:             1,
+    idle_timeout:    20,
+  });
+
+  let prodRows: ProdRow[] = [];
+  try {
+    // Chunk into batches of 500 to stay within postgres parameter limits
+    const CHUNK = 500;
+    for (let i = 0; i < policyNumbers.length; i += CHUNK) {
+      const chunk = policyNumbers.slice(i, i + CHUNK);
+      const rows = await sql.unsafe(`
+        SELECT
+          TRIM(t.policy_nbr)        AS policy_nbr,
+          TRIM(t.first_name)        AS first_name,
+          TRIM(t.last_name)         AS last_name,
+          TRIM(t.phone_nbr::text)    AS phone_nbr,
+          TRIM(t.plan_code)         AS plan_code,
+          t.annual_premium,
+          t.issue_date,
+          t.app_recvd_date,
+          t.paid_to_date,
+          t.term_date,
+          t.billing_mode,
+          TRIM(t.billing_form)      AS billing_form,
+          TRIM(t.cntrct_code)       AS cntrct_code,
+          TRIM(t.cntrct_reason)     AS cntrct_reason,
+          t.at_risk_policy,
+          TRIM(t.wa)                AS wa,
+          TRIM(t.wa_name)           AS wa_name,
+          TRIM(t.ga_name)           AS ga_name,
+          TRIM(t.issue_state)       AS issue_state,
+          TRIM(t.zip)               AS zip,
+          TRIM(t.carrier)           AS carrier
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE t.policy_nbr = ANY(${ chunk.map((_, j) => `$${j + 1}`).join(",") })
+      `, chunk) as ProdRow[];
+      prodRows = prodRows.concat(rows);
+    }
+    console.log(`[reconcile] Max DB returned ${prodRows.length} rows for ${policyNumbers.length} policy numbers`);
+  } finally {
+    try { await sql.end(); } catch { /* ignore */ }
+  }
+
+  // ── Build NPN map from Supabase agents table ──────────────────────────
+  const allWns = [...new Set(prodRows.map(r => (r.wa ?? "").trim().toUpperCase()).filter(Boolean))];
+  const npnByWn = new Map<string, string>();
+  if (allWns.length > 0) {
+    const WN = 500; let wnOff = 0;
+    while (true) {
+      const { data: agentRows } = await supabase
+        .from("agents")
+        .select("unl_writing_number, npn")
+        .in("unl_writing_number", allWns.slice(wnOff, wnOff + WN));
+      for (const a of agentRows ?? []) {
+        const wn = ((a.unl_writing_number as string) ?? "").trim().toUpperCase();
+        if (wn && a.npn) npnByWn.set(wn, a.npn as string);
+      }
+      if (!agentRows || agentRows.length < WN) break;
+      wnOff += WN;
+    }
+  }
+
+  // Index rows by policy_nbr for O(1) lookup
+  const rowMap = new Map<string, ProdRow>(prodRows.map(r => [r.policy_nbr, r]));
+
+  // ── Push loop (80 req / 10s rate limit) ──────────────────────────────
+  interface ReconcileResult {
+    policy_number: string; ok: boolean; http_status: number | null;
+    error: string | null; skipped: boolean; skip_reason: string | null;
+  }
+  const results: ReconcileResult[] = [];
+  const allOmittedFields = new Set<string>();
+  let batchCount = 0;
+  let sampleContact: Record<string, unknown> | null = null;
+  let samplePolicyNumber: string | null = null;
+
+  for (const policyNumber of policyNumbers) {
+    const row = rowMap.get(policyNumber);
+    if (!row) {
+      results.push({ policy_number: policyNumber, ok: false, http_status: null,
+        error: "Not found in Max's DB", skipped: true, skip_reason: "not_found" });
+      continue;
+    }
+
+    const wa  = (row.wa ?? "").trim().toUpperCase();
+    const npn = npnByWn.get(wa) ?? "";
+    const omittedFields: string[] = [];
+    const contactBody = buildContactBody(row, npn, ghlLocationId, fieldIds, omittedFields, agencyMap);
+    omittedFields.forEach(f => allOmittedFields.add(f));
+
+    const result = await ghlPost(`${apiBase}/contacts/`, ghlToken, contactBody);
+    results.push({
+      policy_number: policyNumber, ok: result.ok, http_status: result.status,
+      error: result.ok ? null : `HTTP ${result.status}: ${JSON.stringify(result.data).slice(0, 200)}`,
+      skipped: false, skip_reason: null,
+    });
+
+    if (result.ok && sampleContact === null) {
+      sampleContact = contactBody;
+      samplePolicyNumber = policyNumber;
+    }
+
+    batchCount++;
+    if (batchCount % 80 === 0) {
+      console.log(`[reconcile] batch ${batchCount} — pausing 10s for rate limit`);
+      await new Promise(r => setTimeout(r, 10_000));
+    }
+  }
+
+  const ok_count   = results.filter(r => r.ok && !r.skipped).length;
+  const fail_count = results.filter(r => !r.ok && !r.skipped).length;
+  const skip_count = results.filter(r => r.skipped).length;
+
+  return jsonResponse({
+    ok: fail_count === 0,
+    target, dry_run: false, location_id: ghlLocationId,
+    total: policyNumbers.length, processed: results.length,
+    ok_count, fail_count, skip_count,
+    omitted_field_keys: [...allOmittedFields],
+    sample_policy_number: samplePolicyNumber,
+    sample_contact: sampleContact,
+    failures: results.filter(r => !r.ok && !r.skipped).slice(0, 20),
+  });
 });
