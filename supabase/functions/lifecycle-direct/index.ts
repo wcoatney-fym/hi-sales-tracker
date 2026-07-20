@@ -949,6 +949,11 @@ Deno.serve(async (req: Request) => {
         firedSet.add(firedKey); // prevent duplicate within this run
       }
       fired++;
+      // Rate limiter: 80 req / 10s — mirrors ghl-reconcile pattern
+      if (fired % 80 === 0) {
+        console.log(`[lifecycle-direct] rate-limit pause after ${fired} pushes (80/10s ceiling)`);
+        await new Promise(r => setTimeout(r, 10_000));
+      }
     } else {
       console.warn(`[lifecycle-direct] no GHL config; skipped ${triggerLabel} ${pn}`);
       auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: null, upload_id: null });
