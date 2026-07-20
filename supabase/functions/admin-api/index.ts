@@ -43,6 +43,27 @@ function resolveSecret(name: string): string {
   return Deno.env.get(name) || "";
 }
 
+function cleanHost(raw: string): string {
+  return raw.replace(/^https?:\/\//, "").replace(/\/$/, "").split(":")[0];
+}
+
+// Open a short-lived postgres connection to Max's DB (READ-ONLY).
+// Always call sql.end() in a finally block.
+async function openMaxDb() {
+  const { default: postgres } = await import("npm:postgres@3.4.5");
+  return postgres({
+    host:            cleanHost(Deno.env.get("PROD_DB_HOST")!),
+    port:            Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
+    database:        Deno.env.get("PROD_DB_NAME")!,
+    username:        Deno.env.get("PROD_DB_USER")!,
+    password:        Deno.env.get("PROD_DB_PASSWORD")!,
+    ssl:             { ca: AKAMAI_CA_CERT },
+    connect_timeout: 30,
+    max:             1,
+    idle_timeout:    20,
+  });
+}
+
 const LOWERCASE_PARTICLES = new Set([
   "de", "del", "della", "di", "da", "das", "do", "dos",
   "van", "von", "der", "den", "het",
@@ -3429,32 +3450,58 @@ Deno.serve(async (req: Request) => {
 
 
       case "billing-mode-breakdown": {
+        // Queries Max's DB directly (2026-07-20).
         const { agencyFilter, agencies, startDate, endDate, agentNumber } = body;
 
-        let query = supabase
-          .from("form_submissions")
-          .select("billing_mode, contract_code")
-          .not("billing_mode", "is", null)
-          .not("contract_code", "is", null);
-
+        // Resolve writing numbers for scope filter
+        let scopeWns: string[] = [];
         if (agentNumber) {
-          query = query.eq("agent_number", agentNumber);
+          scopeWns = [(agentNumber as string).trim().toUpperCase()];
         } else if (agencies && Array.isArray(agencies) && agencies.length > 0) {
-          query = query.in("agency", agencies);
+          // agencies is an array of agency names — look up writing numbers
+          const { data: awnBm } = await supabase
+            .from("agency_writing_numbers")
+            .select("writing_number, agencies(name)")
+          for (const r of awnBm || []) {
+            const name = (r.agencies as { name: string } | null)?.name ?? "";
+            if ((agencies as string[]).includes(name)) {
+              scopeWns.push(((r.writing_number as string) ?? "").trim().toUpperCase());
+            }
+          }
         } else if (agencyFilter) {
-          query = query.eq("agency", agencyFilter);
+          const { data: awnBm2 } = await supabase
+            .from("agency_writing_numbers")
+            .select("writing_number, agencies(name)")
+          for (const r of awnBm2 || []) {
+            const name = (r.agencies as { name: string } | null)?.name ?? "";
+            if (name === agencyFilter) scopeWns.push(((r.writing_number as string) ?? "").trim().toUpperCase());
+          }
         }
 
-        if (startDate) query = query.gte("app_submit_date", startDate);
-        if (endDate) query = query.lte("app_submit_date", endDate);
-
-        const { data: rows, error: bmError } = await query;
-        if (bmError) throw bmError;
+        const maxDbBm = await openMaxDb();
+        let bmRows: Array<{ billing_mode: number | null; cntrct_code: string | null }> = [];
+        try {
+          let whereClause = "WHERE t.billing_mode IS NOT NULL AND t.cntrct_code IS NOT NULL";
+          const params: unknown[] = [];
+          if (scopeWns.length > 0) {
+            whereClause += ` AND TRIM(UPPER(t.wa)) = ANY(${ scopeWns.map((_: unknown, i: number) => `$${i + 1}`).join(",") })`;
+            params.push(...scopeWns);
+          }
+          if (startDate) { whereClause += ` AND t.app_recvd_date >= $${params.length + 1}::date`; params.push(startDate); }
+          if (endDate)   { whereClause += ` AND t.app_recvd_date <= $${params.length + 1}::date`; params.push(endDate); }
+          bmRows = await maxDbBm.unsafe(
+            `SELECT t.billing_mode, TRIM(t.cntrct_code) AS cntrct_code FROM typed.unl_fym_policy_latest_load t ${whereClause}`,
+            params
+          ) as Array<{ billing_mode: number | null; cntrct_code: string | null }>;
+        } finally {
+          try { await maxDbBm.end(); } catch { /* ignore */ }
+        }
 
         const modeMap: Record<string, Record<string, number>> = {};
-        for (const row of rows || []) {
-          const mode = row.billing_mode;
-          const code = row.contract_code;
+        for (const row of bmRows) {
+          const mode = String(row.billing_mode ?? "");
+          const code = (row.cntrct_code ?? "").trim();
+          if (!mode || !code) continue;
           if (!modeMap[mode]) modeMap[mode] = {};
           modeMap[mode][code] = (modeMap[mode][code] || 0) + 1;
         }
@@ -5344,78 +5391,140 @@ Deno.serve(async (req: Request) => {
       // ----- Manager-role data endpoints (role = 'manager') -----
       case "mgr-at-risk-worklist": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
-        // Data-driven at-risk lane. A policy is at-risk when it is still active
-        // but its premium is past due — i.e. a draft was missed. We compute this
-        // straight from policy state instead of waiting on a manual flag row, so
-        // the board reflects reality the moment the daily UNL file lands.
-        //
+        // Data-driven at-risk lane — queries Max's DB directly (2026-07-20).
         // Definition (locked w/ Charlie 2026-06-30):
-        //   status = 'active' AND billing_form = 'DIR' AND paid_to_date < today
-        // Only direct-bill (DIR) policies count — a past-due DIR is a genuinely
-        // missed auto-draft. This mirrors the dashboard's at-risk KPI so the
-        // manager pipeline and the internal dashboard report the same number.
+        //   cntrct_code = 'A' AND billing_form = 'DIR' AND paid_to_date < today
+        // Only direct-bill (DIR) policies count — a past-due DIR is a missed auto-draft.
         // Flags/dispositions are an ACTION layer on top, never the entry gate.
-        const todayIso = new Date().toISOString().slice(0, 10);
-        const { data: agencyPolicies, error: apErr } = await supabase
-          .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, contract_reason")
-          .eq("agency_id", session.agency_id)
-          .eq("status", "active")
-          .eq("billing_form", "DIR")
-          .lt("paid_to_date", todayIso);
-        if (apErr) throw apErr;
-        const policyIds = (agencyPolicies || []).map((p: { id: string }) => p.id);
-        if (policyIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
 
-        // Disposition + agent-handoff state overlays the computed list so a
-        // manager's (and agent's) progress on a policy persists across refreshes.
+        // Resolve writing numbers for this agency to scope the Max DB query
+        const { data: awnRows } = await supabase
+          .from("agency_writing_numbers")
+          .select("writing_number")
+          .eq("agency_id", session.agency_id);
+        const agencyWns = (awnRows || []).map((r: { writing_number: string }) =>
+          (r.writing_number || "").trim().toUpperCase()
+        ).filter(Boolean);
+        if (agencyWns.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const maxDb = await openMaxDb();
+        let agencyPolicies: Record<string, unknown>[] = [];
+        try {
+          agencyPolicies = await maxDb.unsafe(`
+            SELECT
+              TRIM(t.policy_nbr)        AS policy_number,
+              TRIM(t.first_name)        AS client_first_name,
+              TRIM(t.last_name)         AS client_last_name,
+              TRIM(t.wa_name)           AS agent_full_name,
+              TRIM(t.wa)                AS agent_number,
+              TRIM(t.plan_code)         AS product_type,
+              TRIM(t.carrier)           AS carrier,
+              t.annual_premium          AS plan_premium,
+              t.paid_to_date,
+              t.issue_date              AS policy_effective_date,
+              TRIM(t.phone_nbr::text)    AS phone,
+              TRIM(t.cntrct_code)       AS contract_code,
+              TRIM(t.cntrct_reason)     AS contract_reason,
+              TRIM(t.billing_form)      AS billing_form
+            FROM typed.unl_fym_policy_latest_load t
+            WHERE TRIM(UPPER(t.wa)) = ANY(${ agencyWns.map((_: string, i: number) => `$${i + 1}`).join(",") })
+              AND t.cntrct_code = 'A'
+              AND t.billing_form = 'DIR'
+              AND t.paid_to_date < ${ agencyWns.length + 1 }::date
+          `, [...agencyWns, todayIso]) as Record<string, unknown>[];
+        } finally {
+          try { await maxDb.end(); } catch { /* ignore */ }
+        }
+
+        if (agencyPolicies.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        // Overlay dispositions keyed on policy_nbr (added 2026-07-20)
+        const policyNbrs = agencyPolicies.map((p) => p.policy_number as string).filter(Boolean);
         const { data: disps } = await supabase
           .from("policy_dispositions")
-          .select("policy_id, disposition, follow_up_at, set_at, agent_id, agent_outreach_at, agent_contacted_at, agent_saved_at, manager_approved_at")
-          .in("policy_id", policyIds);
+          .select("policy_nbr, disposition, follow_up_at, set_at, agent_id, agent_outreach_at, agent_contacted_at, agent_saved_at, manager_approved_at")
+          .in("policy_nbr", policyNbrs);
         const dispByPolicy = new Map(
-          (disps || []).map((d: { policy_id: string }) => [d.policy_id, d])
+          (disps || []).map((d: { policy_nbr: string }) => [d.policy_nbr, d])
         );
-        const worklist = (agencyPolicies || []).map((p: Record<string, unknown>) => {
-          const disp = dispByPolicy.get(p.id as string) || null;
-          const computed = computeAtRiskStage((p.paid_to_date as string | null) ?? null, disp as DispRow);
-          return { ...shapeWorklistRow(p, disp), ...computed };
+        const worklist = agencyPolicies.map((p: Record<string, unknown>) => {
+          const disp = dispByPolicy.get(p.policy_number as string) || null;
+          const ptd = p.paid_to_date instanceof Date
+            ? (p.paid_to_date as Date).toISOString().slice(0, 10)
+            : String(p.paid_to_date ?? "").slice(0, 10);
+          const computed = computeAtRiskStage(ptd || null, disp as DispRow);
+          return { ...shapeWorklistRow({ ...p, paid_to_date: ptd }, disp), ...computed };
         });
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
       case "mgr-terminated-worklist": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden" }, 403);
-        // Terminated policies for this manager's agency — the win-back lane.
-        // Membership comes from the imported data source (status='terminated').
-        // We auto-drop policies terminated more than TERMINATED_WINDOW_DAYS ago
-        // so the lane stays a fresh, workable list, using the carrier's real
-        // Term Date from the UNL source (form_submissions.terminated_date) —
-        // not a derived date.
-        const TERMINATED_WINDOW_DAYS = 45;
-        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000)
-          .toISOString()
-          .slice(0, 10);
-        const { data: termPolicies, error: tpErr } = await supabase
-          .from("form_submissions")
-          .select("id, policy_number, client_first_name, client_last_name, agent_first_name, agent_last_name, agent_number, product_type, carrier, plan_premium, status, paid_to_date, policy_effective_date, phone, email, contract_code, contract_reason, terminated_date")
-          .eq("agency_id", session.agency_id)
-          .eq("status", "terminated")
-          .gte("terminated_date", termCutoff);
-        if (tpErr) throw tpErr;
-        const termIds = (termPolicies || []).map((p: { id: string }) => p.id);
-        if (termIds.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+        // Terminated policies — win-back lane. Queries Max's DB directly (2026-07-20).
+        // Window: terminated within last 45 days (term_date >= cutoff).
 
+        const { data: awnRowsTerm } = await supabase
+          .from("agency_writing_numbers")
+          .select("writing_number")
+          .eq("agency_id", session.agency_id);
+        const agencyWnsTerm = (awnRowsTerm || []).map((r: { writing_number: string }) =>
+          (r.writing_number || "").trim().toUpperCase()
+        ).filter(Boolean);
+        if (agencyWnsTerm.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const TERMINATED_WINDOW_DAYS = 45;
+        const termCutoff = new Date(Date.now() - TERMINATED_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
+        const maxDbTerm = await openMaxDb();
+        let termPolicies: Record<string, unknown>[] = [];
+        try {
+          termPolicies = await maxDbTerm.unsafe(`
+            SELECT
+              TRIM(t.policy_nbr)        AS policy_number,
+              TRIM(t.first_name)        AS client_first_name,
+              TRIM(t.last_name)         AS client_last_name,
+              TRIM(t.wa_name)           AS agent_full_name,
+              TRIM(t.wa)                AS agent_number,
+              TRIM(t.plan_code)         AS product_type,
+              TRIM(t.carrier)           AS carrier,
+              t.annual_premium          AS plan_premium,
+              t.paid_to_date,
+              t.issue_date              AS policy_effective_date,
+              t.term_date               AS terminated_date,
+              TRIM(t.phone_nbr::text)    AS phone,
+              TRIM(t.cntrct_code)       AS contract_code,
+              TRIM(t.cntrct_reason)     AS contract_reason
+            FROM typed.unl_fym_policy_latest_load t
+            WHERE TRIM(UPPER(t.wa)) = ANY(${ agencyWnsTerm.map((_: string, i: number) => `$${i + 1}`).join(",") })
+              AND t.cntrct_code = 'T'
+              AND t.term_date >= ${ agencyWnsTerm.length + 1 }::date
+          `, [...agencyWnsTerm, termCutoff]) as Record<string, unknown>[];
+        } finally {
+          try { await maxDbTerm.end(); } catch { /* ignore */ }
+        }
+
+        if (termPolicies.length === 0) return jsonResponse({ worklist: [], agency_id: session.agency_id });
+
+        const termNbrs = termPolicies.map((p) => p.policy_number as string).filter(Boolean);
         const { data: termDisps } = await supabase
           .from("policy_dispositions")
-          .select("policy_id, disposition, follow_up_at, set_at")
-          .in("policy_id", termIds);
+          .select("policy_nbr, disposition, follow_up_at, set_at")
+          .in("policy_nbr", termNbrs);
         const termDispByPolicy = new Map(
-          (termDisps || []).map((d: { policy_id: string }) => [d.policy_id, d])
+          (termDisps || []).map((d: { policy_nbr: string }) => [d.policy_nbr, d])
         );
-        const worklist = (termPolicies || []).map((p: Record<string, unknown>) =>
-          shapeWorklistRow(p, termDispByPolicy.get(p.id as string) || null)
-        );
+        const worklist = termPolicies.map((p: Record<string, unknown>) => {
+          const ptd = p.paid_to_date instanceof Date
+            ? (p.paid_to_date as Date).toISOString().slice(0, 10)
+            : String(p.paid_to_date ?? "").slice(0, 10);
+          const tdate = p.terminated_date instanceof Date
+            ? (p.terminated_date as Date).toISOString().slice(0, 10)
+            : String(p.terminated_date ?? "").slice(0, 10);
+          return shapeWorklistRow(
+            { ...p, paid_to_date: ptd, terminated_date: tdate },
+            termDispByPolicy.get(p.policy_number as string) || null
+          );
+        });
         return jsonResponse({ worklist, agency_id: session.agency_id });
       }
 
@@ -5663,17 +5772,56 @@ Deno.serve(async (req: Request) => {
       // agency-wide rollup + trend for the header line.
       case "mgr-agent-persistency": {
         if (session.role !== "manager") return jsonResponse({ error: "Forbidden — manager only" }, 403);
-        const { data: rows, error: pErr } = await supabase
-          .from("form_submissions")
-          .select("agent_number, agent_first_name, agent_last_name, policy_effective_date, paid_to_date, billing_mode, product_type")
-          .eq("agency_id", session.agency_id)
-          .in("product_type", ["HI", "HHC"]);
-        if (pErr) throw pErr;
+        // Queries Max's DB directly (2026-07-20). LOB filter via plan_code prefix.
+        const { data: awnRowsPers } = await supabase
+          .from("agency_writing_numbers")
+          .select("writing_number")
+          .eq("agency_id", session.agency_id);
+        const agencyWnsPers = (awnRowsPers || []).map((r: { writing_number: string }) =>
+          (r.writing_number || "").trim().toUpperCase()
+        ).filter(Boolean);
+
         type FsRow = {
           agent_number?: string | null; agent_first_name?: string | null; agent_last_name?: string | null;
           policy_effective_date?: string | null; paid_to_date?: string | null; billing_mode?: string | null;
         };
-        const all = (rows || []) as FsRow[];
+        let all: FsRow[] = [];
+        if (agencyWnsPers.length > 0) {
+          const maxDbPers = await openMaxDb();
+          try {
+            const persRows = await maxDbPers.unsafe(`
+              SELECT
+                TRIM(t.wa)                            AS agent_number,
+                TRIM(SPLIT_PART(t.wa_name, ' ', 1))  AS agent_first_name,
+                TRIM(SUBSTRING(t.wa_name FROM POSITION(' ' IN t.wa_name) + 1)) AS agent_last_name,
+                t.issue_date   AS policy_effective_date,
+                t.paid_to_date,
+                t.billing_mode::text AS billing_mode,
+                CASE
+                  WHEN t.plan_code ILIKE '%HHC%' THEN 'HHC'
+                  ELSE 'HI'
+                END AS product_type
+              FROM typed.unl_fym_policy_latest_load t
+              WHERE TRIM(UPPER(t.wa)) = ANY(${ agencyWnsPers.map((_: string, i: number) => `$${i + 1}`).join(",") })
+                AND (t.plan_code ILIKE '%HI%' OR t.plan_code ILIKE '%HIP%'
+                     OR t.plan_code ILIKE '%GHI%' OR t.plan_code ILIKE '%HHC%')
+            `, agencyWnsPers) as Record<string, unknown>[];
+            all = persRows.map((r) => ({
+              agent_number:          String(r.agent_number ?? ""),
+              agent_first_name:      String(r.agent_first_name ?? ""),
+              agent_last_name:       String(r.agent_last_name ?? ""),
+              policy_effective_date: r.policy_effective_date instanceof Date
+                ? (r.policy_effective_date as Date).toISOString().slice(0, 10)
+                : String(r.policy_effective_date ?? "").slice(0, 10),
+              paid_to_date: r.paid_to_date instanceof Date
+                ? (r.paid_to_date as Date).toISOString().slice(0, 10)
+                : String(r.paid_to_date ?? "").slice(0, 10),
+              billing_mode:  String(r.billing_mode ?? ""),
+            }));
+          } finally {
+            try { await maxDbPers.end(); } catch { /* ignore */ }
+          }
+        }
 
         // 6-month effective-cohort buckets (only cohorts old enough to be eligible).
         const now = new Date();
