@@ -2,6 +2,28 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildAgencyMap, resolveAgencyName } from "../_shared/agency-map.ts";
 
+// Plan code → human-readable name. Mirrors lifecycle-direct PLAN_CODE_MAP.
+const PLAN_CODE_MAP: Record<string, string> = {
+  UHIP2: "Hospital Indemnity Shield 2.0",
+  UNHIP: "Original Hospital Indemnity Shield",
+  UGHIP: "Guaranteed Issue Hospital Indemnity Shield",
+  UFGHI: "Guaranteed Issue Hospital Indemnity Shield - FL with Assoc.",
+  UFHIP: "Hospital Indemnity Shield 2.0 - FL with Assoc.",
+  UTHHC: "Home Health Care Shield with TCARE benefit",
+  UNHHC: "Original Home Health Care Shield",
+  UAHHC: "Original Home Health Care Shield",
+  UIHHC: "Caregiver Shield",
+  UAGHI: "Guaranteed Issue Hospital Indemnity Shield",
+  UNCAN: "Cancer Shield 2.0",
+  UDN21: "Dental Shield 2.0",
+  UDN24: "Dental Shield 2.0 with waiving of waiting periods option",
+};
+
+function resolvePlanName(code: string | null): string {
+  const k = (code ?? "").trim().toUpperCase();
+  return PLAN_CODE_MAP[k] ?? k;
+}
+
 /**
  * ghl-reconcile — one-shot backfill for policies that missed GHL contact
  * creation during the no-config era (2026-07-03–10).
@@ -214,7 +236,7 @@ function buildContactBody(
     push(`${p}at_risk_status`,       atRiskStatus);
     push(`${p}policy_number`,        str(policy.policy_number));
     push(`${p}carrier_name`,         str(policy.carrier));
-    push(`${p}plan_name`,            str(policy.plan_name));
+    push(`${p}plan_name`,            str(resolvePlanName(policy.plan_name)));
     push(`${p}plan_premium`,         str(policy.plan_premium));
     push(`${p}billing_mode`,         str(policy.billing_mode));
     push(`${p}submission_date`,      usDate(policy.app_submit_date));
@@ -330,12 +352,12 @@ Deno.serve(async (req: Request) => {
   const agencyMap = await buildAgencyMap(supabase);
 
   // ── Resolve GHL creds — always Sunfire ───────────────────────────────────
-  const ghlToken      = Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE");
+  const ghlToken      = Deno.env.get("GHL_API_KEY_SUNFIRE");
   const ghlLocationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE");
 
   if (!ghlToken || !ghlLocationId) {
     return jsonResponse({
-      error: "GHL_API_KEY_HIP_PORTAL_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set.",
+      error: "GHL_API_KEY_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set.",
     }, 500);
   }
 
