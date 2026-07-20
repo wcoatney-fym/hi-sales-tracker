@@ -18,7 +18,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
  * and is immediately deleted after assertions — zero workflow pollution.
  *
  * Required Supabase function secrets:
- *   GHL_API_KEY_HIP_PORTAL_SUNFIRE  — Private Integration token for Sunfire
+ *   GHL_API_KEY_SUNFIRE  — Private Integration token for Sunfire
  *   GHL_LOCATION_ID_SUNFIRE         — Sunfire locationId (IQljfeWX6wWHmzUtgSyz)
  *   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY — standard edge fn env
  *   GHL_API_BASE                    — defaults to https://services.leadconnectorhq.com
@@ -91,7 +91,7 @@ interface GhlConfig {
 // ---------------------------------------------------------------------------
 function loadConfig(): GhlConfig | null {
   try {
-    const token      = Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE");
+    const token      = Deno.env.get("GHL_API_KEY_SUNFIRE");
     const locationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE");
     if (!token || !locationId) return null;
     return {
@@ -413,7 +413,7 @@ Deno.serve(async (req: Request) => {
   const cfg = loadConfig();
   if (!cfg) {
     const errMsg =
-      "GHL_API_KEY_HIP_PORTAL_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set. " +
+      "GHL_API_KEY_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set. " +
       "Canary cannot run. Add both as Supabase function secrets.";
     console.error(`[canary] ${errMsg}`);
 

@@ -330,12 +330,12 @@ Deno.serve(async (req: Request) => {
   const agencyMap = await buildAgencyMap(supabase);
 
   // ── Resolve GHL creds — always Sunfire ───────────────────────────────────
-  const ghlToken      = Deno.env.get("GHL_API_KEY_HIP_PORTAL_SUNFIRE");
+  const ghlToken      = Deno.env.get("GHL_API_KEY_SUNFIRE");
   const ghlLocationId = Deno.env.get("GHL_LOCATION_ID_SUNFIRE");
 
   if (!ghlToken || !ghlLocationId) {
     return jsonResponse({
-      error: "GHL_API_KEY_HIP_PORTAL_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set.",
+      error: "GHL_API_KEY_SUNFIRE or GHL_LOCATION_ID_SUNFIRE not set.",
     }, 500);
   }
 

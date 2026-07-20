@@ -230,7 +230,7 @@ Deno.serve(async (req: Request) => {
   const serviceKey   = Deno.env.get("SB_SECRET_KEY") ||
                        Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
-  console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_HIP_PORTAL")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
+  console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_SUNFIRE")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
   const supabase     = createClient(supabaseUrl, serviceKey);
 
   // Verify cron secret (skip on OPTIONS).
