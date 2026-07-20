@@ -2,14 +2,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildAgencyMap, resolveAgencyName, titleCase } from "../_shared/agency-map.ts";
 import {
-  computeLifecycleEvents,
   contractReasonLabel,
-  deriveAtRisk,
   derivePlanType,
-  evaluateAtRisk,
-  type LifecycleEvent,
-  type PolicyState,
-  type PriorState,
 } from "../sql-import-cron/lifecycle-evaluator.ts";
 import {
   buildGhlContactBody,
@@ -18,17 +12,21 @@ import {
   type LifecyclePayload,
 } from "../sql-import-cron/ghl-client.ts";
 
-// lifecycle-direct — query Max's DB directly, diff against lifecycle_policy_state,
-// fire GHL create-contact for each change. Replaces the import-coupled evaluator
-// now that form_submissions is no longer written by a daily import.
+// lifecycle-direct — queries Max's DB using the trigger-query pattern from
+// docs/migration-mockup/trigger-queries.sql. No form_submissions reads.
+// No lifecycle_policy_state reads or writes.
 //
-// Triggers (locked 2026-07-09, Charlie):
-//   submission  — policy_nbr seen for the first time (cntrct_code = P)
-//   approved    — cntrct_code transitions P -> A
-//   terminated  — cntrct_code transitions A -> T (carries mapped reason)
-//   at risk     — at_risk_policy flips false -> true (flip-true only; re-arms on recovery)
+// Idempotency: fired_triggers table (Supabase tracker DB). Every trigger query
+// gates on NOT EXISTS (policy_nbr, trigger_type, changed_on) in fired_triggers.
+// After a successful GHL push, a fired_triggers row is inserted (ON CONFLICT DO NOTHING).
 //
-// Agency gate: agencies.ghl_api_enabled = true (renamed from zaps_enabled).
+// Triggers:
+//   submission  — cntrct_code = P, prev IS NULL (new) OR prev IN (T,A) (rewrite)
+//   approved    — prev = P, cntrct_code = A
+//   terminated  — prev = A, cntrct_code = T
+//   at_risk     — at_risk_policy = true, previous_at_risk_status = false/NULL
+//
+// Agency gate: agencies.ghl_api_enabled = true.
 // Best-effort: a GHL failure or DB error never crashes the cron.
 
 // ── Akamai CA cert (pinned) ───────────────────────────────────────────────────
@@ -555,61 +553,18 @@ Deno.serve(async (req: Request) => {
   }
 
   // Phone comes directly from phone_nbr on Max's DB (bigint cast to text in SELECT).
+  // ── 2b. form_submissions agent-number fallback REMOVED ───────────────────
+  // wa from Max's DB is the writing number directly. No form_submissions reads.
+  // ── 3. lifecycle_policy_state REMOVED ────────────────────────────────────
+  // Idempotency is now handled by fired_triggers (see migration 20260720150000).
+  // Trigger queries gate on NOT EXISTS (policy_nbr, trigger_type, changed_on).
 
-  // ── 2b. Agent writing-number lookup (form_submissions) for agencies whose
-  // hierarchy carries no person node (e.g. DH Insurance Group). Used as NPN fallback.
-  // Scoped to GHL-enabled agency names to stay under PostgREST's 1000-row page cap.
-  const enabledAgencyNames = agencyRows
-    ?.filter((a) => a.ghl_api_enabled)
-    .map((a) => (a.name as string).toLowerCase()) ?? [];
-  const agentNumberByPolicy = new Map<string, string>();
-  if (enabledAgencyNames.length > 0) {
-    // Fetch agent_number only for GHL-enabled agencies, using exact agency name matches
-    // from the agencies table. This keeps us under PostgREST's 1000-row page limit.
-    const enabledAgencyNamesOriginal = agencyRows
-      ?.filter((a) => a.ghl_api_enabled)
-      .map((a) => a.name as string) ?? [];
-    for (const agencyName of enabledAgencyNamesOriginal) {
-      const { data: agentNumRows } = await supabase
-        .from("form_submissions")
-        .select("policy_number, agent_number")
-        .ilike("agency", agencyName)
-        .not("agent_number", "is", null)
-        .neq("agent_number", "");
-      for (const r of agentNumRows ?? []) {
-        if (r.policy_number && r.agent_number)
-          agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
-      }
-    }
-  }
-
-  // ── 3. Load prior state from lifecycle_policy_state ──────────────────────
-  // MUST paginate: 1,599 rows; JS client caps at 1,000. Without pagination,
-  // policies in rows 1,001-1,599 have no prior-state entry → re-fire on every tick.
-  const priorState = new Map<string, PriorState & { agency_id: string | null; at_risk_policy: boolean }>();
-  {
-    const PS = 1000;
-    let psOff = 0;
-    while (true) {
-      const { data: priorRows, error: priorErr } = await supabase
-        .from("lifecycle_policy_state")
-        .select("policy_number, cntrct_code, at_risk_policy, paid_to_date, agency_id")
-        .range(psOff, psOff + PS - 1);
-      if (priorErr) { console.error(`[lifecycle-direct] lifecycle_policy_state read failed: ${priorErr.message}`); break; }
-      for (const r of priorRows ?? []) {
-        priorState.set(r.policy_number as string, {
-          contract_code:    r.cntrct_code as string | null,
-          at_risk_fired_at: null,
-          agency_id:        r.agency_id as string | null,
-          at_risk_policy:   (r.at_risk_policy as boolean) ?? false,
-        });
-      }
-      if (!priorRows || priorRows.length < PS) break;
-      psOff += PS;
-    }
-  }
-
-  // ── 4. Query Max's DB ────────────────────────────────────────────────────
+  // ── 4. Query Max's DB — trigger queries (mockup spec) ───────────────────
+  // Runs all four trigger queries in one pass using UNION ALL.
+  // Each row already represents a trigger that has NOT yet fired (NOT EXISTS
+  // gates on fired_triggers in the query itself).
+  // fired_triggers is in Supabase; the NOT EXISTS gate is applied in app code
+  // (fetch fired set, exclude in JS) since Max's DB can't JOIN Supabase directly.
   const { default: postgres } = await import("npm:postgres@3.4.5");
   const sql = postgres({
     host: cleanHost(Deno.env.get("PROD_DB_HOST")!),
@@ -623,78 +578,144 @@ Deno.serve(async (req: Request) => {
     idle_timeout: 20,
   });
 
-  let prodRows: ProdRow[] = [];
+  // ── 4a. Load already-fired set from fired_triggers (Supabase) ────────────
+  // Build a Set of "policy_nbr|trigger_type|changed_on" strings for O(1) exclusion.
+  const firedSet = new Set<string>();
+  {
+    const FT = 1000;
+    let ftOff = 0;
+    while (true) {
+      const { data: ftRows, error: ftErr } = await supabase
+        .from("fired_triggers")
+        .select("policy_nbr, trigger_type, changed_on")
+        .range(ftOff, ftOff + FT - 1);
+      if (ftErr) { console.error(`[lifecycle-direct] fired_triggers read failed: ${ftErr.message}`); break; }
+      for (const r of ftRows ?? []) {
+        firedSet.add(`${r.policy_nbr}|${r.trigger_type}|${r.changed_on}`);
+      }
+      if (!ftRows || ftRows.length < FT) break;
+      ftOff += FT;
+    }
+  }
+  console.log(`[lifecycle-direct] fired_triggers loaded: ${firedSet.size}`);
+
+  // ── 4b. Trigger row shape ─────────────────────────────────────────────────
+  interface TriggerRow extends ProdRow {
+    trigger_type: "approved" | "terminated" | "submission" | "at_risk";
+    changed_on:   Date | string;  // date column from Max's DB
+  }
+
+  // ── 4c. Run trigger queries against Max's DB ──────────────────────────────
+  const POLICY_COLS = `
+    TRIM(t.policy_nbr)           AS policy_nbr,
+    TRIM(t.first_name)           AS first_name,
+    TRIM(t.last_name)            AS last_name,
+    TRIM(t.phone_nbr::text)       AS phone_nbr,
+    TRIM(t.cntrct_code)          AS cntrct_code,
+    TRIM(t.cntrct_reason)        AS cntrct_reason,
+    t.issue_date, t.app_recvd_date, t.paid_to_date, t.term_date,
+    t.billing_mode, t.annual_premium,
+    TRIM(t.plan_code)            AS plan_code,
+    TRIM(t.billing_form)         AS billing_form,
+    t.at_risk_policy,
+    t.roster_hierarchy_json,
+    t._dlt_load_id
+  `;
+
+  let triggerRows: TriggerRow[] = [];
   try {
     await sql.unsafe("SET statement_timeout = '120s'");
-    const PLAN_FILTER = `plan_code ILIKE '%HI%' OR plan_code ILIKE '%HHC%' OR plan_code ILIKE '%GHI%' OR plan_code ILIKE '%HIP%'`;
-    const SELECT_LATEST = `
-      TRIM(policy_nbr)            AS policy_nbr,
-      TRIM(first_name)            AS first_name,
-      TRIM(last_name)             AS last_name,
-      TRIM(phone_nbr::text)        AS phone_nbr,
-      TRIM(cntrct_code)           AS cntrct_code,
-      TRIM(cntrct_reason)         AS cntrct_reason,
-      issue_date, app_recvd_date, paid_to_date, term_date, billing_mode, annual_premium,
-      TRIM(plan_code)             AS plan_code,
-      TRIM(billing_form)          AS billing_form,
-      at_risk_policy, roster_hierarchy_json, _dlt_load_id
-    `;
-    const SELECT_FALLBACK = `
-      TRIM(policy_nbr)            AS policy_nbr,
-      TRIM(first_name)            AS first_name,
-      TRIM(last_name)             AS last_name,
-      TRIM(phone_nbr::text)        AS phone_nbr,
-      TRIM(cntrct_code)           AS cntrct_code,
-      TRIM(cntrct_reason)         AS cntrct_reason,
-      issue_date, app_recvd_date, paid_to_date, term_date, billing_mode, annual_premium,
-      TRIM(plan_code)             AS plan_code,
-      TRIM(billing_form)          AS billing_form,
-      at_risk_policy, _dlt_load_id,
-      jsonb_build_array(
-        jsonb_build_object('depth','01','name',TRIM(mga_name),'writing_number',TRIM(mga),'is_person',false),
-        jsonb_build_object('depth','02','name',TRIM(ga_name),'writing_number',TRIM(ga),'is_person',false)
-      ) AS roster_hierarchy_json
-    `;
-    prodRows = await sql.unsafe(
-      `SELECT ${SELECT_LATEST} FROM typed.unl_fym_policy_latest_load WHERE ${PLAN_FILTER}`
-    ) as ProdRow[];
-    // Fallback: if latest_load is empty (new file landed but DLT ingest not yet run),
-    // query the previous fully-ingested file directly so daily crons aren't skipped.
-    if (prodRows.length === 0) {
-      console.log("[lifecycle-direct] latest_load empty — falling back to prev file");
-      prodRows = await sql.unsafe(`
-        WITH prev_file AS (
-          SELECT _source_file FROM typed.unl_fym_policy
-          GROUP BY _source_file ORDER BY MAX(_dlt_load_id) DESC LIMIT 1
+    const PLAN_FILTER = `(
+      t.plan_code ILIKE '%HI%' OR t.plan_code ILIKE '%HHC%'
+      OR t.plan_code ILIKE '%GHI%' OR t.plan_code ILIKE '%HIP%'
+    )`;
+
+    triggerRows = await sql.unsafe(`
+      -- Trigger A/B: P→A (approved) and A→T (terminated)
+      SELECT ${POLICY_COLS},
+        CASE
+          WHEN t.previous_contract_code = 'P' AND t.cntrct_code = 'A' THEN 'approved'
+          WHEN t.previous_contract_code = 'A' AND t.cntrct_code = 'T' THEN 'terminated'
+        END::text AS trigger_type,
+        t.contract_code_last_change_date AS changed_on
+      FROM typed.unl_fym_policy_latest_load t
+      WHERE ${PLAN_FILTER}
+        AND (
+          (t.previous_contract_code = 'P' AND t.cntrct_code = 'A')
+          OR (t.previous_contract_code = 'A' AND t.cntrct_code = 'T')
         )
-        SELECT ${SELECT_FALLBACK}
-        FROM typed.unl_fym_policy p
-        JOIN prev_file pf ON pf._source_file = p._source_file
-        WHERE ${PLAN_FILTER}
-      `) as ProdRow[];
-      console.log("[lifecycle-direct] fallback returned " + prodRows.length + " rows");
-    }
+        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+
+      UNION ALL
+
+      -- Trigger C-1: new submission (prev IS NULL)
+      SELECT ${POLICY_COLS},
+        'submission'::text AS trigger_type,
+        t.app_recvd_date   AS changed_on
+      FROM typed.unl_fym_policy_latest_load t
+      WHERE ${PLAN_FILTER}
+        AND t.cntrct_code = 'P'
+        AND t.previous_contract_code IS NULL
+        AND t.app_recvd_date >= CURRENT_DATE - INTERVAL '3 days'
+
+      UNION ALL
+
+      -- Trigger C-2: business rewrite (T→P or A→P)
+      SELECT ${POLICY_COLS},
+        'submission'::text               AS trigger_type,
+        t.contract_code_last_change_date AS changed_on
+      FROM typed.unl_fym_policy_latest_load t
+      WHERE ${PLAN_FILTER}
+        AND t.cntrct_code = 'P'
+        AND t.previous_contract_code IN ('T', 'A')
+        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+
+      UNION ALL
+
+      -- Trigger D: at-risk newly set
+      SELECT ${POLICY_COLS},
+        'at_risk'::text                      AS trigger_type,
+        t.at_risk_status_last_change_date    AS changed_on
+      FROM typed.unl_fym_policy_latest_load t
+      WHERE ${PLAN_FILTER}
+        AND t.at_risk_policy = true
+        AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
+        AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+
+      ORDER BY changed_on DESC
+    `) as TriggerRow[];
+    console.log(`[lifecycle-direct] trigger query returned ${triggerRows.length} candidate rows`);
   } finally {
     try { await sql.end(); } catch { /* ignore */ }
   }
 
   // ── 5. Evaluate + fire ────────────────────────────────────────────────────
-  const stateUpserts: Record<string, unknown>[] = [];
   const auditRows:    Record<string, unknown>[] = [];
   const npnHoldRows:  Record<string, unknown>[] = [];
+  const firedInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
   let   fired = 0;
   let   skipped = 0;
   let   held = 0;
   let   dryRunPayload: unknown = undefined; // populated in single-policy dry-run
 
-  for (const row of prodRows) {
+  for (const row of triggerRows) {
     const pn = (row.policy_nbr ?? "").trim();
     if (!pn) continue;
 
-    // Resolve agency from hierarchy → then confirm against agency map.
-    // agencyFromHierarchy extracts the depth-02 node name from the JSON hierarchy
-    // (title-cased). resolveAgencyName cross-checks via wa → agency_writing_numbers
-    // → agencies.name for canonical lookup; falls back to titleCase(ga_name) if not found.
+    // Normalise changed_on to YYYY-MM-DD string for fired_triggers key.
+    const changedOnIso = (row.changed_on instanceof Date
+      ? row.changed_on.toISOString()
+      : String(row.changed_on ?? "")).slice(0, 10);
+    if (!changedOnIso) { skipped++; continue; }
+
+    // fired_triggers idempotency gate (app-side, mirrors NOT EXISTS in spec SQL).
+    const firedKey = `${pn}|${row.trigger_type}|${changedOnIso}`;
+    if (firedSet.has(firedKey)) { skipped++; continue; }
+
+    // Single-policy filter.
+    if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
+
+    // Resolve agency from hierarchy → confirm against agency map.
     const hierarchy  = row.roster_hierarchy_json ?? [];
     const agent      = agentFromHierarchy(hierarchy);
     const agencyName = resolveAgencyName(agencyMap, agent.writingNumber, agencyFromHierarchy(hierarchy));
@@ -706,180 +727,111 @@ Deno.serve(async (req: Request) => {
       continue;
     }
 
-    const prior = priorState.get(pn) ?? null;
-    const state: PolicyState = {
-      policy_number:         pn,
-      contract_code:         row.cntrct_code ?? null,
-      billing_mode:          row.billing_mode != null ? String(row.billing_mode) : null,
-      billing_form:          row.billing_form ?? null,
-      policy_effective_date: row.issue_date   ? usDate(row.issue_date)   : null,
-      paid_to_date:          row.paid_to_date ? usDate(row.paid_to_date) : null,
-      contract_reason:       row.cntrct_reason ?? null,
-    };
+    // Resolve NPN.
+    const npn = npnByWritingNumber.get(agent.writingNumber) ?? "";
+    const resolvedWn = agent.writingNumber;
+    const rosterName = nameByWritingNumber.get(resolvedWn);
+    const agentFirst = rosterName?.first ?? agent.firstName;
+    const agentFull  = rosterName?.full  ?? agent.fullName;
+    if (singlePolicy) console.log(`[npn-trace] pn=${pn} trigger=${row.trigger_type} changed_on=${changedOnIso} agentWn=${agent.writingNumber} npn=${npn} rosterMapSize=${npnByWritingNumber.size}`);
 
-    const events: LifecycleEvent[] = computeLifecycleEvents(
-      state,
-      prior ? { contract_code: prior.contract_code, at_risk_fired_at: null } : undefined,
-      nowMs,
-    );
+    // Map trigger_type to GHL trigger label (at_risk → "at risk" for GHL field value).
+    const triggerLabel = row.trigger_type === "at_risk" ? "at risk" : row.trigger_type;
 
-    // at-risk evaluation: use the DB-supplied boolean (Max computes it).
-    const wasAtRisk = prior?.at_risk_policy ?? false;
-    const isAtRisk  = row.at_risk_policy;
-    if (isAtRisk && !wasAtRisk && (row.cntrct_code ?? "").trim() === "A") {
-      events.push({
-        policy_number:          pn,
-        trigger:                "at risk",
-        previous_contract_code: prior?.contract_code ?? null,
-        contract_reason:        contractReasonLabel(row.cntrct_reason ?? null),
-        risk_signal:            "at_risk_policy=true",
-      });
-    }
-
-    // Build state upsert row (always; captures recovery too).
-    stateUpserts.push({
-      policy_number:   pn,
-      cntrct_code:     row.cntrct_code ?? null,
-      at_risk_policy:  row.at_risk_policy,
-      paid_to_date:    row.paid_to_date ?? null,
-      agency_id:       agencyId,
-      last_load_id:    row._dlt_load_id ?? null,
-    });
-
-    if (events.length === 0) continue;
-
-    // Resolve agent.
-    if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
-
-    // agent already resolved above (before agency gate)
-    const fallbackWn = agentNumberByPolicy.get(pn) ?? "";
-    const npn = npnByWritingNumber.get(agent.writingNumber)
-             ?? (fallbackWn ? npnByWritingNumber.get(fallbackWn) ?? "" : "");
-    // When hierarchy has no person node (e.g. DH — all org nodes), resolve agent
-    // name from the roster using the fallback writing number.
-    const resolvedWn   = npn && fallbackWn ? fallbackWn : agent.writingNumber;
-    const rosterName   = nameByWritingNumber.get(resolvedWn);
-    const agentFirst   = rosterName?.first ?? agent.firstName;
-    const agentFull    = rosterName?.full  ?? agent.fullName;
-    if (singlePolicy) console.log(`[npn-trace] pn=${pn} agentWn=${agent.writingNumber} fallbackWn=${fallbackWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size} agentNumMapSize=${agentNumberByPolicy.size} agentNumEntry=${agentNumberByPolicy.get(pn)}`);
-
-    // ── NPN gate ────────────────────────────────────────────────────────────
-    // No NPN = no GHL push. Hold every triggered event for this policy and move on.
+    // ── NPN gate ──────────────────────────────────────────────────────────
     if (!npn) {
-      // changed_on mirrors fired_triggers.changed_on logic:
-      //   submission / pending  → app_recvd_date (contract_code_last_change_date is NULL on P rows)
-      //   approved / terminated → contract_code_last_change_date if present, else today
-      //   at_risk               → at_risk_status_last_change_date not available here; use today
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const appDate  = (row.app_recvd_date instanceof Date
-        ? row.app_recvd_date.toISOString()
-        : String(row.app_recvd_date ?? "")).slice(0, 10) || todayIso;
-      for (const ev of events) {
-        const changedOn =
-          (ev.trigger === "submission" || (row.cntrct_code ?? "").trim() === "P")
-            ? appDate
-            : todayIso;
-        npnHoldRows.push({
-          policy_nbr:    pn,
-          trigger_type:  ev.trigger === "at risk" ? "at_risk" : ev.trigger,
-          changed_on:    changedOn,
-          agency_id:     agencyId,
-          agency_name:   agencyName,
-          agent_name:    [row.first_name, row.last_name].filter(Boolean).join(" ").trim() || null,
-          writing_number: resolvedWn || agent.writingNumber,
-        });
-        held++;
-      }
-      console.log(`[lifecycle-direct] NPN hold: ${pn} wn=${resolvedWn || agent.writingNumber} triggers=[${events.map(e => e.trigger).join(",")}]`);
+      npnHoldRows.push({
+        policy_nbr:     pn,
+        trigger_type:   row.trigger_type,
+        changed_on:     changedOnIso,
+        agency_id:      agencyId,
+        agency_name:    agencyName,
+        agent_name:     [row.first_name, row.last_name].filter(Boolean).join(" ").trim() || null,
+        writing_number: resolvedWn,
+      });
+      held++;
+      console.log(`[lifecycle-direct] NPN hold: ${pn} wn=${resolvedWn} trigger=${row.trigger_type}`);
       continue;
     }
 
-    const planName = resolvePlanName(row.plan_code);
-    const planType = derivePlanType(planName || row.plan_code);
-    const monthly  = perPaymentPremium(row.annual_premium, row.billing_mode, pn);
-    const atRiskStatus = row.at_risk_policy;
-    // Max embeds a middle initial in first_name ("CLARAREESA D"); peel it off so
-    // GHL greeting merge fields don't render "Hi Charles E,". The initial is
-    // written to the global contact.middle_initial field (see buildGhlContactBody).
-    const nameParts = splitMiddleInitial(row.first_name ?? "");
+    const planName    = resolvePlanName(row.plan_code);
+    const planType    = derivePlanType(planName || row.plan_code);
+    const monthly     = perPaymentPremium(row.annual_premium, row.billing_mode, pn);
+    const nameParts   = splitMiddleInitial(row.first_name ?? "");
 
-    for (const ev of events) {
-      const payload: LifecyclePayload = {
-        client_first_name:    nameParts.first,
-        middle_initial:       nameParts.middleInitial,
-        client_last_name:     titleCase((row.last_name  ?? "").trim()),
-        phone:                (row.phone_nbr ?? "").trim(),
-        email:                "",
-        address:              "",
-        city:                 "",
-        state:                "",
-        zip:                  "",
-        plan_name:            planName,
-        plan_type:            planType,
-        plan_premium:         String(monthly),
-        // Submit Date = application-received date (app_recvd_date); Effective Date = issue_date.
-        // No longer double-sourced from issue_date. Null app_recvd_date → "" (date canon).
-        submission_date:      usDate(row.app_recvd_date),
-        effective_date:       usDate(row.issue_date),
-        paid_to_date:         usDate(row.paid_to_date),
-        billing_mode:         billingModeLabel(row.billing_mode),
-        at_risk_status:       atRiskStatus,
-        client_status:        CONTRACT_STATUS[row.cntrct_code?.trim() ?? ""] ?? (row.cntrct_code ?? ""),
-        policy_number:        pn,
-        termination_date:     usDate(row.term_date),
-        contract_reason:      contractReasonLabel(row.cntrct_reason ?? null),
-        agent_npn:            npn,
-        agency:               agencyName,
-        // TEMPORARY: carrier is not yet a column in Max's DB (raw.unl_fym_policy_latest_load).
-        // This feed is UNL (United National Life). Wire to carrier_name column when Max adds it.
-        // TODO: replace constant when carrier_name column is available.
-        carrier:              "UNL",
-        agent_first_name:     agentFirst,
-        agent_full_name:      agentFull,
-        agent_writing_number: resolvedWn,
-        trigger:              ev.trigger,
-      };
+    const payload: LifecyclePayload = {
+      client_first_name:    nameParts.first,
+      middle_initial:       nameParts.middleInitial,
+      client_last_name:     titleCase((row.last_name  ?? "").trim()),
+      phone:                (row.phone_nbr ?? "").trim(),
+      email:                "",
+      address:              "",
+      city:                 "",
+      state:                "",
+      zip:                  "",
+      plan_name:            planName,
+      plan_type:            planType,
+      plan_premium:         String(monthly),
+      submission_date:      usDate(row.app_recvd_date),
+      effective_date:       usDate(row.issue_date),
+      paid_to_date:         usDate(row.paid_to_date),
+      billing_mode:         billingModeLabel(row.billing_mode),
+      at_risk_status:       row.at_risk_policy,
+      client_status:        CONTRACT_STATUS[row.cntrct_code?.trim() ?? ""] ?? (row.cntrct_code ?? ""),
+      policy_number:        pn,
+      termination_date:     usDate(row.term_date),
+      contract_reason:      contractReasonLabel(row.cntrct_reason ?? null),
+      agent_npn:            npn,
+      agency:               agencyName,
+      carrier:              "UNL",
+      agent_first_name:     agentFirst,
+      agent_full_name:      agentFull,
+      agent_writing_number: resolvedWn,
+      trigger:              triggerLabel,
+    };
 
-      if (dry) {
-        // In single-policy dry-run, build the full GHL request body and return it
-        // in the response so the payload can be reviewed field-by-field before any live fire.
-        const dryBody = ghlConfig ? buildGhlContactBody(payload, ghlConfig.locationId) : null;
-        console.log(`[lifecycle-direct:dry-run] ${ev.trigger} ${pn}`, JSON.stringify(dryBody ?? payload));
-        if (singlePolicy) dryRunPayload = dryBody;
-        auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: true, dry_run: true, error: null, http_status: null, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
-        fired++;
-        continue;
+    if (dry) {
+      const dryBody = ghlConfig ? buildGhlContactBody(payload, ghlConfig.locationId) : null;
+      console.log(`[lifecycle-direct:dry-run] ${triggerLabel} ${pn}`, JSON.stringify(dryBody ?? payload));
+      if (singlePolicy) dryRunPayload = dryBody;
+      auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: true, dry_run: true, error: null, http_status: null, agency_id: agencyId, risk_signal: row.trigger_type === "at_risk" ? "at_risk_policy=true" : null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
+      fired++;
+      continue;
+    }
+
+    if (ghlConfig) {
+      const body = buildGhlContactBody(payload, ghlConfig.locationId);
+      const r    = await pushContactToGhl(ghlConfig, body);
+      auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: r.ok, dry_run: false, error: r.error, http_status: r.http_status, agency_id: agencyId, risk_signal: row.trigger_type === "at_risk" ? "at_risk_policy=true" : null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
+      if (r.ok) {
+        firedInserts.push({ policy_nbr: pn, trigger_type: row.trigger_type, changed_on: changedOnIso });
+        firedSet.add(firedKey); // prevent duplicate within this run
       }
-
-      if (ghlConfig) {
-        const body = buildGhlContactBody(payload, ghlConfig.locationId);
-        const r    = await pushContactToGhl(ghlConfig, body);
-        auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: r.ok, dry_run: false, error: r.error, http_status: r.http_status, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
-        fired++;
-      } else {
-        console.warn(`[lifecycle-direct] no GHL config; skipped ${ev.trigger} ${pn}`);
-        auditRows.push({ policy_number: pn, trigger: ev.trigger, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: ev.risk_signal ?? null, previous_contract_code: ev.previous_contract_code, contract_code: row.cntrct_code, contract_reason: ev.contract_reason, upload_id: null });
-        // do NOT increment fired — no GHL config means nothing was pushed
-      }
+      fired++;
+    } else {
+      console.warn(`[lifecycle-direct] no GHL config; skipped ${triggerLabel} ${pn}`);
+      auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: null, upload_id: null });
     }
   }
 
-  // ── 6. Persist state + audit in bulk (best-effort) ───────────────────────
-  // State upserts are SKIPPED on dry runs. Dry runs must not mark events as seen —
-  // doing so silently consumes real lifecycle events, causing them to never fire
-  // when dry-run is disabled. Only live fires advance state.
-  if (!dry) {
+  // ── 6. Persist fired_triggers + audit in bulk (best-effort) ──────────────
+  if (!dry && firedInserts.length > 0) {
     try {
-      for (let i = 0; i < stateUpserts.length; i += 500) {
-        await supabase
-          .from("lifecycle_policy_state")
-          .upsert(stateUpserts.slice(i, i + 500), { onConflict: "policy_number" });
+      for (let i = 0; i < firedInserts.length; i += 500) {
+        const { error: ftErr } = await supabase
+          .from("fired_triggers")
+          .upsert(firedInserts.slice(i, i + 500), {
+            onConflict: "policy_nbr,trigger_type,changed_on",
+            ignoreDuplicates: true,
+          });
+        if (ftErr) console.error(`[lifecycle-direct] fired_triggers write failed: ${ftErr.message}`);
       }
+      console.log(`[lifecycle-direct] fired_triggers written: ${firedInserts.length}`);
     } catch (e) {
-      console.error("[lifecycle-direct] state upsert failed (non-fatal):", e);
+      console.error("[lifecycle-direct] fired_triggers write error (non-fatal):", e);
     }
-  } else {
-    console.log(`[lifecycle-direct] dry-run: skipping state upserts for ${stateUpserts.length} rows`);
+  } else if (dry) {
+    console.log(`[lifecycle-direct] dry-run: skipping fired_triggers write (${firedInserts.length} would insert)`);
   }
 
   try {
