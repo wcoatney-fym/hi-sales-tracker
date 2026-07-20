@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { buildAgencyMap, resolveAgencyName } from "../_shared/agency-map.ts";
+import { buildAgencyMap, resolveAgencyName, titleCase } from "../_shared/agency-map.ts";
 
 // ---------------------------------------------------------------------------
 // ghl-reconcile — MAX'S DB MIGRATION (2026-07-20)
@@ -283,8 +283,8 @@ function buildContactBody(
     push(`${p}client_status`,        clientStatus);
     push(`${p}at_risk_status`,       atRiskStatus);
     push(`${p}agent_writing_number`, str(row.wa));
-    push(`${p}agent_full_name`,      str(row.wa_name));
-    push(`${p}agent_first_name`,     str((row.wa_name ?? "").split(/\s+/)[0]));
+    push(`${p}agent_full_name`,      titleCase(str(row.wa_name)));
+    push(`${p}agent_first_name`,     titleCase(str((row.wa_name ?? "").split(/\s+/)[0])));
     push(`${p}carrier_name`,         str(row.carrier));
     if (isTerminated) {
       push(`${p}termination_date`,   usDate(row.term_date));
@@ -296,8 +296,8 @@ function buildContactBody(
   if (lob) tags.push(`${lob} | sold client`);
 
   const body: Record<string, unknown> = { locationId, source: "activity-tracker-reconcile", tags, customFields };
-  if (str(row.first_name))  body.firstName = str(row.first_name);
-  if (str(row.last_name))   body.lastName  = str(row.last_name);
+  if (str(row.first_name))  body.firstName = titleCase(str(row.first_name));
+  if (str(row.last_name))   body.lastName  = titleCase(str(row.last_name));
   const ph = str(row.phone_nbr);
   if (ph && ph !== "0") body.phone = ph;
   return body;
