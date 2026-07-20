@@ -84,7 +84,17 @@ const PLAN_CODE_MAP: Record<string, string> = {
 };
 function resolvePlanName(code: string | null): string {
   const k = (code ?? "").trim().toUpperCase();
-  return PLAN_CODE_MAP[k] ?? k;
+  // Exact match first
+  if (PLAN_CODE_MAP[k]) return PLAN_CODE_MAP[k];
+  // Max's DB stores CHAR(10) codes that sometimes carry a suffix (e.g. "UTHHC OH").
+  // Try matching on the base code (first 5 chars = standard UNL product code).
+  const base = k.slice(0, 5);
+  if (PLAN_CODE_MAP[base]) return PLAN_CODE_MAP[base];
+  // Also try each token in case of space-separated variants
+  for (const token of k.split(/\s+/)) {
+    if (PLAN_CODE_MAP[token]) return PLAN_CODE_MAP[token];
+  }
+  return k;
 }
 
 // ── LOB prefix from plan_code ─────────────────────────────────────────────
