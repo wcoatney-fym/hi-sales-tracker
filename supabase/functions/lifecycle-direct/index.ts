@@ -681,8 +681,10 @@ Deno.serve(async (req: Request) => {
   // ── 5. Evaluate + fire ────────────────────────────────────────────────────
   const stateUpserts: Record<string, unknown>[] = [];
   const auditRows:    Record<string, unknown>[] = [];
+  const npnHoldRows:  Record<string, unknown>[] = [];
   let   fired = 0;
   let   skipped = 0;
+  let   held = 0;
   let   dryRunPayload: unknown = undefined; // populated in single-policy dry-run
 
   for (const row of prodRows) {
@@ -760,6 +762,38 @@ Deno.serve(async (req: Request) => {
     const agentFirst   = rosterName?.first ?? agent.firstName;
     const agentFull    = rosterName?.full  ?? agent.fullName;
     if (singlePolicy) console.log(`[npn-trace] pn=${pn} agentWn=${agent.writingNumber} fallbackWn=${fallbackWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size} agentNumMapSize=${agentNumberByPolicy.size} agentNumEntry=${agentNumberByPolicy.get(pn)}`);
+
+    // ── NPN gate ────────────────────────────────────────────────────────────
+    // No NPN = no GHL push. Hold every triggered event for this policy and move on.
+    if (!npn) {
+      // changed_on mirrors fired_triggers.changed_on logic:
+      //   submission / pending  → app_recvd_date (contract_code_last_change_date is NULL on P rows)
+      //   approved / terminated → contract_code_last_change_date if present, else today
+      //   at_risk               → at_risk_status_last_change_date not available here; use today
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const appDate  = (row.app_recvd_date instanceof Date
+        ? row.app_recvd_date.toISOString()
+        : String(row.app_recvd_date ?? "")).slice(0, 10) || todayIso;
+      for (const ev of events) {
+        const changedOn =
+          (ev.trigger === "submission" || (row.cntrct_code ?? "").trim() === "P")
+            ? appDate
+            : todayIso;
+        npnHoldRows.push({
+          policy_nbr:    pn,
+          trigger_type:  ev.trigger === "at risk" ? "at_risk" : ev.trigger,
+          changed_on:    changedOn,
+          agency_id:     agencyId,
+          agency_name:   agencyName,
+          agent_name:    [row.first_name, row.last_name].filter(Boolean).join(" ").trim() || null,
+          writing_number: resolvedWn || agent.writingNumber,
+        });
+        held++;
+      }
+      console.log(`[lifecycle-direct] NPN hold: ${pn} wn=${resolvedWn || agent.writingNumber} triggers=[${events.map(e => e.trigger).join(",")}]`);
+      continue;
+    }
+
     const planName = resolvePlanName(row.plan_code);
     const planType = derivePlanType(planName || row.plan_code);
     const monthly  = perPaymentPremium(row.annual_premium, row.billing_mode, pn);
@@ -856,9 +890,29 @@ Deno.serve(async (req: Request) => {
     console.error("[lifecycle-direct] audit log write failed (non-fatal):", e);
   }
 
+  // ── 7. Persist NPN holds (best-effort, non-fatal) ──────────────────────
+  if (!dry && npnHoldRows.length > 0) {
+    try {
+      for (let i = 0; i < npnHoldRows.length; i += 500) {
+        const { error: holdErr } = await supabase
+          .from("npn_holds")
+          .upsert(npnHoldRows.slice(i, i + 500), {
+            onConflict: "policy_nbr,trigger_type,changed_on",
+            ignoreDuplicates: true,
+          });
+        if (holdErr) console.error(`[lifecycle-direct] npn_holds write failed: ${holdErr.message}`);
+      }
+      console.log(`[lifecycle-direct] npn_holds written: ${npnHoldRows.length}`);
+    } catch (e) {
+      console.error("[lifecycle-direct] npn_holds write error (non-fatal):", e);
+    }
+  } else if (dry && npnHoldRows.length > 0) {
+    console.log(`[lifecycle-direct] dry-run: would hold ${npnHoldRows.length} rows (npn_holds not written)`);
+  }
+
   await writeCronRun({ fired, skipped });
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: prodRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
