@@ -898,12 +898,31 @@ Deno.serve(async (req: Request) => {
     }
 
     // Resolve NPN.
-    const npn = npnByWritingNumber.get(agent.writingNumber) ?? "";
-    const resolvedWn = agent.writingNumber;
-    const rosterName = nameByWritingNumber.get(resolvedWn);
+    // Primary: agent writing number from the deepest person node in the hierarchy.
+    // Fallback: walk all person nodes in the hierarchy and try each WN until one resolves.
+    // Root cause for holds: when Max's DB returns the sub-agency root code (e.g. 202NGA00,
+    // 202JVV00) as wa, that code has no NPN in agents/agency_rosters (it's an org node).
+    // Walking the full hierarchy finds the actual writing agent.
+    let npn = npnByWritingNumber.get(agent.writingNumber) ?? "";
+    let resolvedWn = agent.writingNumber;
+    let resolvedName: { first: string; full: string } | undefined = nameByWritingNumber.get(resolvedWn);
+    if (!npn) {
+      const hierarchy2 = row.roster_hierarchy_json ?? [];
+      const personNodes = hierarchy2.filter((n) => n.is_person);
+      for (const node of personNodes) {
+        const wn = (node.writing_number ?? "").trim().toUpperCase();
+        if (wn && npnByWritingNumber.has(wn)) {
+          npn = npnByWritingNumber.get(wn)!;
+          resolvedWn = wn;
+          resolvedName = nameByWritingNumber.get(wn);
+          break;
+        }
+      }
+    }
+    const rosterName = resolvedName;
     const agentFirst = rosterName?.first ?? agent.firstName;
     const agentFull  = rosterName?.full  ?? agent.fullName;
-    if (singlePolicy) console.log(`[npn-trace] pn=${pn} trigger=${row.trigger_type} changed_on=${changedOnIso} agentWn=${agent.writingNumber} npn=${npn} rosterMapSize=${npnByWritingNumber.size}`);
+    if (singlePolicy) console.log(`[npn-trace] pn=${pn} trigger=${row.trigger_type} changed_on=${changedOnIso} primaryWn=${agent.writingNumber} resolvedWn=${resolvedWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size}`);
 
     // Map trigger_type to GHL trigger label (at_risk → "at risk" for GHL field value).
     const triggerLabel = row.trigger_type === "at_risk" ? "at risk" : row.trigger_type;
