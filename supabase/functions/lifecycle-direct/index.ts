@@ -358,7 +358,7 @@ Deno.serve(async (req: Request) => {
 
   // ── BACKFILL MODE ─────────────────────────────────────────────────────────
   // Triggered by ?mode=backfill&agency_id=<uuid>&date_from=<YYYY-MM-DD>
-  // Reads directly from form_submissions (Supabase), bypasses delta, fires all
+  // Reads directly from Max's DB (typed.unl_fym_policy_latest_load), bypasses delta, fires all
   // matching contacts to GHL as "submission" events. No state upsert so the
   // next normal cron run still works cleanly.
   let backfillMode = false;
