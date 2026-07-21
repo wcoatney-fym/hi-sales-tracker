@@ -217,6 +217,64 @@ export function heartlandProductType(productDesc: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
+// Lifecycle trigger mapping — Heartland status → lifecycle events
+// ---------------------------------------------------------------------------
+
+/**
+ * Map Heartland hnl_status transitions to lifecycle trigger types.
+ *
+ * Phase 3 prep: once Max delivers `previous_hnl_status` and
+ * `hnl_status_last_change_date`, the lifecycle-direct edge function
+ * will use this mapping to fire GHL triggers for Heartland policies
+ * using the same pattern as UNL's contract code transitions.
+ *
+ * Heartland trigger mapping:
+ *   (null)          → Active         = "submission" (new policy activated)
+ *   Active          → Pending Lapse  = "at_risk"    (premium failed)
+ *   Pending Lapse   → Active         = "approved"   (premium recovered)
+ *   Active          → Cancelled      = "terminated" (policy cancelled)
+ *   Pending Lapse   → Cancelled      = "terminated" (lapsed → cancelled)
+ *   (null)          → Not Taken      = (no trigger) (never activated)
+ *
+ * Returns the trigger type string or null if no trigger should fire.
+ */
+export type LifecycleTriggerType = "submission" | "approved" | "terminated" | "at_risk";
+
+export function heartlandLifecycleTrigger(
+  previousStatus: string | null,
+  currentStatus: string | null,
+): LifecycleTriggerType | null {
+  if (!currentStatus) return null;
+
+  // New policy activated (no previous status → Active)
+  if (!previousStatus && currentStatus === "Active") return "submission";
+
+  // Premium failed — active policy going at-risk
+  if (previousStatus === "Active" && currentStatus === "Pending Lapse") return "at_risk";
+
+  // Premium recovered — at-risk policy back to active
+  if (previousStatus === "Pending Lapse" && currentStatus === "Active") return "approved";
+
+  // Policy cancelled from any active-ish state
+  if ((previousStatus === "Active" || previousStatus === "Pending Lapse") && currentStatus === "Cancelled") return "terminated";
+
+  // Not Taken from null — never activated, no trigger
+  if (!previousStatus && currentStatus === "Not Taken") return null;
+
+  // Unknown transition — no trigger (safe default)
+  return null;
+}
+
+/**
+ * Map Heartland hnl_status to the GHL trigger label value.
+ * (Same as UNL's trigger label: "submission", "approved", "terminated", "at risk")
+ * Note: "at_risk" becomes "at risk" (space) for GHL field compatibility.
+ */
+export function heartlandTriggerLabel(trigger: LifecycleTriggerType): string {
+  return trigger === "at_risk" ? "at risk" : trigger;
+}
+
+// ---------------------------------------------------------------------------
 // Row-level normalization (for code-side processing, not SQL)
 // ---------------------------------------------------------------------------
 

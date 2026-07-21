@@ -6,6 +6,8 @@ import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert
 import {
   heartlandStatusToContractCode,
   heartlandProductType,
+  heartlandLifecycleTrigger,
+  heartlandTriggerLabel,
   normalizeRow,
   carrierSelectClause,
   carrierTable,
@@ -269,4 +271,58 @@ Deno.test("ACTIVE_CARRIERS includes UNL and HEARTLAND", () => {
   assertEquals(ACTIVE_CARRIERS.includes("UNL"), true);
   assertEquals(ACTIVE_CARRIERS.includes("HEARTLAND"), true);
   assertEquals(ACTIVE_CARRIERS.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// heartlandLifecycleTrigger — Phase 3 prep
+// ---------------------------------------------------------------------------
+Deno.test("heartlandLifecycleTrigger — null → Active = submission", () => {
+  assertEquals(heartlandLifecycleTrigger(null, "Active"), "submission");
+});
+
+Deno.test("heartlandLifecycleTrigger — Active → Pending Lapse = at_risk", () => {
+  assertEquals(heartlandLifecycleTrigger("Active", "Pending Lapse"), "at_risk");
+});
+
+Deno.test("heartlandLifecycleTrigger — Pending Lapse → Active = approved (recovered)", () => {
+  assertEquals(heartlandLifecycleTrigger("Pending Lapse", "Active"), "approved");
+});
+
+Deno.test("heartlandLifecycleTrigger — Active → Cancelled = terminated", () => {
+  assertEquals(heartlandLifecycleTrigger("Active", "Cancelled"), "terminated");
+});
+
+Deno.test("heartlandLifecycleTrigger — Pending Lapse → Cancelled = terminated", () => {
+  assertEquals(heartlandLifecycleTrigger("Pending Lapse", "Cancelled"), "terminated");
+});
+
+Deno.test("heartlandLifecycleTrigger — null → Not Taken = null (no trigger)", () => {
+  assertEquals(heartlandLifecycleTrigger(null, "Not Taken"), null);
+});
+
+Deno.test("heartlandLifecycleTrigger — null → null = null", () => {
+  assertEquals(heartlandLifecycleTrigger(null, null), null);
+});
+
+Deno.test("heartlandLifecycleTrigger — unknown transition = null", () => {
+  assertEquals(heartlandLifecycleTrigger("Not Taken", "Active"), null);
+});
+
+// ---------------------------------------------------------------------------
+// heartlandTriggerLabel
+// ---------------------------------------------------------------------------
+Deno.test("heartlandTriggerLabel — at_risk → 'at risk' (space for GHL)", () => {
+  assertEquals(heartlandTriggerLabel("at_risk"), "at risk");
+});
+
+Deno.test("heartlandTriggerLabel — submission stays submission", () => {
+  assertEquals(heartlandTriggerLabel("submission"), "submission");
+});
+
+Deno.test("heartlandTriggerLabel — approved stays approved", () => {
+  assertEquals(heartlandTriggerLabel("approved"), "approved");
+});
+
+Deno.test("heartlandTriggerLabel — terminated stays terminated", () => {
+  assertEquals(heartlandTriggerLabel("terminated"), "terminated");
 });

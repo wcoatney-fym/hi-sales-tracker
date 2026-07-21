@@ -50,6 +50,11 @@ Deno.serve(async (req: Request) => {
       ? body.p_agency_names
       : null;
 
+    // Carrier filter: "UNL", "Heartland", or null/omitted for combined book.
+    const carrierFilter: string | null = body.p_carrier ?? null;
+    const includeUNL       = !carrierFilter || carrierFilter.toUpperCase() === "UNL";
+    const includeHeartland = !carrierFilter || carrierFilter.toUpperCase() === "HEARTLAND";
+
     // Auth: require a session token (admin | agent), same as the RPC path.
     const token: string = body.token || req.headers.get("X-Agent-Token") || "";
     if (!token) return jsonResponse({ error: "Authentication required" }, 401);
@@ -131,9 +136,11 @@ Deno.serve(async (req: Request) => {
     // targetWns is set, Heartland rows are included if their upline code
     // matches (best-effort); full agency scoping requires Max's roster work.
     const targetWnsArr = targetWns; // string[] | null
+    // Carrier filter flags passed as SQL booleans so the UNION branches
+    // can be gated without dynamic SQL string building.
     const rows = await sql`
       WITH scoped AS (
-        -- UNL policies
+        -- UNL policies (gated by carrier filter)
         SELECT
           issue_date,
           app_recvd_date,
@@ -142,24 +149,25 @@ Deno.serve(async (req: Request) => {
           billing_mode,
           'UNL'::text AS carrier
         FROM typed.unl_fym_policy_latest_load
-        WHERE (
-          ${targetWnsArr}::text[] IS NULL
-          OR COALESCE(
-               (SELECT e->>'writing_number'
-                  FROM jsonb_array_elements(roster_hierarchy_json) e
-                  WHERE e->>'depth' = '02'
-                    AND COALESCE((e->>'is_person')::boolean, false) = false
-                  LIMIT 1),
-               (SELECT e->>'writing_number'
-                  FROM jsonb_array_elements(roster_hierarchy_json) e
-                  WHERE e->>'depth' = '01'
-                  LIMIT 1)
-             ) = ANY(${targetWnsArr}::text[])
-        )
+        WHERE ${includeUNL}::boolean
+          AND (
+            ${targetWnsArr}::text[] IS NULL
+            OR COALESCE(
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '02'
+                      AND COALESCE((e->>'is_person')::boolean, false) = false
+                    LIMIT 1),
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '01'
+                    LIMIT 1)
+               ) = ANY(${targetWnsArr}::text[])
+          )
 
         UNION ALL
 
-        -- Heartland policies
+        -- Heartland policies (gated by carrier filter)
         SELECT
           eff_date AS issue_date,
           app_date AS app_recvd_date,
@@ -168,7 +176,8 @@ Deno.serve(async (req: Request) => {
           NULL::integer AS billing_mode,
           'Heartland'::text AS carrier
         FROM typed.heartland_inforced_policy_latest
-        WHERE hnl_status NOT IN ('Not Taken')
+        WHERE ${includeHeartland}::boolean
+          AND hnl_status NOT IN ('Not Taken')
           AND (
             ${targetWnsArr}::text[] IS NULL
             OR split_part(upline, ' - ', 2) = ANY(${targetWnsArr}::text[])
@@ -235,24 +244,26 @@ Deno.serve(async (req: Request) => {
       WITH scoped AS (
         SELECT issue_date, paid_to_date, billing_mode, 'UNL'::text AS carrier
         FROM typed.unl_fym_policy_latest_load
-        WHERE (
-          ${targetWnsArr}::text[] IS NULL
-          OR COALESCE(
-               (SELECT e->>'writing_number'
-                  FROM jsonb_array_elements(roster_hierarchy_json) e
-                  WHERE e->>'depth' = '02'
-                    AND COALESCE((e->>'is_person')::boolean, false) = false
-                  LIMIT 1),
-               (SELECT e->>'writing_number'
-                  FROM jsonb_array_elements(roster_hierarchy_json) e
-                  WHERE e->>'depth' = '01'
-                  LIMIT 1)
-             ) = ANY(${targetWnsArr}::text[])
-        )
+        WHERE ${includeUNL}::boolean
+          AND (
+            ${targetWnsArr}::text[] IS NULL
+            OR COALESCE(
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '02'
+                      AND COALESCE((e->>'is_person')::boolean, false) = false
+                    LIMIT 1),
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '01'
+                    LIMIT 1)
+               ) = ANY(${targetWnsArr}::text[])
+          )
         UNION ALL
         SELECT eff_date AS issue_date, paid_to_date, NULL::integer AS billing_mode, 'Heartland'::text AS carrier
         FROM typed.heartland_inforced_policy_latest
-        WHERE hnl_status NOT IN ('Not Taken')
+        WHERE ${includeHeartland}::boolean
+          AND hnl_status NOT IN ('Not Taken')
           AND (
             ${targetWnsArr}::text[] IS NULL
             OR split_part(upline, ' - ', 2) = ANY(${targetWnsArr}::text[])
@@ -288,6 +299,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({
       ...rows[0].result,
       carrier_breakdown: carrierBreakdown,
+      _carrier_filter: carrierFilter,
       _elapsed_ms: elapsedMs,
       _source: "prod_direct_multi_carrier",
     });
