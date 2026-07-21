@@ -451,7 +451,15 @@ Deno.serve(async (req: Request) => {
       connect_timeout: 30, max: 1, idle_timeout: 20,
     });
     try {
+      // Optional date range filter — startDate / endDate applied to issue_date
+      const startDate = typeof body.startDate === "string" ? body.startDate : null;
+      const endDate   = typeof body.endDate   === "string" ? body.endDate   : null;
+      const params: string[] = [...gaNamePatterns];
+      let dateClause = "";
+      if (startDate) { params.push(startDate); dateClause += ` AND issue_date >= $${params.length}::date`; }
+      if (endDate)   { params.push(endDate);   dateClause += ` AND issue_date <= $${params.length}::date`; }
       const placeholders = gaNamePatterns.map((_, i) => `$${i + 1}`).join(",");
+      console.log(`[reconcile] date filter: startDate=${startDate ?? "none"} endDate=${endDate ?? "none"}`);
       const scopeRows = await sqlScope.unsafe(`
         SELECT DISTINCT TRIM(policy_nbr) AS policy_nbr
         FROM typed.unl_fym_policy_latest_load
@@ -459,7 +467,8 @@ Deno.serve(async (req: Request) => {
           AND cntrct_code = ANY(ARRAY['A','T','P'])
           AND policy_nbr IS NOT NULL
           AND TRIM(policy_nbr) != ''
-      `, gaNamePatterns) as { policy_nbr: string }[];
+          ${dateClause}
+      `, params) as { policy_nbr: string }[];
       for (const r of scopeRows) allPolicies.add(r.policy_nbr);
     } finally {
       try { await sqlScope.end(); } catch { /* ignore */ }
