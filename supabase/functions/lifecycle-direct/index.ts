@@ -234,11 +234,12 @@ interface ProdRow {
 // ── Main handler ──────────────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
   // Auth: cron secret header (same mechanism as sql-import-cron).
-  const supabaseUrl  = Deno.env.get("SUPABASE_URL")!;
-  // Use new-format secret key (sb_secret_...) — legacy SUPABASE_SERVICE_ROLE_KEY JWT
-  // was disabled on this project 2026-06-16. Fall back to legacy key if secret key absent.
-  const serviceKey   = Deno.env.get("SB_SECRET_KEY") ||
-                       Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
+  // SUPABASE_URL + SB_SECRET_KEY were dropped in the 7/17 redeploy — use namespaced vars.
+  const supabaseUrl  = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ??
+                       Deno.env.get("SUPABASE_URL") ?? "";
+  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ??
+                       Deno.env.get("SB_SECRET_KEY") ??
+                       Deno.env.get("SB_SERVICE_ROLE_KEY") ?? "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
   console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_SUNFIRE")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
   const supabase     = createClient(supabaseUrl, serviceKey);
