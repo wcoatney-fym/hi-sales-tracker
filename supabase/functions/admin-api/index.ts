@@ -4660,7 +4660,7 @@ Deno.serve(async (req: Request) => {
           database: Deno.env.get("PROD_DB_NAME")!,
           username: Deno.env.get("PROD_DB_USER")!,
           password: Deno.env.get("PROD_DB_PASSWORD")!,
-          ssl: Deno.env.get("PROD_DB_SSLMODE") === "require" ? "require" : false,
+          ssl: { ca: AKAMAI_CA_CERT },
         });
 
         // Use publishable key — service_role key was disabled 2026-06-16
@@ -4866,7 +4866,7 @@ Deno.serve(async (req: Request) => {
           database: Deno.env.get("PROD_DB_NAME")!,
           username: Deno.env.get("PROD_DB_USER")!,
           password: Deno.env.get("PROD_DB_PASSWORD")!,
-          ssl: Deno.env.get("PROD_DB_SSLMODE") === "require" ? "require" : false,
+          ssl: { ca: AKAMAI_CA_CERT },
         });
 
         // Use publishable key — service_role key was disabled 2026-06-16
