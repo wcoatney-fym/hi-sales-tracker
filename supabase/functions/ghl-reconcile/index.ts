@@ -68,19 +68,38 @@ function jsonResponse(data: unknown, status = 200) {
 
 // ── Plan code map (mirrors lifecycle-direct exactly) ──────────────────────
 const PLAN_CODE_MAP: Record<string, string> = {
+  // Hospital Indemnity
   UHIP2: "Hospital Indemnity Shield 2.0",
   UNHIP: "Original Hospital Indemnity Shield",
   UGHIP: "Guaranteed Issue Hospital Indemnity Shield",
   UFGHI: "Guaranteed Issue Hospital Indemnity Shield - FL with Assoc.",
   UFHIP: "Hospital Indemnity Shield 2.0 - FL with Assoc.",
+  UAGHI: "Guaranteed Issue Hospital Indemnity Shield",
+  UFAGH: "Guaranteed Issue Hospital Indemnity Shield - FL with Assoc.",
+  // Home Health Care
   UTHHC: "Home Health Care Shield with TCARE benefit",
   UNHHC: "Original Home Health Care Shield",
   UAHHC: "Original Home Health Care Shield",
   UIHHC: "Caregiver Shield",
-  UAGHI: "Guaranteed Issue Hospital Indemnity Shield",
+  UNAHH: "Original Home Health Care Shield",
+  // Cancer
   UNCAN: "Cancer Shield 2.0",
+  // Dental
   UDN21: "Dental Shield 2.0",
   UDN24: "Dental Shield 2.0 with waiving of waiting periods option",
+  // Dental Vision
+  UDV17: "Dental Vision Shield",
+  UDV18: "Dental Vision Shield",
+  // Life / Final Expense
+  UNFEL: "Final Expense Life Shield",
+  UNFEX: "Final Expense Life Shield",
+  // Accident / AD&D
+  UAD24: "Accident Shield",
+  UACC:  "Accident Shield",
+  // CSI products (no product-line GHL fields — will log as no-LOB)
+  UCSIA: "Critical Supplement Indemnity",
+  UCSIB: "Critical Supplement Indemnity",
+  UCSIC: "Critical Supplement Indemnity",
 };
 function resolvePlanName(code: string | null): string {
   const k = (code ?? "").trim().toUpperCase();
@@ -99,12 +118,22 @@ function resolvePlanName(code: string | null): string {
 
 // ── LOB prefix from plan_code ─────────────────────────────────────────────
 // Derived from plan_code (Max's DB has no product_type column).
+// Match on base code (first 5 chars after trim) to handle CHAR(10) suffix variants.
 function lobFromPlanCode(planCode: string | null): string | null {
   const k = (planCode ?? "").trim().toUpperCase();
-  if (k.includes("HHC")) return "hhc";
-  if (k.includes("HI") || k.includes("HIP") || k.includes("GHI")) return "hip";
-  if (k.includes("CAN")) return "cancer";
-  if (k.includes("DN")) return "dv";
+  const base = k.slice(0, 5);
+  // HHC (Home Health Care) — check base code prefix first
+  if (base.includes("HHC") || base === "UNAHH") return "hhc";
+  // HIP (Hospital Indemnity) — explicit base codes to avoid false matches
+  if (["UHIP2","UNHIP","UGHIP","UFHIP","UFGHI","UAGHI","UFAGH"].includes(base)) return "hip";
+  // Cancer
+  if (base === "UNCAN") return "cancer";
+  // Dental / Dental Vision
+  if (base.startsWith("UDN") || base.startsWith("UDV")) return "dv";
+  // Life / Final Expense
+  if (base === "UNFEL" || base === "UNFEX") return "life";
+  // Accident / AD&D and CSI — no LOB-specific GHL fields; will push global fields only
+  if (base === "UAD24" || base === "UACC" || base.startsWith("UCSI")) return null;
   return null;
 }
 
@@ -378,22 +407,62 @@ Deno.serve(async (req: Request) => {
       ? (body.testPolicyNumbers as string[]).filter((s) => typeof s === "string" && s.length > 0)
       : null;
 
+  // ── Resolve ga_name patterns for GHL-enabled agencies ─────────────────
+  // The tracker's agency_writing_numbers uses placeholder WNs (e.g. 202NGA00)
+  // that don't match the real agent-level WNs in Max's DB (202NGA63 etc).
+  // Scope by ga_name instead: pull the canonical ga_name for each enabled agency
+  // from the agencies table (stored as a config map keyed by agency id).
+  //
+  // ga_name values confirmed from Max's DB (exact, trimmed, ALLCAPS):
+  const GA_NAME_MAP: Record<string, string> = {
+    "04813b3b-4a2c-4c55-9f7d-3964d26533f3": "GUARDIAN BENEFITS INC", // FYM
+    "09b68b09-a9aa-40c0-9b6b-07b95079cf8b": "DH INSURANCE GROUP",    // Dh Insurance Group
+  };
+
+  // Fetch enabled agencies and their ga_name patterns
+  const { data: enabledAgencies } = await supabase
+    .from("agencies")
+    .select("id, name")
+    .eq("ghl_api_enabled", true);
+
+  const gaNamePatterns: string[] = (enabledAgencies ?? [])
+    .map((a: { id: string; name: string }) => GA_NAME_MAP[a.id])
+    .filter(Boolean) as string[];
+
+  console.log(`[reconcile] GHL-enabled agencies: ${(enabledAgencies ?? []).map((a: { name: string }) => a.name).join(", ")}`);
+  console.log(`[reconcile] ga_name patterns in scope: ${gaNamePatterns.join(", ")}`);
+
   const allPolicies = new Set<string>();
   if (testPolicyNumbers && testPolicyNumbers.length > 0) {
     testPolicyNumbers.forEach((p) => allPolicies.add(p));
+  } else if (gaNamePatterns.length === 0) {
+    return jsonResponse({ ok: true, message: "No GHL-enabled agencies with ga_name mappings found", processed: 0 });
   } else {
-    // Paginate — lifecycle_event_log can exceed 1K rows
-    const PS = 1000; let psOff = 0;
-    while (true) {
-      const { data: logRows, error: logErr } = await supabase
-        .from("lifecycle_event_log")
-        .select("policy_number")
-        .like("error", "%no GHL config%")
-        .range(psOff, psOff + PS - 1);
-      if (logErr) return jsonResponse({ error: `lifecycle_event_log query failed: ${logErr.message}` }, 500);
-      for (const r of (logRows ?? [])) allPolicies.add((r as { policy_number: string }).policy_number);
-      if (!logRows || logRows.length < PS) break;
-      psOff += PS;
+    // Scope = all active+terminated policies for GHL-enabled agencies from Max's DB
+    // Pulled directly — no lifecycle_event_log dependency
+    const { default: pgScope } = await import("npm:postgres@3.4.5");
+    const sqlScope = pgScope({
+      host:            cleanHost(Deno.env.get("PROD_DB_HOST")!),
+      port:            Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
+      database:        Deno.env.get("PROD_DB_NAME")!,
+      username:        Deno.env.get("PROD_DB_USER")!,
+      password:        Deno.env.get("PROD_DB_PASSWORD")!,
+      ssl:             { ca: AKAMAI_CA_CERT },
+      connect_timeout: 30, max: 1, idle_timeout: 20,
+    });
+    try {
+      const placeholders = gaNamePatterns.map((_, i) => `$${i + 1}`).join(",");
+      const scopeRows = await sqlScope.unsafe(`
+        SELECT DISTINCT TRIM(policy_nbr) AS policy_nbr
+        FROM typed.unl_fym_policy_latest_load
+        WHERE TRIM(ga_name) IN (${placeholders})
+          AND cntrct_code = ANY(ARRAY['A','T','P'])
+          AND policy_nbr IS NOT NULL
+          AND TRIM(policy_nbr) != ''
+      `, gaNamePatterns) as { policy_nbr: string }[];
+      for (const r of scopeRows) allPolicies.add(r.policy_nbr);
+    } finally {
+      try { await sqlScope.end(); } catch { /* ignore */ }
     }
   }
 
