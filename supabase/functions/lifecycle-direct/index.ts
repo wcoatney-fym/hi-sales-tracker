@@ -232,7 +232,7 @@ Deno.serve(async (req: Request) => {
   const serviceKey   = Deno.env.get("SB_SECRET_KEY") ||
                        Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
-  console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_HIP_PORTAL")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
+  console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_SUNFIRE")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
   const supabase     = createClient(supabaseUrl, serviceKey);
 
   // Verify cron secret (skip on OPTIONS).
@@ -388,23 +388,40 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     const agencyName = (agencyRow?.name as string) ?? "";
 
-    // Build NPN map from agents + agency_rosters
+    // Build NPN map from agents + agency_rosters (fully paginated — agents table >1K rows)
     const npnByWn = new Map<string, string>();
-    const { data: agentRows } = await supabase
-      .from("agents")
-      .select("unl_writing_number, npn")
-      .range(0, 9999);
-    for (const a of agentRows ?? []) {
-      const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
-      if (wn && a.npn) npnByWn.set(wn, a.npn as string);
+    {
+      const PAGE = 1000;
+      let off = 0;
+      while (true) {
+        const { data: agentPage } = await supabase
+          .from("agents")
+          .select("unl_writing_number, npn")
+          .range(off, off + PAGE - 1);
+        for (const a of agentPage ?? []) {
+          const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
+          if (wn && a.npn) npnByWn.set(wn, a.npn as string);
+        }
+        if (!agentPage || agentPage.length < PAGE) break;
+        off += PAGE;
+      }
     }
-    const { data: rosterRows } = await supabase
-      .from("agency_rosters")
-      .select("writing_number, npn")
-      .eq("status", "active");
-    for (const r of rosterRows ?? []) {
-      const wn = (r.writing_number as string ?? "").trim().toUpperCase();
-      if (wn && r.npn && !npnByWn.has(wn)) npnByWn.set(wn, r.npn as string);
+    {
+      const PAGE = 1000;
+      let off = 0;
+      while (true) {
+        const { data: rosterPage } = await supabase
+          .from("agency_rosters")
+          .select("writing_number, npn")
+          .eq("status", "active")
+          .range(off, off + PAGE - 1);
+        for (const r of rosterPage ?? []) {
+          const wn = (r.writing_number as string ?? "").trim().toUpperCase();
+          if (wn && r.npn && !npnByWn.has(wn)) npnByWn.set(wn, r.npn as string);
+        }
+        if (!rosterPage || rosterPage.length < PAGE) break;
+        off += PAGE;
+      }
     }
 
     // Fetch all form_submissions for this agency since date_from
@@ -570,15 +587,23 @@ Deno.serve(async (req: Request) => {
       ?.filter((a) => a.ghl_api_enabled)
       .map((a) => a.name as string) ?? [];
     for (const agencyName of enabledAgencyNamesOriginal) {
-      const { data: agentNumRows } = await supabase
-        .from("form_submissions")
-        .select("policy_number, agent_number")
-        .ilike("agency", agencyName)
-        .not("agent_number", "is", null)
-        .neq("agent_number", "");
-      for (const r of agentNumRows ?? []) {
-        if (r.policy_number && r.agent_number)
-          agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+      // Paginate: form_submissions has 40K+ rows; a single agency could exceed 1K policies
+      const PAGE = 1000;
+      let off = 0;
+      while (true) {
+        const { data: agentNumRows } = await supabase
+          .from("form_submissions")
+          .select("policy_number, agent_number")
+          .ilike("agency", agencyName)
+          .not("agent_number", "is", null)
+          .neq("agent_number", "")
+          .range(off, off + PAGE - 1);
+        for (const r of agentNumRows ?? []) {
+          if (r.policy_number && r.agent_number)
+            agentNumberByPolicy.set(r.policy_number as string, (r.agent_number as string).trim().toUpperCase());
+        }
+        if (!agentNumRows || agentNumRows.length < PAGE) break;
+        off += PAGE;
       }
     }
   }
