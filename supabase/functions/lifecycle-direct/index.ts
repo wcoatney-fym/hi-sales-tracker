@@ -384,6 +384,7 @@ Deno.serve(async (req: Request) => {
   } catch { /* ignore */ }
 
   if (backfillMode) {
+    try { // top-level backfill try/catch — surfaces crash as JSON instead of raw 500
     if (!backfillAgencyId || !backfillDateFrom) {
       return new Response(
         JSON.stringify({ error: "backfill requires agency_id and date_from params" }),
@@ -656,6 +657,14 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({ ok: true, mode: "backfill", agency: agencyName, total: bfRows.length, fired: bfFired, failed: bfFailed, held: bfHeld, dry }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
+    } catch (bfErr) {
+      const msg = bfErr instanceof Error ? bfErr.message : String(bfErr);
+      console.error("[lifecycle-direct:backfill] CRASH:", msg);
+      return new Response(
+        JSON.stringify({ error: "backfill crashed", detail: msg }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
   }
   // ── END BACKFILL MODE ─────────────────────────────────────────────────────
 
