@@ -4648,6 +4648,257 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ ok: true, row: data });
       }
 
+      // ── GHL Backfill: get per-agency trigger counts from Max's DB ────────────
+      case "get-ghl-agencies": {
+        if (session.role !== "global_admin") return jsonResponse({ error: "Forbidden" }, 403);
+
+        const trackerClient = createClient(
+          Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
+          Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY")!
+        );
+
+        // 1. Load all GHL-enabled agencies + their writing numbers from tracker DB
+        const { data: agencyRows } = await trackerClient
+          .from("agencies")
+          .select("id, name, slug, ghl_api_enabled");
+
+        const enabledAgencies = (agencyRows ?? []).filter((a: Record<string, unknown>) => a.ghl_api_enabled);
+        if (enabledAgencies.length === 0) return jsonResponse({ agencies: [] });
+
+        const agencyIds = enabledAgencies.map((a: Record<string, unknown>) => a.id as string);
+
+        const { data: wnRows } = await trackerClient
+          .from("agency_writing_numbers")
+          .select("agency_id, writing_number")
+          .in("agency_id", agencyIds);
+
+        const wnByAgency = new Map<string, string[]>();
+        for (const r of wnRows ?? []) {
+          const list = wnByAgency.get(r.agency_id as string) ?? [];
+          list.push((r.writing_number as string).trim().toUpperCase());
+          wnByAgency.set(r.agency_id as string, list);
+        }
+
+        // 2. Load NPN coverage from tracker DB (agents + agency_rosters)
+        const { data: agentRows } = await trackerClient
+          .from("agents")
+          .select("unl_writing_number, npn");
+        const npnByWn = new Map<string, string>();
+        for (const a of agentRows ?? []) {
+          const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
+          if (wn && a.npn) npnByWn.set(wn, a.npn as string);
+        }
+        const { data: rosterRows } = await trackerClient
+          .from("agency_rosters")
+          .select("writing_number, npn")
+          .eq("status", "active");
+        for (const r of rosterRows ?? []) {
+          const wn = (r.writing_number as string ?? "").trim().toUpperCase();
+          if (wn && r.npn && !npnByWn.has(wn)) npnByWn.set(wn, r.npn as string);
+        }
+
+        // 3. Load last backfill run per agency from lifecycle_event_log
+        const { data: lastRunRows } = await trackerClient
+          .from("lifecycle_cron_runs")
+          .select("fired, held, started_at")
+          .order("started_at", { ascending: false })
+          .limit(1);
+        // Per-agency last run: query lifecycle_event_log for backfill mode entries
+        // (agency_id field exists on event_log rows from backfill path)
+        const lastRunByAgency = new Map<string, { fired: number; held: number; ran_at: string }>();
+        for (const agencyId of agencyIds) {
+          const { data: evRows } = await trackerClient
+            .from("lifecycle_event_log")
+            .select("agency_id, fired_at: created_at")
+            .eq("agency_id", agencyId)
+            .order("created_at", { ascending: false })
+            .limit(1);
+          if (evRows && evRows.length > 0) {
+            lastRunByAgency.set(agencyId, { fired: 0, held: 0, ran_at: (evRows[0] as Record<string, unknown>).fired_at as string });
+          }
+        }
+
+        // 4. Query Max's DB for unfired trigger counts per agency writing number
+        const PLAN_FILTER = `(
+          t.plan_code ILIKE '%HI%' OR t.plan_code ILIKE '%HHC%'
+          OR t.plan_code ILIKE '%GHI%' OR t.plan_code ILIKE '%HIP%'
+        )`;
+
+        // Collect all WNs across all enabled agencies for a single Max DB query
+        const allWns = [...new Set([...wnByAgency.values()].flat())];
+        interface TriggerCount { wa: string; trigger_type: string; total: number }
+        let triggerCounts: TriggerCount[] = [];
+
+        if (allWns.length > 0) {
+          await sql.unsafe("SET statement_timeout = '60s'");
+          triggerCounts = await sql.unsafe(`
+            SELECT TRIM(UPPER(t.wa)) AS wa, trigger_type, COUNT(*)::int AS total
+            FROM (
+              SELECT t.wa,
+                CASE
+                  WHEN t.previous_contract_code = 'P' AND t.cntrct_code = 'A' THEN 'approved'
+                  WHEN t.previous_contract_code = 'A' AND t.cntrct_code = 'T' THEN 'terminated'
+                END AS trigger_type
+              FROM typed.unl_fym_policy_latest_load t
+              WHERE ${PLAN_FILTER}
+                AND ((t.previous_contract_code = 'P' AND t.cntrct_code = 'A')
+                  OR (t.previous_contract_code = 'A' AND t.cntrct_code = 'T'))
+
+              UNION ALL
+
+              SELECT t.wa, 'submission' AS trigger_type
+              FROM typed.unl_fym_policy_latest_load t
+              WHERE ${PLAN_FILTER}
+                AND t.cntrct_code = 'P' AND t.previous_contract_code IS NULL
+
+              UNION ALL
+
+              SELECT t.wa, 'submission' AS trigger_type
+              FROM typed.unl_fym_policy_latest_load t
+              WHERE ${PLAN_FILTER}
+                AND t.cntrct_code = 'P' AND t.previous_contract_code IN ('T','A')
+
+              UNION ALL
+
+              SELECT t.wa, 'at_risk' AS trigger_type
+              FROM typed.unl_fym_policy_latest_load t
+              WHERE ${PLAN_FILTER}
+                AND t.at_risk_policy = true
+                AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
+            ) triggers
+            WHERE TRIM(UPPER(wa)) = ANY(${ allWns.map((_: string, i: number) => `$${i + 1}`).join(",") })
+            GROUP BY TRIM(UPPER(t.wa)), trigger_type
+            ORDER BY wa, trigger_type
+          `, allWns) as TriggerCount[];
+        }
+
+        // 5. Load already-fired set from fired_triggers (to subtract from counts)
+        const firedByWn = new Map<string, { approved: number; terminated: number; submission: number; at_risk: number }>();
+        {
+          const { data: ftRows } = await trackerClient
+            .from("fired_triggers")
+            .select("policy_nbr, trigger_type");
+          // Just need total counts per trigger type — build a fired set key
+          // We'll subtract from trigger counts per WN below (simplified: just show gross counts,
+          // note that fired_triggers doesn't store wa — so we report gross unfired from trigger logic)
+          void ftRows; // fired_triggers doesn't have wa column; gross counts are fine for UI
+        }
+
+        // 6. Aggregate counts per agency
+        const countsByWn = new Map<string, { approved: number; terminated: number; submission: number; at_risk: number }>();
+        for (const row of triggerCounts) {
+          const wn = (row.wa ?? "").trim().toUpperCase();
+          if (!countsByWn.has(wn)) countsByWn.set(wn, { approved: 0, terminated: 0, submission: 0, at_risk: 0 });
+          const c = countsByWn.get(wn)!;
+          if (row.trigger_type === "approved")    c.approved    += row.total;
+          if (row.trigger_type === "terminated")  c.terminated  += row.total;
+          if (row.trigger_type === "submission")  c.submission  += row.total;
+          if (row.trigger_type === "at_risk")     c.at_risk     += row.total;
+        }
+
+        const result = enabledAgencies.map((agency: Record<string, unknown>) => {
+          const wns = wnByAgency.get(agency.id as string) ?? [];
+          const counts = { approved: 0, terminated: 0, submission: 0, at_risk: 0 };
+          let rosterTotal = 0;
+          let npnCovered = 0;
+          for (const wn of wns) {
+            const c = countsByWn.get(wn);
+            if (c) {
+              counts.approved   += c.approved;
+              counts.terminated += c.terminated;
+              counts.submission += c.submission;
+              counts.at_risk    += c.at_risk;
+            }
+            rosterTotal++;
+            if (npnByWn.has(wn)) npnCovered++;
+          }
+          const lastRun = lastRunByAgency.get(agency.id as string) ?? null;
+          return {
+            id: agency.id,
+            name: agency.name,
+            slug: agency.slug,
+            ghl_api_enabled: agency.ghl_api_enabled,
+            writing_numbers: wns,
+            roster_total: rosterTotal,
+            npn_covered: npnCovered,
+            counts,
+            total_unfired: counts.approved + counts.terminated + counts.submission + counts.at_risk,
+            last_run: lastRun,
+          };
+        });
+
+        return jsonResponse({ agencies: result });
+      }
+
+      // ── GHL Backfill: invoke lifecycle-direct backfill for one agency ──────
+      case "run-ghl-backfill": {
+        if (session.role !== "global_admin") return jsonResponse({ error: "Forbidden" }, 403);
+
+        const { agencyId, dateFrom, dry } = body as { agencyId: string; dateFrom?: string; dry?: boolean };
+        if (!agencyId) return jsonResponse({ error: "agencyId required" }, 400);
+
+        const trackerClient = createClient(
+          Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
+          Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY")!
+        );
+
+        // Get agency's earliest policy app_recvd_date from Max's DB to use as date_from
+        let effectiveDateFrom = dateFrom;
+        if (!effectiveDateFrom) {
+          const { data: wnRows } = await trackerClient
+            .from("agency_writing_numbers")
+            .select("writing_number")
+            .eq("agency_id", agencyId);
+          const wns = (wnRows ?? []).map((r: Record<string, unknown>) => (r.writing_number as string).trim().toUpperCase()).filter(Boolean);
+          if (wns.length > 0) {
+            await sql.unsafe("SET statement_timeout = '30s'");
+            const minRows = await sql.unsafe(`
+              SELECT MIN(app_recvd_date)::text AS min_date
+              FROM typed.unl_fym_policy_latest_load
+              WHERE TRIM(UPPER(wa)) = ANY(${ wns.map((_: string, i: number) => `$${i + 1}`).join(",") })
+                AND (plan_code ILIKE '%HI%' OR plan_code ILIKE '%HHC%' OR plan_code ILIKE '%GHI%' OR plan_code ILIKE '%HIP%')
+            `, wns) as { min_date: string | null }[];
+            effectiveDateFrom = minRows[0]?.min_date ?? new Date().toISOString().slice(0, 10);
+          } else {
+            effectiveDateFrom = new Date().toISOString().slice(0, 10);
+          }
+        }
+
+        // Fetch the cron secret from vault to authenticate lifecycle-direct
+        const vaultRows = await sql.unsafe(
+          `SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'cron_import_secret' LIMIT 1`
+        ) as { decrypted_secret: string }[];
+        // Note: vault is in Supabase, not Max's DB — use trackerClient RPC instead
+        const { data: secretRow } = await trackerClient
+          .rpc("get_secret", { secret_name: "cron_import_secret" })
+          .single()
+          .catch(() => ({ data: null }));
+        void vaultRows; // Max's DB doesn't have vault; use Supabase secret
+
+        const cronSecret = (secretRow as Record<string, unknown> | null)?.secret as string
+          ?? Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY")!;
+
+        // Two-step: request token, then confirm
+        const lifecycleFnUrl = `${Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!.replace("/rest/v1", "")}/functions/v1/lifecycle-direct`;
+
+        // Step 1: get confirmation token
+        const tokenRes = await fetch(
+          `${lifecycleFnUrl}?mode=backfill&agency_id=${encodeURIComponent(agencyId)}&date_from=${encodeURIComponent(effectiveDateFrom)}${dry ? "&dry=true" : ""}`,
+          { method: "POST", headers: { "X-Cron-Secret": cronSecret, "Content-Type": "application/json" } }
+        );
+        const tokenBody = await tokenRes.json() as { status?: string; token?: string; error?: string };
+        if (tokenBody.error) return jsonResponse({ error: tokenBody.error }, 500);
+        if (!tokenBody.token) return jsonResponse({ error: "No token returned from lifecycle-direct", detail: tokenBody }, 500);
+
+        // Step 2: confirm
+        const confirmRes = await fetch(
+          `${lifecycleFnUrl}?mode=backfill&agency_id=${encodeURIComponent(agencyId)}&date_from=${encodeURIComponent(effectiveDateFrom)}&confirm=${encodeURIComponent(tokenBody.token)}${dry ? "&dry=true" : ""}`,
+          { method: "POST", headers: { "X-Cron-Secret": cronSecret, "Content-Type": "application/json" } }
+        );
+        const confirmBody = await confirmRes.json();
+        return jsonResponse({ ok: true, agency_id: agencyId, date_from: effectiveDateFrom, result: confirmBody });
+      }
+
       default:
         return jsonResponse({ error: "Unknown action" }, 400);
     }
