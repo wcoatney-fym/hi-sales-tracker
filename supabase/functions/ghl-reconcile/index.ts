@@ -281,8 +281,10 @@ function buildContactBody(
 ): Record<string, unknown> {
   const str = (v: unknown) => (v == null || v === "") ? "" : String(v);
   const lob = lobFromPlanCode(row.plan_code);
-  const isTerminated = (row.cntrct_code ?? "").trim().toUpperCase() !== "A";
-  const clientStatus = isTerminated ? "Terminated" : "Active";
+  const cntrct = (row.cntrct_code ?? "").trim().toUpperCase();
+  const isTerminated = cntrct === "T";
+  // A = Approved (not Active), T = Terminated, P = Pending
+  const clientStatus = cntrct === "A" ? "Approved" : cntrct === "T" ? "Terminated" : cntrct === "P" ? "Pending" : cntrct;
   const atRiskStatus = row.at_risk_policy ? "Yes" : "No";
 
   const customFields: Array<{ id: string; value: string }> = [];
@@ -407,39 +409,43 @@ Deno.serve(async (req: Request) => {
       ? (body.testPolicyNumbers as string[]).filter((s) => typeof s === "string" && s.length > 0)
       : null;
 
-  // ── Resolve ga_name patterns for GHL-enabled agencies ─────────────────
-  // The tracker's agency_writing_numbers uses placeholder WNs (e.g. 202NGA00)
-  // that don't match the real agent-level WNs in Max's DB (202NGA63 etc).
-  // Scope by ga_name instead: pull the canonical ga_name for each enabled agency
-  // from the agencies table (stored as a config map keyed by agency id).
+  // ── Agency scope config ────────────────────────────────────────────
+  // Each GHL-enabled agency needs a scope strategy because Max's DB ga_name
+  // field is inconsistent:
+  //   - DH Insurance Group — ga_name = 'DH INSURANCE GROUP' (standard sub-agency)
+  //   - FYM — ga_name is BLANK (FYM is the GA itself; UNL leaves it empty).
+  //     Scope FYM by wa prefix '202JVV%' instead.
   //
-  // ga_name values confirmed from Max's DB (exact, trimmed, ALLCAPS):
-  const GA_NAME_MAP: Record<string, string> = {
-    "04813b3b-4a2c-4c55-9f7d-3964d26533f3": "GUARDIAN BENEFITS INC", // FYM
-    "09b68b09-a9aa-40c0-9b6b-07b95079cf8b": "DH INSURANCE GROUP",    // Dh Insurance Group
+  // Confirmed from live DB inspection 2026-07-20.
+  interface AgencyScope {
+    name: string;
+    gaName?: string;      // exact ALLCAPS ga_name in Max's DB (for sub-agencies)
+    waPrefix?: string;    // wa LIKE prefix (for agencies that ARE the GA)
+  }
+  const AGENCY_SCOPE_MAP: Record<string, AgencyScope> = {
+    "04813b3b-4a2c-4c55-9f7d-3964d26533f3": { name: "FYM",              waPrefix: "202JVV" },
+    "09b68b09-a9aa-40c0-9b6b-07b95079cf8b": { name: "Dh Insurance Group", gaName: "DH INSURANCE GROUP" },
   };
 
-  // Fetch enabled agencies and their ga_name patterns
+  // Fetch enabled agencies
   const { data: enabledAgencies } = await supabase
     .from("agencies")
     .select("id, name")
     .eq("ghl_api_enabled", true);
 
-  const gaNamePatterns: string[] = (enabledAgencies ?? [])
-    .map((a: { id: string; name: string }) => GA_NAME_MAP[a.id])
-    .filter(Boolean) as string[];
+  const enabledScopes: AgencyScope[] = (enabledAgencies ?? [])
+    .map((a: { id: string }) => AGENCY_SCOPE_MAP[a.id])
+    .filter(Boolean) as AgencyScope[];
 
-  console.log(`[reconcile] GHL-enabled agencies: ${(enabledAgencies ?? []).map((a: { name: string }) => a.name).join(", ")}`);
-  console.log(`[reconcile] ga_name patterns in scope: ${gaNamePatterns.join(", ")}`);
+  console.log(`[reconcile] GHL-enabled agencies in scope: ${enabledScopes.map(s => s.name).join(", ")}`);
 
   const allPolicies = new Set<string>();
   if (testPolicyNumbers && testPolicyNumbers.length > 0) {
     testPolicyNumbers.forEach((p) => allPolicies.add(p));
-  } else if (gaNamePatterns.length === 0) {
-    return jsonResponse({ ok: true, message: "No GHL-enabled agencies with ga_name mappings found", processed: 0 });
+  } else if (enabledScopes.length === 0) {
+    return jsonResponse({ ok: true, message: "No GHL-enabled agencies with scope mappings found", processed: 0 });
   } else {
-    // Scope = all active+terminated policies for GHL-enabled agencies from Max's DB
-    // Pulled directly — no lifecycle_event_log dependency
+    // Scope = all A/T/P policies for each enabled agency from Max's DB directly
     const { default: pgScope } = await import("npm:postgres@3.4.5");
     const sqlScope = pgScope({
       host:            cleanHost(Deno.env.get("PROD_DB_HOST")!),
@@ -451,25 +457,40 @@ Deno.serve(async (req: Request) => {
       connect_timeout: 30, max: 1, idle_timeout: 20,
     });
     try {
-      // Optional date range filter — startDate / endDate applied to issue_date
       const startDate = typeof body.startDate === "string" ? body.startDate : null;
       const endDate   = typeof body.endDate   === "string" ? body.endDate   : null;
-      const params: string[] = [...gaNamePatterns];
-      let dateClause = "";
-      if (startDate) { params.push(startDate); dateClause += ` AND issue_date >= $${params.length}::date`; }
-      if (endDate)   { params.push(endDate);   dateClause += ` AND issue_date <= $${params.length}::date`; }
-      const placeholders = gaNamePatterns.map((_, i) => `$${i + 1}`).join(",");
       console.log(`[reconcile] date filter: startDate=${startDate ?? "none"} endDate=${endDate ?? "none"}`);
-      const scopeRows = await sqlScope.unsafe(`
-        SELECT DISTINCT TRIM(policy_nbr) AS policy_nbr
-        FROM typed.unl_fym_policy_latest_load
-        WHERE TRIM(ga_name) IN (${placeholders})
-          AND cntrct_code = ANY(ARRAY['A','T','P'])
-          AND policy_nbr IS NOT NULL
-          AND TRIM(policy_nbr) != ''
-          ${dateClause}
-      `, params) as { policy_nbr: string }[];
-      for (const r of scopeRows) allPolicies.add(r.policy_nbr);
+
+      for (const scope of enabledScopes) {
+        const params: unknown[] = [];
+        let whereClause: string;
+
+        if (scope.gaName) {
+          params.push(scope.gaName);
+          whereClause = `TRIM(ga_name) = $${params.length}`;
+        } else if (scope.waPrefix) {
+          params.push(scope.waPrefix + "%");
+          whereClause = `TRIM(wa) LIKE $${params.length}`;
+        } else {
+          console.warn(`[reconcile] no scope strategy for agency ${scope.name} — skipping`);
+          continue;
+        }
+
+        if (startDate) { params.push(startDate); whereClause += ` AND issue_date >= $${params.length}::date`; }
+        if (endDate)   { params.push(endDate);   whereClause += ` AND issue_date <= $${params.length}::date`; }
+
+        const scopeRows = await sqlScope.unsafe(`
+          SELECT DISTINCT TRIM(policy_nbr) AS policy_nbr
+          FROM typed.unl_fym_policy_latest_load
+          WHERE ${whereClause}
+            AND cntrct_code = ANY(ARRAY['A','T','P'])
+            AND policy_nbr IS NOT NULL
+            AND TRIM(policy_nbr) != ''
+        `, params) as { policy_nbr: string }[];
+
+        console.log(`[reconcile] ${scope.name}: ${scopeRows.length} policies in scope`);
+        for (const r of scopeRows) allPolicies.add(r.policy_nbr);
+      }
     } finally {
       try { await sqlScope.end(); } catch { /* ignore */ }
     }
