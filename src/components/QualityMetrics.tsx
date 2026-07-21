@@ -94,6 +94,15 @@ function PersistencyGauge({ value }: { value: number | null }) {
 // effective). Persistency = of policies that went active in a month, the share
 // still active today. The gauge surfaces the *current 90-day* number (the
 // 3-months-ago cohort: policies old enough to have had their 3rd draw).
+interface CarrierBreakdownRow {
+  carrier: string;
+  total_policies: number;
+  seasoned: number;
+  drafted_first: number;
+  retained: number;
+  retention_pct: number | null;
+}
+
 export default function QualityMetrics({
   agencyId = null,
   agencyName = null,
@@ -106,6 +115,8 @@ export default function QualityMetrics({
   const [retention, setRetention] = useState<Retention90d | null>(null);
   const [placement, setPlacement] = useState<PlacementRow[]>([]);
   const [persistency, setPersistency] = useState<PersistencyRow[]>([]);
+  const [carrierBreakdown, setCarrierBreakdown] = useState<CarrierBreakdownRow[]>([]);
+  const [carrierFilter, setCarrierFilter] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -114,11 +125,12 @@ export default function QualityMetrics({
       try {
         // Option A: computed live on Max's production DB (single source of truth).
         // Scoped by writing number server-side (agencyId | agencyName | agencyNames).
-        const data = await getQualityMetricsDirect(agencyId, agencyName, agencyNames);
+        const data = await getQualityMetricsDirect(agencyId, agencyName, agencyNames, carrierFilter);
         if (cancelled) return;
         setRetention((data.retention_90d as Retention90d) || null);
         setPlacement((data.placement as PlacementRow[]) || []);
         setPersistency((data.persistency as PersistencyRow[]) || []);
+        setCarrierBreakdown((data.carrier_breakdown as CarrierBreakdownRow[]) || []);
         setLoaded(true);
       } catch {
         if (!cancelled) setLoaded(false);
@@ -127,7 +139,7 @@ export default function QualityMetrics({
     return () => {
       cancelled = true;
     };
-  }, [agencyId, agencyName, agencyNames]);
+  }, [agencyId, agencyName, agencyNames, carrierFilter]);
 
   if (!loaded || (!retention && placement.length === 0 && persistency.every((p) => !p.went_active))) return null;
 
@@ -142,13 +154,73 @@ export default function QualityMetrics({
 
   return (
     <div className="bg-navy rounded-xl border border-slate-700/50 p-5 mt-6">
-      <h3 className="text-sm font-semibold text-white mb-1">Book Quality</h3>
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-sm font-semibold text-white">Book Quality</h3>
+        {/* Carrier filter — only show when there are multiple carriers */}
+        {carrierBreakdown.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCarrierFilter(null)}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                carrierFilter === null
+                  ? "bg-blue-600 text-white"
+                  : "bg-slate-800 text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              All Carriers
+            </button>
+            {carrierBreakdown.map((cb) => (
+              <button
+                key={cb.carrier}
+                onClick={() => setCarrierFilter(cb.carrier)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                  carrierFilter === cb.carrier
+                    ? "bg-blue-600 text-white"
+                    : "bg-slate-800 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {cb.carrier}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <p className="text-xs text-slate-400 mb-4">
         90-day retention (north-star): of policies that drafted a 1st premium, the share that also
         retained through the 3rd draft (a single successful draft on non-monthly billing counts as
         retained). Placement: of apps that have reached their effective date, the share that drafted
         their first premium. Live from production.
       </p>
+      {/* Carrier breakdown mini-cards — show when combined view and multiple carriers */}
+      {!carrierFilter && carrierBreakdown.length > 1 && (
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          {carrierBreakdown.map((cb) => (
+            <div
+              key={cb.carrier}
+              className="rounded-lg bg-slate-800/50 border border-slate-700/50 p-3 cursor-pointer hover:border-blue-500/50 transition-colors"
+              onClick={() => setCarrierFilter(cb.carrier)}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-semibold text-white">{cb.carrier}</span>
+                <span className="text-[10px] text-slate-500">{cb.total_policies} policies</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <div>
+                  <div className="text-lg font-bold" style={{ color: bandColor(cb.retention_pct) }}>
+                    {cb.retention_pct !== null ? `${cb.retention_pct}%` : "—"}
+                  </div>
+                  <div className="text-[10px] text-slate-500">90d retention</div>
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  {cb.seasoned > 0
+                    ? `${cb.retained}/${cb.drafted_first} retained`
+                    : "No seasoned policies"}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <div className="flex flex-col">
           <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">90-Day Retention</h4>

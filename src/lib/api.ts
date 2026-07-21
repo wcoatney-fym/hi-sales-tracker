@@ -1479,6 +1479,7 @@ export async function getQualityMetricsDirect(
   agencyId?: string | null,
   agencyName?: string | null,
   agencyNames?: string[] | null,
+  carrier?: string | null,
 ) {
   // Same session-token sourcing as getQualityMetrics; the function authorizes it.
   const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
@@ -1486,6 +1487,7 @@ export async function getQualityMetricsDirect(
     p_agency_id: agencyId ?? null,
     p_agency_name: agencyName ?? null,
     p_agency_names: agencyNames && agencyNames.length ? agencyNames : null,
+    p_carrier: carrier ?? null,
     token,
   });
 }
