@@ -384,6 +384,7 @@ Deno.serve(async (req: Request) => {
   } catch { /* ignore */ }
 
   if (backfillMode) {
+    try { // top-level backfill try/catch — surfaces crash as JSON instead of raw 500
     if (!backfillAgencyId || !backfillDateFrom) {
       return new Response(
         JSON.stringify({ error: "backfill requires agency_id and date_from params" }),
@@ -486,6 +487,8 @@ Deno.serve(async (req: Request) => {
       } else {
         // Use the full current-state row for each policy; trigger is always 'submission'
         // for a backfill (seeding GHL from scratch, not diff-based).
+        // backfillDateFrom is YYYY-MM-DD validated from URL param — safe to inline
+        const safeDateFrom = backfillDateFrom.replace(/[^0-9\-]/g, "");
         bfRows = await sqlBf.unsafe(`
           SELECT
             TRIM(t.policy_nbr)          AS policy_nbr,
@@ -506,12 +509,8 @@ Deno.serve(async (req: Request) => {
           FROM typed.unl_fym_policy_latest_load t
           WHERE ${PLAN_FILTER}
             AND TRIM(UPPER(t.wa)) = ANY(${ agencyWns.map((_, i) => `$${i + 1}`).join(",") })
-            AND t.app_recvd_date >= ${ agencyWns.length + 1 }::date
-            AND NOT EXISTS (
-              SELECT 1 FROM generate_series(1,1)
-              -- fired_triggers gate applied in app code below (cross-DB)
-            )
-        `, [...agencyWns, backfillDateFrom]) as ProdRow[];
+            AND t.app_recvd_date >= '${safeDateFrom}'::date
+        `, agencyWns) as ProdRow[];
         console.log(`[lifecycle-direct:backfill] Max query returned ${bfRows.length} rows for agency ${agencyName}`);
       }
     } finally {
@@ -656,6 +655,14 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({ ok: true, mode: "backfill", agency: agencyName, total: bfRows.length, fired: bfFired, failed: bfFailed, held: bfHeld, dry }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
+    } catch (bfErr) {
+      const msg = bfErr instanceof Error ? bfErr.message : String(bfErr);
+      console.error("[lifecycle-direct:backfill] CRASH:", msg);
+      return new Response(
+        JSON.stringify({ error: "backfill crashed", detail: msg }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
   }
   // ── END BACKFILL MODE ─────────────────────────────────────────────────────
 
