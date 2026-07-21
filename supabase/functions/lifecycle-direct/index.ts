@@ -316,8 +316,10 @@ Deno.serve(async (req: Request) => {
 
   // Confirmation gate: ALL manual live fires require a confirmation token.
   // Only the pg_cron scheduled run (authenticated via X-Cron-Key) is exempt.
-  // This applies to both single_policy and full-batch manual invocations.
-  const isManualLiveFire = !dry && !isScheduledCron;
+  // Backfill mode is also exempt — it authenticates via X-Cron-Secret and is
+  // scoped by agency_id + date_from, so no separate token round-trip is needed.
+  const isBackfillRequest = (() => { try { return new URL(req.url).searchParams.get("mode") === "backfill"; } catch { return false; } })();
+  const isManualLiveFire = !dry && !isScheduledCron && !isBackfillRequest;
   if (isManualLiveFire) {
     if (!confirmToken) {
       // Generate a 6-char token, store in Supabase with 5-min TTL, return awaiting state
