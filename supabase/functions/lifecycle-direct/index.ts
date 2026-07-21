@@ -207,7 +207,15 @@ function agencyFromHierarchy(hierarchy: HierarchyNode[] | null): string {
   return titleCase(depth2[0].name ?? "");
 }
 
+// isDryRun checks the query param first (?dry=true), falls back to env var.
+// The query param is the primary control surface for both backfill and cron paths.
+let _dryFromUrl: boolean | null = null;
+function setDryFromUrl(url: URL): void {
+  const p = url.searchParams.get("dry");
+  _dryFromUrl = p === "true" || p === "1";
+}
 function isDryRun(): boolean {
+  if (_dryFromUrl !== null) return _dryFromUrl;
   try { return (Deno.env.get("LIFECYCLE_DRY_RUN") ?? "").toLowerCase() === "true"; } catch { return false; }
 }
 
@@ -257,6 +265,10 @@ Deno.serve(async (req: Request) => {
   // config, never in manual requests). Presence of a valid X-Cron-Key marks
   // the invocation as scheduled-cron, which exempts it from the confirmation
   // token gate below. Manual invocations (no X-Cron-Key) are never exempt.
+  // Parse URL once for dry-run query param and other params
+  const reqUrl = new URL(req.url);
+  setDryFromUrl(reqUrl);
+
   const cronSecret = req.headers.get("X-Cron-Secret") ?? "";
   const cronKey    = req.headers.get("X-Cron-Key")    ?? "";
   const expectedCronKey = Deno.env.get("LIFECYCLE_CRON_KEY") ?? "";
@@ -628,33 +640,27 @@ Deno.serve(async (req: Request) => {
       bfAudit.push({ policy_number: pn, trigger: "submission", ok: result.ok, dry_run: false, error: result.error, http_status: result.http_status, agency_id: backfillAgencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
       if (result.ok) {
         bfFired++;
-        bfFiredInserts.push({ policy_nbr: pn, trigger_type: "submission", changed_on: changedOnIso });
         bfFiredSet.add(bfKey);
+        // Write fired_triggers incrementally so progress is saved if the function
+        // hits the 60-second wall clock timeout. Next run picks up where we left off.
+        try {
+          await supabase
+            .from("fired_triggers")
+            .upsert([{ policy_nbr: pn, trigger_type: "submission", changed_on: changedOnIso }], { onConflict: "policy_nbr,trigger_type,changed_on", ignoreDuplicates: true });
+        } catch (e) { console.error(`[lifecycle-direct:backfill] fired_triggers write error for ${pn}:`, e); }
       } else {
         bfFailed++;
       }
       console.log(`[lifecycle-direct:backfill] ${pn} ok=${result.ok} http=${result.http_status}`);
     }
 
-    // Persist fired_triggers + audit
-    if (!dry) {
-      if (bfFiredInserts.length > 0) {
-        try {
-          for (let i = 0; i < bfFiredInserts.length; i += 500) {
-            const { error: ftErr } = await supabase
-              .from("fired_triggers")
-              .upsert(bfFiredInserts.slice(i, i + 500), { onConflict: "policy_nbr,trigger_type,changed_on", ignoreDuplicates: true });
-            if (ftErr) console.error(`[lifecycle-direct:backfill] fired_triggers write failed: ${ftErr.message}`);
-          }
-        } catch (e) { console.error("[lifecycle-direct:backfill] fired_triggers write error (non-fatal):", e); }
-      }
-      if (bfAudit.length > 0) {
-        try {
-          for (let i = 0; i < bfAudit.length; i += 500) {
-            await supabase.from("lifecycle_event_log").insert(bfAudit.slice(i, i + 500));
-          }
-        } catch (e) { console.error("[lifecycle-direct:backfill] audit write failed:", e); }
-      }
+    // Persist audit log in bulk (best-effort — fired_triggers already saved incrementally)
+    if (!dry && bfAudit.length > 0) {
+      try {
+        for (let i = 0; i < bfAudit.length; i += 500) {
+          await supabase.from("lifecycle_event_log").insert(bfAudit.slice(i, i + 500));
+        }
+      } catch (e) { console.error("[lifecycle-direct:backfill] audit write failed:", e); }
     }
 
     return new Response(
