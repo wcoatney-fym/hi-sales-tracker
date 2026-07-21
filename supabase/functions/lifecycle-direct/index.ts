@@ -277,12 +277,13 @@ Deno.serve(async (req: Request) => {
   // Called before every return so cron_auth is recorded even when the
   // confirmation gate fires or an error short-circuits the main loop.
   // Best-effort — failure must not affect the caller's response.
-  async function writeCronRun(opts: { fired?: number; skipped?: number }) {
+  async function writeCronRun(opts: { fired?: number; skipped?: number; held?: number }) {
     supabase.from("lifecycle_cron_runs").insert({
       cron_auth:  isScheduledCron,
       dry,
       fired:      opts.fired   ?? 0,
       skipped:    opts.skipped ?? 0,
+      held:       opts.held    ?? 0,
       deploy_sha: deployedSha,
     }).then(
       () => { /* best-effort */ },
@@ -357,7 +358,7 @@ Deno.serve(async (req: Request) => {
 
   // ── BACKFILL MODE ─────────────────────────────────────────────────────────
   // Triggered by ?mode=backfill&agency_id=<uuid>&date_from=<YYYY-MM-DD>
-  // Reads directly from form_submissions (Supabase), bypasses delta, fires all
+  // Reads directly from Max's DB (typed.unl_fym_policy_latest_load), bypasses delta, fires all
   // matching contacts to GHL as "submission" events. No state upsert so the
   // next normal cron run still works cleanly.
   let backfillMode = false;
@@ -898,6 +899,10 @@ Deno.serve(async (req: Request) => {
     }
 
     // Resolve NPN.
+    // NPN is NOT in Max's DB — it lives exclusively in agency_rosters (primary) and agents (fallback).
+    // Input: wa from Max's DB (the agent's UNL writing number), normalized UPPER-trim.
+    // Lookup: npnByWritingNumber map built from agents.unl_writing_number + agency_rosters.writing_number.
+    // No NPN = hold. No hierarchy walk — wrong source.
     const npn = npnByWritingNumber.get(agent.writingNumber) ?? "";
     const resolvedWn = agent.writingNumber;
     const rosterName = nameByWritingNumber.get(resolvedWn);
@@ -1037,7 +1042,7 @@ Deno.serve(async (req: Request) => {
     console.log(`[lifecycle-direct] dry-run: would hold ${npnHoldRows.length} rows (npn_holds not written)`);
   }
 
-  await writeCronRun({ fired, skipped });
+  await writeCronRun({ fired, skipped, held });
   return new Response(
     JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },

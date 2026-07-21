@@ -37,3 +37,13 @@ verify_jwt = false
 # sql-import-cron). No user JWT supplied by pg_cron.
 [functions.lifecycle-direct]
 verify_jwt = false
+
+# npn-resolution: cron-triggered, authenticates via x-cron-auth header.
+# No user JWT supplied by pg_cron.
+[functions.npn-resolution]
+verify_jwt = false
+
+# proposed-fires-push: cron-triggered, authenticates via x-cron-auth header.
+# No user JWT supplied by pg_cron.
+[functions.proposed-fires-push]
+verify_jwt = false
