@@ -676,30 +676,49 @@ Deno.serve(async (req: Request) => {
   const npnByWritingNumber  = new Map<string, string>();
   const nameByWritingNumber = new Map<string, { first: string; full: string }>();
 
-  const { data: agentsList } = await supabase
-    .from("agents")
-    .select("unl_writing_number, npn")
-    .range(0, 9999);
-  for (const a of agentsList ?? []) {
-    const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
-    if (wn && a.npn) npnByWritingNumber.set(wn, a.npn as string);
+  // Paginate agents: table has 1,600+ rows; JS client caps at 1,000 with no error.
+  {
+    const PAGE = 1000;
+    let off = 0;
+    while (true) {
+      const { data: agentPage } = await supabase
+        .from("agents")
+        .select("unl_writing_number, npn")
+        .range(off, off + PAGE - 1);
+      for (const a of agentPage ?? []) {
+        const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
+        if (wn && a.npn) npnByWritingNumber.set(wn, a.npn as string);
+      }
+      if (!agentPage || agentPage.length < PAGE) break;
+      off += PAGE;
+    }
   }
 
-  const { data: rosterList } = await supabase
-    .from("agency_rosters")
-    .select("writing_number, npn, agent_first_name, agent_last_name")
-    .eq("status", "active")
-    .not("npn", "is", null)
-    .neq("npn", "");
-  for (const r of rosterList ?? []) {
-    const wn = (r.writing_number as string ?? "").trim().toUpperCase();
-    if (wn && r.npn && !npnByWritingNumber.has(wn)) {
-      npnByWritingNumber.set(wn, r.npn as string);
-    }
-    if (wn && (r.agent_first_name || r.agent_last_name)) {
-      const first = titleCase(String(r.agent_first_name ?? ""));
-      const last  = titleCase(String(r.agent_last_name  ?? ""));
-      nameByWritingNumber.set(wn, { first, full: `${first} ${last}`.trim() });
+  // Paginate agency_rosters: may also exceed 1K rows.
+  {
+    const PAGE = 1000;
+    let off = 0;
+    while (true) {
+      const { data: rosterPage } = await supabase
+        .from("agency_rosters")
+        .select("writing_number, npn, agent_first_name, agent_last_name")
+        .eq("status", "active")
+        .not("npn", "is", null)
+        .neq("npn", "")
+        .range(off, off + PAGE - 1);
+      for (const r of rosterPage ?? []) {
+        const wn = (r.writing_number as string ?? "").trim().toUpperCase();
+        if (wn && r.npn && !npnByWritingNumber.has(wn)) {
+          npnByWritingNumber.set(wn, r.npn as string);
+        }
+        if (wn && (r.agent_first_name || r.agent_last_name)) {
+          const first = titleCase(String(r.agent_first_name ?? ""));
+          const last  = titleCase(String(r.agent_last_name  ?? ""));
+          nameByWritingNumber.set(wn, { first, full: `${first} ${last}`.trim() });
+        }
+      }
+      if (!rosterPage || rosterPage.length < PAGE) break;
+      off += PAGE;
     }
   }
 
