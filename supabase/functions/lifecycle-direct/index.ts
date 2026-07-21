@@ -234,12 +234,13 @@ interface ProdRow {
 // ── Main handler ──────────────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
   // Auth: cron secret header (same mechanism as sql-import-cron).
-  // Legacy service_role key disabled 2026-06-16. Use new-format secret key.
+  // Legacy service_role/anon keys disabled 2026-06-16. Use publishable key for
+  // Supabase client (reads + RLS-scoped writes like lifecycle_confirm_tokens).
   // SUPABASE_URL + SB_SECRET_KEY dropped in 7/17 redeploy — use namespaced vars.
   const supabaseUrl  = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ??
                        Deno.env.get("SUPABASE_URL") ?? "";
-  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY") ??
-                       Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ??
+  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY") ??
+                       Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY") ??
                        Deno.env.get("SB_SECRET_KEY") ?? "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
   console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_SUNFIRE")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
