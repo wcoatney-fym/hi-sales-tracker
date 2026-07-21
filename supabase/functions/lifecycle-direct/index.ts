@@ -277,12 +277,13 @@ Deno.serve(async (req: Request) => {
   // Called before every return so cron_auth is recorded even when the
   // confirmation gate fires or an error short-circuits the main loop.
   // Best-effort — failure must not affect the caller's response.
-  async function writeCronRun(opts: { fired?: number; skipped?: number }) {
+  async function writeCronRun(opts: { fired?: number; skipped?: number; held?: number }) {
     supabase.from("lifecycle_cron_runs").insert({
       cron_auth:  isScheduledCron,
       dry,
       fired:      opts.fired   ?? 0,
       skipped:    opts.skipped ?? 0,
+      held:       opts.held    ?? 0,
       deploy_sha: deployedSha,
     }).then(
       () => { /* best-effort */ },
@@ -1056,7 +1057,7 @@ Deno.serve(async (req: Request) => {
     console.log(`[lifecycle-direct] dry-run: would hold ${npnHoldRows.length} rows (npn_holds not written)`);
   }
 
-  await writeCronRun({ fired, skipped });
+  await writeCronRun({ fired, skipped, held });
   return new Response(
     JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
