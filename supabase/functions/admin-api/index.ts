@@ -4748,7 +4748,7 @@ Deno.serve(async (req: Request) => {
         if (allWns.length > 0) {
           await sql.unsafe("SET statement_timeout = '60s'");
           triggerCounts = await sql.unsafe(`
-            SELECT TRIM(UPPER(t.wa)) AS wa, trigger_type, COUNT(*)::int AS total
+            SELECT TRIM(UPPER(triggers.wa)) AS wa, trigger_type, COUNT(*)::int AS total
             FROM (
               SELECT t.wa,
                 CASE
