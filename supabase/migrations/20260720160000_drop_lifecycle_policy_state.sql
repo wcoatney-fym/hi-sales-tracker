@@ -10,5 +10,4 @@
 
 DROP TABLE IF EXISTS public.lifecycle_policy_state CASCADE;
 DROP FUNCTION IF EXISTS set_lifecycle_policy_state_updated_at() CASCADE;
-
-COMMENT ON TABLE public.lifecycle_policy_state IS NULL; -- cleaned up in drop
+-- COMMENT ON TABLE omitted: table no longer exists after DROP above
