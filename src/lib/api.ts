@@ -1489,3 +1489,35 @@ export async function getQualityMetricsDirect(
     token,
   });
 }
+
+// ── GHL Backfill ──────────────────────────────────────────────────────────────
+export interface GhlAgencyBackfillInfo {
+  id: string;
+  name: string;
+  slug: string;
+  ghl_api_enabled: boolean;
+  writing_numbers: string[];
+  roster_total: number;
+  npn_covered: number;
+  counts: { approved: number; terminated: number; submission: number; at_risk: number };
+  total_unfired: number;
+  last_run: { fired: number; held: number; ran_at: string } | null;
+}
+
+export async function adminGetGhlAgencies(token: string): Promise<{ agencies: GhlAgencyBackfillInfo[] }> {
+  return callApi("admin-api", { action: "get-ghl-agencies", token }) as Promise<{ agencies: GhlAgencyBackfillInfo[] }>;
+}
+
+export async function adminRunGhlBackfill(
+  token: string,
+  agencyId: string,
+  opts?: { dateFrom?: string; dry?: boolean }
+): Promise<{ ok: boolean; agency_id: string; date_from: string; result: Record<string, unknown> }> {
+  return callApi("admin-api", {
+    action: "run-ghl-backfill",
+    token,
+    agencyId,
+    dateFrom: opts?.dateFrom,
+    dry: opts?.dry ?? false,
+  }) as Promise<{ ok: boolean; agency_id: string; date_from: string; result: Record<string, unknown> }>;
+}

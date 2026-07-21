@@ -14,6 +14,7 @@ import {
   Contact,
   ClipboardList,
   ShieldCheck,
+  Zap,
 } from "lucide-react";
 import AgentsTable from "../admin/AgentsTable";
 import DataSourcesPanel from "../admin/DataSourcesPanel";
@@ -29,13 +30,14 @@ import AgencyCredentialsPanel from "../admin/AgencyCredentialsPanel";
 import AgencyManagersPanel from "../admin/AgencyManagersPanel";
 import LeadVendorsPanel from "../admin/LeadVendorsPanel";
 import LeadSubmissionsPanel from "../admin/LeadSubmissionsPanel";
+import GhlBackfillPanel from "../admin/GhlBackfillPanel";
 import {
   adminGetRosterStatus,
   adminGetRosterUploads,
 } from "../../lib/api";
 import type { RosterStatus, RosterUpload } from "../../types";
 
-type SettingsSection = "agents" | "sources" | "rosters" | "promotions" | "tokens" | "unassigned" | "fuzzy" | "audit" | "intake" | "credentials" | "managers" | "lead-vendors" | "lead-submissions";
+type SettingsSection = "agents" | "sources" | "rosters" | "promotions" | "tokens" | "unassigned" | "fuzzy" | "audit" | "intake" | "credentials" | "managers" | "lead-vendors" | "lead-submissions" | "ghl-backfill";
 
 const SECTIONS: { key: SettingsSection; label: string; icon: React.ElementType; description: string }[] = [
   { key: "agents", label: "Agent Directory", icon: Users, description: "Manage agents, fix names, sync rosters" },
@@ -51,6 +53,7 @@ const SECTIONS: { key: SettingsSection; label: string; icon: React.ElementType; 
   { key: "lead-submissions", label: "Lead Submissions", icon: ClipboardList, description: "View submitted client leads from agents" },
   { key: "credentials", label: "Agency Access", icon: KeyRound, description: "View and manage agency portal login credentials" },
   { key: "managers", label: "Agency Managers", icon: ShieldCheck, description: "Per-person manager logins, password log, promote/add managers" },
+  { key: "ghl-backfill", label: "GHL Backfill", icon: Zap, description: "Push lifecycle triggers to GHL for enabled agencies" },
 ];
 
 interface SettingsPanelProps {
@@ -149,6 +152,7 @@ export default function SettingsPanel({ token }: SettingsPanelProps) {
       {activeSection === "lead-submissions" && <LeadSubmissionsPanel token={token} />}
       {activeSection === "credentials" && <AgencyCredentialsPanel token={token} />}
       {activeSection === "managers" && <AgencyManagersPanel token={token} />}
+      {activeSection === "ghl-backfill" && <GhlBackfillPanel token={token} />}
     </div>
   );
 }
