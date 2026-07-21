@@ -489,6 +489,9 @@ Deno.serve(async (req: Request) => {
         // for a backfill (seeding GHL from scratch, not diff-based).
         // backfillDateFrom is YYYY-MM-DD validated from URL param — safe to inline
         const safeDateFrom = backfillDateFrom.replace(/[^0-9\-]/g, "");
+        // Pass agencyWns as a Postgres array ($1) and inline the date literal.
+        // Using .unsafe() with a single array param avoids the individual-scalar
+        // binding approach that previously generated malformed ANY() calls.
         bfRows = await sqlBf.unsafe(`
           SELECT
             TRIM(t.policy_nbr)          AS policy_nbr,
@@ -508,9 +511,9 @@ Deno.serve(async (req: Request) => {
             TRIM(t.wa_name)             AS wa_name
           FROM typed.unl_fym_policy_latest_load t
           WHERE ${PLAN_FILTER}
-            AND TRIM(UPPER(t.wa)) = ANY(${ agencyWns.map((_, i) => `$${i + 1}`).join(",") })
+            AND TRIM(UPPER(t.wa)) = ANY($1)
             AND t.app_recvd_date >= '${safeDateFrom}'::date
-        `, agencyWns) as ProdRow[];
+        `, [agencyWns]) as ProdRow[];
         console.log(`[lifecycle-direct:backfill] Max query returned ${bfRows.length} rows for agency ${agencyName}`);
       }
     } finally {
