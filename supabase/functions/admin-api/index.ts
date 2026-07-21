@@ -4652,12 +4652,13 @@ Deno.serve(async (req: Request) => {
       case "get-ghl-agencies": {
         if (session.role !== "global_admin") return jsonResponse({ error: "Forbidden" }, 403);
 
+        // Use publishable key — service_role key was disabled 2026-06-16
         const trackerClient = createClient(
           Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
-          Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY")!
+          Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY")!
         );
 
-        // 1. Load all GHL-enabled agencies + their writing numbers from tracker DB
+        // 1. Load all GHL-enabled agencies from tracker DB
         const { data: agencyRows } = await trackerClient
           .from("agencies")
           .select("id, name, slug, ghl_api_enabled");
@@ -4667,34 +4668,38 @@ Deno.serve(async (req: Request) => {
 
         const agencyIds = enabledAgencies.map((a: Record<string, unknown>) => a.id as string);
 
-        const { data: wnRows } = await trackerClient
-          .from("agency_writing_numbers")
-          .select("agency_id, writing_number")
-          .in("agency_id", agencyIds);
+        // 2. Load per-agent writing numbers from agency_rosters (not agency_writing_numbers which only has root codes)
+        const { data: rosterWnRows } = await trackerClient
+          .from("agency_rosters")
+          .select("agency_id, writing_number, npn")
+          .in("agency_id", agencyIds)
+          .eq("status", "active");
 
         const wnByAgency = new Map<string, string[]>();
-        for (const r of wnRows ?? []) {
-          const list = wnByAgency.get(r.agency_id as string) ?? [];
-          list.push((r.writing_number as string).trim().toUpperCase());
-          wnByAgency.set(r.agency_id as string, list);
+        const npnByWn = new Map<string, string>();
+        const rosterCountByAgency = new Map<string, number>();
+        const npnCountByAgency = new Map<string, number>();
+        for (const r of rosterWnRows ?? []) {
+          const agId = r.agency_id as string;
+          const wn = (r.writing_number as string ?? "").trim().toUpperCase();
+          if (!wn) continue;
+          const list = wnByAgency.get(agId) ?? [];
+          list.push(wn);
+          wnByAgency.set(agId, list);
+          rosterCountByAgency.set(agId, (rosterCountByAgency.get(agId) ?? 0) + 1);
+          if (r.npn) {
+            npnByWn.set(wn, r.npn as string);
+            npnCountByAgency.set(agId, (npnCountByAgency.get(agId) ?? 0) + 1);
+          }
         }
 
-        // 2. Load NPN coverage from tracker DB (agents + agency_rosters)
+        // Also check agents table for NPN coverage (some agents only there)
         const { data: agentRows } = await trackerClient
           .from("agents")
           .select("unl_writing_number, npn");
-        const npnByWn = new Map<string, string>();
         for (const a of agentRows ?? []) {
           const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
-          if (wn && a.npn) npnByWn.set(wn, a.npn as string);
-        }
-        const { data: rosterRows } = await trackerClient
-          .from("agency_rosters")
-          .select("writing_number, npn")
-          .eq("status", "active");
-        for (const r of rosterRows ?? []) {
-          const wn = (r.writing_number as string ?? "").trim().toUpperCase();
-          if (wn && r.npn && !npnByWn.has(wn)) npnByWn.set(wn, r.npn as string);
+          if (wn && a.npn && !npnByWn.has(wn)) npnByWn.set(wn, a.npn as string);
         }
 
         // 3. Load last backfill run per agency from lifecycle_event_log
@@ -4766,10 +4771,10 @@ Deno.serve(async (req: Request) => {
                 AND t.at_risk_policy = true
                 AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
             ) triggers
-            WHERE TRIM(UPPER(wa)) = ANY(${ allWns.map((_: string, i: number) => `$${i + 1}`).join(",") })
-            GROUP BY TRIM(UPPER(t.wa)), trigger_type
+            WHERE TRIM(UPPER(wa)) = ANY($1)
+            GROUP BY TRIM(UPPER(wa)), trigger_type
             ORDER BY wa, trigger_type
-          `, allWns) as TriggerCount[];
+          `, [allWns]) as TriggerCount[];
         }
 
         // 5. Load already-fired set from fired_triggers (to subtract from counts)
@@ -4797,10 +4802,9 @@ Deno.serve(async (req: Request) => {
         }
 
         const result = enabledAgencies.map((agency: Record<string, unknown>) => {
-          const wns = wnByAgency.get(agency.id as string) ?? [];
+          const agId = agency.id as string;
+          const wns = wnByAgency.get(agId) ?? [];
           const counts = { approved: 0, terminated: 0, submission: 0, at_risk: 0 };
-          let rosterTotal = 0;
-          let npnCovered = 0;
           for (const wn of wns) {
             const c = countsByWn.get(wn);
             if (c) {
@@ -4809,10 +4813,15 @@ Deno.serve(async (req: Request) => {
               counts.submission += c.submission;
               counts.at_risk    += c.at_risk;
             }
-            rosterTotal++;
+          }
+          // Use roster-based counts (from agency_rosters query above)
+          const rosterTotal = rosterCountByAgency.get(agId) ?? 0;
+          // NPN covered = roster members who have an NPN in either agents or agency_rosters table
+          let npnCovered = 0;
+          for (const wn of wns) {
             if (npnByWn.has(wn)) npnCovered++;
           }
-          const lastRun = lastRunByAgency.get(agency.id as string) ?? null;
+          const lastRun = lastRunByAgency.get(agId) ?? null;
           return {
             id: agency.id,
             name: agency.name,
