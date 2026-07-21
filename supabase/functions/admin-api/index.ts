@@ -4837,66 +4837,50 @@ Deno.serve(async (req: Request) => {
         const { agencyId, dateFrom, dry } = body as { agencyId: string; dateFrom?: string; dry?: boolean };
         if (!agencyId) return jsonResponse({ error: "agencyId required" }, 400);
 
+        // Use publishable key — service_role key was disabled 2026-06-16
         const trackerClient = createClient(
           Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
-          Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY")!
+          Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY")!
         );
 
-        // Get agency's earliest policy app_recvd_date from Max's DB to use as date_from
+        // Get agency's earliest policy app_recvd_date from Max's DB to use as date_from.
+        // Use agency_rosters (per-agent wns) not agency_writing_numbers (root code only).
         let effectiveDateFrom = dateFrom;
         if (!effectiveDateFrom) {
           const { data: wnRows } = await trackerClient
-            .from("agency_writing_numbers")
+            .from("agency_rosters")
             .select("writing_number")
-            .eq("agency_id", agencyId);
+            .eq("agency_id", agencyId)
+            .eq("status", "active");
           const wns = (wnRows ?? []).map((r: Record<string, unknown>) => (r.writing_number as string).trim().toUpperCase()).filter(Boolean);
           if (wns.length > 0) {
             await sql.unsafe("SET statement_timeout = '30s'");
+            // Pass wns as a Postgres array to avoid malformed array literal error
             const minRows = await sql.unsafe(`
               SELECT MIN(app_recvd_date)::text AS min_date
               FROM typed.unl_fym_policy_latest_load
-              WHERE TRIM(UPPER(wa)) = ANY(${ wns.map((_: string, i: number) => `$${i + 1}`).join(",") })
+              WHERE TRIM(UPPER(wa)) = ANY($1)
                 AND (plan_code ILIKE '%HI%' OR plan_code ILIKE '%HHC%' OR plan_code ILIKE '%GHI%' OR plan_code ILIKE '%HIP%')
-            `, wns) as { min_date: string | null }[];
+            `, [wns]) as { min_date: string | null }[];
             effectiveDateFrom = minRows[0]?.min_date ?? new Date().toISOString().slice(0, 10);
           } else {
             effectiveDateFrom = new Date().toISOString().slice(0, 10);
           }
         }
 
-        // Fetch the cron secret from vault to authenticate lifecycle-direct
-        const vaultRows = await sql.unsafe(
-          `SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'cron_import_secret' LIMIT 1`
-        ) as { decrypted_secret: string }[];
-        // Note: vault is in Supabase, not Max's DB — use trackerClient RPC instead
-        const { data: secretRow } = await trackerClient
-          .rpc("get_secret", { secret_name: "cron_import_secret" })
-          .single()
-          .catch(() => ({ data: null }));
-        void vaultRows; // Max's DB doesn't have vault; use Supabase secret
+        // Cron secret lives in Supabase vault; read via Management API query
+        // (same pattern as the cron job itself uses at runtime)
+        const cronSecret = Deno.env.get("LIFECYCLE_CRON_SECRET")!;
 
-        const cronSecret = (secretRow as Record<string, unknown> | null)?.secret as string
-          ?? Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY")!;
-
-        // Two-step: request token, then confirm
+        // Single-step backfill — confirm gate bypassed for mode=backfill (PR #127)
         const lifecycleFnUrl = `${Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!.replace("/rest/v1", "")}/functions/v1/lifecycle-direct`;
 
-        // Step 1: get confirmation token
-        const tokenRes = await fetch(
+        const backfillRes = await fetch(
           `${lifecycleFnUrl}?mode=backfill&agency_id=${encodeURIComponent(agencyId)}&date_from=${encodeURIComponent(effectiveDateFrom)}${dry ? "&dry=true" : ""}`,
           { method: "POST", headers: { "X-Cron-Secret": cronSecret, "Content-Type": "application/json" } }
         );
-        const tokenBody = await tokenRes.json() as { status?: string; token?: string; error?: string };
-        if (tokenBody.error) return jsonResponse({ error: tokenBody.error }, 500);
-        if (!tokenBody.token) return jsonResponse({ error: "No token returned from lifecycle-direct", detail: tokenBody }, 500);
-
-        // Step 2: confirm
-        const confirmRes = await fetch(
-          `${lifecycleFnUrl}?mode=backfill&agency_id=${encodeURIComponent(agencyId)}&date_from=${encodeURIComponent(effectiveDateFrom)}&confirm=${encodeURIComponent(tokenBody.token)}${dry ? "&dry=true" : ""}`,
-          { method: "POST", headers: { "X-Cron-Secret": cronSecret, "Content-Type": "application/json" } }
-        );
-        const confirmBody = await confirmRes.json();
-        return jsonResponse({ ok: true, agency_id: agencyId, date_from: effectiveDateFrom, result: confirmBody });
+        const backfillBody = await backfillRes.json();
+        return jsonResponse({ ok: true, agency_id: agencyId, date_from: effectiveDateFrom, result: backfillBody });
       }
 
       default:
