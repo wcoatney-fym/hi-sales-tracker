@@ -4652,6 +4652,17 @@ Deno.serve(async (req: Request) => {
       case "get-ghl-agencies": {
         if (session.role !== "global_admin") return jsonResponse({ error: "Forbidden" }, 403);
 
+        // Initialize postgres client for Max's DB (trigger count queries)
+        const { default: pgGetAgencies } = await import("npm:postgres@3.4.5");
+        const sql = pgGetAgencies({
+          host: Deno.env.get("PROD_DB_HOST")!,
+          port: Number(Deno.env.get("PROD_DB_PORT") ?? 5432),
+          database: Deno.env.get("PROD_DB_NAME")!,
+          username: Deno.env.get("PROD_DB_USER")!,
+          password: Deno.env.get("PROD_DB_PASSWORD")!,
+          ssl: Deno.env.get("PROD_DB_SSLMODE") === "require" ? "require" : false,
+        });
+
         // Use publishable key — service_role key was disabled 2026-06-16
         const trackerClient = createClient(
           Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL")!,
@@ -4836,6 +4847,7 @@ Deno.serve(async (req: Request) => {
           };
         });
 
+        await sql.end();
         return jsonResponse({ agencies: result });
       }
 
@@ -4845,6 +4857,17 @@ Deno.serve(async (req: Request) => {
 
         const { agencyId, dateFrom, dry } = body as { agencyId: string; dateFrom?: string; dry?: boolean };
         if (!agencyId) return jsonResponse({ error: "agencyId required" }, 400);
+
+        // Initialize postgres client for Max's DB (auto date_from query)
+        const { default: pgBackfill } = await import("npm:postgres@3.4.5");
+        const sqlBackfill = pgBackfill({
+          host: Deno.env.get("PROD_DB_HOST")!,
+          port: Number(Deno.env.get("PROD_DB_PORT") ?? 5432),
+          database: Deno.env.get("PROD_DB_NAME")!,
+          username: Deno.env.get("PROD_DB_USER")!,
+          password: Deno.env.get("PROD_DB_PASSWORD")!,
+          ssl: Deno.env.get("PROD_DB_SSLMODE") === "require" ? "require" : false,
+        });
 
         // Use publishable key — service_role key was disabled 2026-06-16
         const trackerClient = createClient(
@@ -4863,9 +4886,9 @@ Deno.serve(async (req: Request) => {
             .eq("status", "active");
           const wns = (wnRows ?? []).map((r: Record<string, unknown>) => (r.writing_number as string).trim().toUpperCase()).filter(Boolean);
           if (wns.length > 0) {
-            await sql.unsafe("SET statement_timeout = '30s'");
+            await sqlBackfill.unsafe("SET statement_timeout = '30s'");
             // Pass wns as a Postgres array to avoid malformed array literal error
-            const minRows = await sql.unsafe(`
+            const minRows = await sqlBackfill.unsafe(`
               SELECT MIN(app_recvd_date)::text AS min_date
               FROM typed.unl_fym_policy_latest_load
               WHERE TRIM(UPPER(wa)) = ANY($1)
@@ -4889,6 +4912,7 @@ Deno.serve(async (req: Request) => {
           { method: "POST", headers: { "X-Cron-Secret": cronSecret, "Content-Type": "application/json" } }
         );
         const backfillBody = await backfillRes.json();
+        await sqlBackfill.end();
         return jsonResponse({ ok: true, agency_id: agencyId, date_from: effectiveDateFrom, result: backfillBody });
       }
 
