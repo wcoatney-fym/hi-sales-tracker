@@ -50,6 +50,11 @@ Deno.serve(async (req: Request) => {
       ? body.p_agency_names
       : null;
 
+    // Carrier filter: "UNL", "Heartland", or null/omitted for combined book.
+    const carrierFilter: string | null = body.p_carrier ?? null;
+    const includeUNL       = !carrierFilter || carrierFilter.toUpperCase() === "UNL";
+    const includeHeartland = !carrierFilter || carrierFilter.toUpperCase() === "HEARTLAND";
+
     // Auth: require a session token (admin | agent), same as the RPC path.
     const token: string = body.token || req.headers.get("X-Agent-Token") || "";
     if (!token) return jsonResponse({ error: "Authentication required" }, 401);
@@ -116,52 +121,82 @@ Deno.serve(async (req: Request) => {
       connect_timeout: 15,
     });
 
-    // Single round-trip: placement (last 3 complete months) + persistency
-    // (3/6/9/13-month cohorts) + 90-day retention, computed on Max's typed table
-    // with the column remap inline. targetWns null => whole book.
+    // Multi-carrier query: UNION ALL across UNL + Heartland (+ future carriers).
+    // Each carrier's columns are remapped to a common schema inline.
     //
-    // Membership key: a policy's owning agency = the shallowest sub-agency (depth-02)
-    // org node's writing_number; if none, the depth-01 (FYM) writing_number
-    // (= direct-to-FYM). This rolls downlines up into their depth-02 parent, matching
-    // how the tracker buckets. Compare that against the requested writing numbers.
+    // Membership key (UNL): owning agency = shallowest sub-agency (depth-02)
+    // org node's writing_number from roster_hierarchy_json; if none, depth-01
+    // (FYM) writing_number (= direct-to-FYM). Rolls downlines up.
+    //
+    // Membership key (Heartland): upline is a flat "NAME - CODE" text field.
+    // We parse the code and match against the same writing_number set.
+    // NOTE: Heartland upline is the immediate upline (agent-level), not the
+    // sub-agency. Until Max adds agency_id/roster_hierarchy, Heartland
+    // policies only appear in whole-book views, not per-agency. When
+    // targetWns is set, Heartland rows are included if their upline code
+    // matches (best-effort); full agency scoping requires Max's roster work.
     const targetWnsArr = targetWns; // string[] | null
+    // Carrier filter flags passed as SQL booleans so the UNION branches
+    // can be gated without dynamic SQL string building.
     const rows = await sql`
       WITH scoped AS (
+        -- UNL policies (gated by carrier filter)
         SELECT
           issue_date,
           app_recvd_date,
           paid_to_date,
           term_date,
-          billing_mode
+          billing_mode,
+          'UNL'::text AS carrier
         FROM typed.unl_fym_policy_latest_load
-        WHERE (
-          ${targetWnsArr}::text[] IS NULL
-          OR COALESCE(
-               (SELECT e->>'writing_number'
-                  FROM jsonb_array_elements(roster_hierarchy_json) e
-                  WHERE e->>'depth' = '02'
-                    AND COALESCE((e->>'is_person')::boolean, false) = false
-                  LIMIT 1),
-               (SELECT e->>'writing_number'
-                  FROM jsonb_array_elements(roster_hierarchy_json) e
-                  WHERE e->>'depth' = '01'
-                  LIMIT 1)
-             ) = ANY(${targetWnsArr}::text[])
-        )
+        WHERE ${includeUNL}::boolean
+          AND (
+            ${targetWnsArr}::text[] IS NULL
+            OR COALESCE(
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '02'
+                      AND COALESCE((e->>'is_person')::boolean, false) = false
+                    LIMIT 1),
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '01'
+                    LIMIT 1)
+               ) = ANY(${targetWnsArr}::text[])
+          )
+
+        UNION ALL
+
+        -- Heartland policies (gated by carrier filter)
+        SELECT
+          eff_date AS issue_date,
+          app_date AS app_recvd_date,
+          paid_to_date,
+          end_date AS term_date,
+          NULL::integer AS billing_mode,
+          'Heartland'::text AS carrier
+        FROM typed.heartland_inforced_policy_latest
+        WHERE ${includeHeartland}::boolean
+          AND hnl_status NOT IN ('Not Taken')
+          AND (
+            ${targetWnsArr}::text[] IS NULL
+            OR split_part(upline, ' - ', 2) = ANY(${targetWnsArr}::text[])
+          )
       )
       SELECT json_build_object(
         -- HEADLINE: 90-day retention (north-star). Of policies that drafted a 1st
         -- premium, the share that also retained through the 3rd draft. Billing-mode
-        -- rule: monthly (1) requires paid_to_date >= effective + 3 months; any
-        -- non-monthly single successful draft (3/6/12) already covers 90+ days.
+        -- rule: monthly (1 or NULL) requires paid_to_date >= effective + 3 months;
+        -- any non-monthly single successful draft (3/6/12) already covers 90+ days.
+        -- NULL billing_mode (e.g. Heartland) is treated as monthly.
         -- Only policies old enough to have run the gauntlet (issued >= 3 months ago).
         'retention_90d', (
           SELECT json_build_object(
             'drafted_first', count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'),
-            'retained', count(*) FILTER (WHERE (billing_mode = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                            OR (billing_mode <> 1 AND paid_to_date >= issue_date + interval '1 month')),
-            'retention_pct', round(100.0 * count(*) FILTER (WHERE (billing_mode = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                                              OR (billing_mode <> 1 AND paid_to_date >= issue_date + interval '1 month'))
+            'retained', count(*) FILTER (WHERE (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                            OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')),
+            'retention_pct', round(100.0 * count(*) FILTER (WHERE (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                                              OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month'))
               / nullif(count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'), 0), 1)
           )
           FROM scoped
@@ -203,8 +238,71 @@ Deno.serve(async (req: Request) => {
       ) AS result;
     `;
 
+    // Carrier breakdown: count + retention per carrier so the UI can
+    // show UNL vs Heartland (and future carriers) side-by-side.
+    const carrierRows = await sql`
+      WITH scoped AS (
+        SELECT issue_date, paid_to_date, billing_mode, 'UNL'::text AS carrier
+        FROM typed.unl_fym_policy_latest_load
+        WHERE ${includeUNL}::boolean
+          AND (
+            ${targetWnsArr}::text[] IS NULL
+            OR COALESCE(
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '02'
+                      AND COALESCE((e->>'is_person')::boolean, false) = false
+                    LIMIT 1),
+                 (SELECT e->>'writing_number'
+                    FROM jsonb_array_elements(roster_hierarchy_json) e
+                    WHERE e->>'depth' = '01'
+                    LIMIT 1)
+               ) = ANY(${targetWnsArr}::text[])
+          )
+        UNION ALL
+        SELECT eff_date AS issue_date, paid_to_date, NULL::integer AS billing_mode, 'Heartland'::text AS carrier
+        FROM typed.heartland_inforced_policy_latest
+        WHERE ${includeHeartland}::boolean
+          AND hnl_status NOT IN ('Not Taken')
+          AND (
+            ${targetWnsArr}::text[] IS NULL
+            OR split_part(upline, ' - ', 2) = ANY(${targetWnsArr}::text[])
+          )
+      )
+      SELECT carrier,
+             count(*) AS total_policies,
+             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months') AS seasoned,
+             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months'
+                               AND paid_to_date >= issue_date + interval '1 month') AS drafted_first,
+             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months'
+                               AND (
+                                 (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                 OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')
+                               )) AS retained
+      FROM scoped
+      GROUP BY carrier
+      ORDER BY carrier;
+    `;
+
+    const carrierBreakdown = carrierRows.map((r: Record<string, unknown>) => ({
+      carrier: r.carrier,
+      total_policies: Number(r.total_policies),
+      seasoned: Number(r.seasoned),
+      drafted_first: Number(r.drafted_first),
+      retained: Number(r.retained),
+      retention_pct: Number(r.drafted_first) > 0
+        ? Math.round(1000 * Number(r.retained) / Number(r.drafted_first)) / 10
+        : null,
+    }));
+
     const elapsedMs = Math.round(performance.now() - started);
-    return jsonResponse({ ...rows[0].result, _elapsed_ms: elapsedMs, _source: "prod_direct" });
+    return jsonResponse({
+      ...rows[0].result,
+      carrier_breakdown: carrierBreakdown,
+      _carrier_filter: carrierFilter,
+      _elapsed_ms: elapsedMs,
+      _source: "prod_direct_multi_carrier",
+    });
   } catch (err) {
     return jsonResponse({ error: String(err), _elapsed_ms: Math.round(performance.now() - started) }, 500);
   } finally {
