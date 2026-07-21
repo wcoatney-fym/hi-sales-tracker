@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import postgres from "npm:postgres@3.4.5";
 import { buildAgencyMap, resolveAgencyName, titleCase } from "../_shared/agency-map.ts";
 import {
   contractReasonLabel,
@@ -454,8 +455,7 @@ Deno.serve(async (req: Request) => {
     //   - date window uses app_recvd_date >= date_from instead of CURRENT_DATE - 3 days
     //   - fires ALL current-state rows (not just pending triggers) so GHL is fully seeded
     //   - fired_triggers NOT EXISTS gate is preserved — safe to re-run
-    const { default: pgBf } = await import("npm:postgres@3.4.5");
-    const sqlBf = pgBf({
+    const sqlBf = postgres({
       host:     cleanHost(Deno.env.get("PROD_DB_HOST")!),
       port:     Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
       database: Deno.env.get("PROD_DB_NAME")!,
@@ -745,7 +745,6 @@ Deno.serve(async (req: Request) => {
   // gates on fired_triggers in the query itself).
   // fired_triggers is in Supabase; the NOT EXISTS gate is applied in app code
   // (fetch fired set, exclude in JS) since Max's DB can't JOIN Supabase directly.
-  const { default: postgres } = await import("npm:postgres@3.4.5");
   const sql = postgres({
     host: cleanHost(Deno.env.get("PROD_DB_HOST")!),
     port: Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
