@@ -468,11 +468,14 @@ Deno.serve(async (req: Request) => {
       idle_timeout: 20,
     });
 
-    // Fetch agency writing numbers from Supabase to scope the Max query.
+    // Fetch per-agent writing numbers from agency_rosters (the correct source).
+    // agency_writing_numbers only has root codes (e.g. 202NGA00); we need the
+    // individual agent codes (202NGACM, 202NGA85, ...) to match Max's DB wa field.
     const { data: wns } = await supabase
-      .from("agency_writing_numbers")
+      .from("agency_rosters")
       .select("writing_number")
-      .eq("agency_id", backfillAgencyId);
+      .eq("agency_id", backfillAgencyId)
+      .eq("status", "active");
     const agencyWns = (wns ?? []).map((r) => (r.writing_number as string).trim().toUpperCase()).filter(Boolean);
 
     let bfRows: ProdRow[] = [];
