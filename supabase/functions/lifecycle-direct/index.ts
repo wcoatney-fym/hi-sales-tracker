@@ -401,7 +401,7 @@ Deno.serve(async (req: Request) => {
     // ── Resolve agency metadata from Supabase ─────────────────────────────
     const { data: agencyRow } = await supabase
       .from("agencies")
-      .select("name, ghl_api_key, ghl_location_id")
+      .select("name")
       .eq("id", backfillAgencyId)
       .maybeSingle();
     if (!agencyRow) {
