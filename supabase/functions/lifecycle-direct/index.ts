@@ -264,10 +264,11 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200 });
   }
 
-  // Validate X-Cron-Secret against env var directly (same pattern as npn-resolution).
-  // Vault RPC approach replaced: legacy service_role key disabled 2026-06-16, so
-  // supabase.rpc() returned null on every call causing all manual invocations to 401.
-  const expectedCronSecret = Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY") ?? "";
+  // Validate X-Cron-Secret against LIFECYCLE_CRON_SECRET env var.
+  // Source of truth: vault cron_import_secret, stored as edge function secret.
+  // Legacy vault RPC approach removed: service_role key disabled 2026-06-16.
+  const expectedCronSecret = Deno.env.get("LIFECYCLE_CRON_SECRET") ??
+                              Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY") ?? "";
   if (cronSecret) {
     if (!expectedCronSecret || cronSecret !== expectedCronSecret) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
