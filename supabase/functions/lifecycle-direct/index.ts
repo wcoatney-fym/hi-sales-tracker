@@ -587,6 +587,14 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
+      // No-contact-info gate (Charlie, 2026-07-22): skip when both phone and email missing.
+      const bfRawPhone = (row.phone_nbr ?? "").trim();
+      const bfHasPhone = bfRawPhone !== "" && bfRawPhone !== "0";
+      if (!bfHasPhone) {
+        console.log(`[lifecycle-direct:backfill] no-contact-info skip: ${pn} (no phone or email)`);
+        continue;
+      }
+
       const rosterName  = bfNameByWn.get(wa);
       const nameParts   = splitMiddleInitial((row.first_name ?? "").trim());
       const planName    = resolvePlanName(row.plan_code);
@@ -963,6 +971,20 @@ Deno.serve(async (req: Request) => {
       });
       held++;
       console.log(`[lifecycle-direct] NPN hold: ${pn} wn=${resolvedWn} trigger=${row.trigger_type}`);
+      continue;
+    }
+
+    // ── No-contact-info gate (Charlie, 2026-07-22) ────────────────────────
+    // Skip contacts missing BOTH email and phone — keeps GHL clean.
+    // UNL feed has no email column, so this effectively gates on phone;
+    // if email is ever added to the feed, contacts with email-only still push.
+    const rawPhone = (row.phone_nbr ?? "").trim();
+    const hasPhone = rawPhone !== "" && rawPhone !== "0";
+    // Email is not in Max's DB today — always empty. Future-proofed.
+    const hasEmail = false; // no email column in Max's DB
+    if (!hasPhone && !hasEmail) {
+      skipped++;
+      console.log(`[lifecycle-direct] no-contact-info skip: ${pn} trigger=${row.trigger_type} (no phone or email)`);
       continue;
     }
 
