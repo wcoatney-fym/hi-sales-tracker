@@ -155,6 +155,16 @@ async function fireLifecycleEvents(
       client_status: p.status ?? "",
       trigger: ev.trigger,
     };
+    // No-contact-info gate (Charlie, 2026-07-22): skip when both phone and email missing.
+    const rawPhoneVal = str(payload.phone).trim();
+    const hasPhoneVal = rawPhoneVal !== "" && rawPhoneVal !== "0";
+    const hasEmailVal = str(payload.email).trim() !== "";
+    if (!hasPhoneVal && !hasEmailVal) {
+      console.log(`[lifecycle] no-contact-info skip: ${ev.policy_number} trigger=${ev.trigger} (no phone or email)`);
+      audit(ev, p, { ok: false, http_status: null, error: "no_contact_info" });
+      continue;
+    }
+
     if (dry) {
       console.log(`[lifecycle:dry-run] ${ev.trigger} ${ev.policy_number}`, JSON.stringify(payload));
       audit(ev, p, { ok: true, http_status: null, error: null });

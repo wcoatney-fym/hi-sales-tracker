@@ -204,3 +204,41 @@ Deno.test("splitMiddleInitial: empty input -> empty first and initial", () => {
   assertEquals(r.first, "");
   assertEquals(r.middleInitial, "");
 });
+
+// ── No-contact-info gate tests (Charlie, 2026-07-22) ────────────────────────
+// Skip contacts missing BOTH email and phone. Mirrors the gate logic in
+// lifecycle-direct, sql-import-cron, and proposed-fires-push.
+
+function shouldSkipNoContactInfo(
+  phone: string | null,
+  email: string,
+): boolean {
+  const rawPhone = (phone ?? "").trim();
+  const hasPhone = rawPhone !== "" && rawPhone !== "0";
+  const hasEmail = email.trim() !== "";
+  return !hasPhone && !hasEmail;
+}
+
+Deno.test("no-contact-info: phone=0, email='' → skip", () => {
+  assertEquals(shouldSkipNoContactInfo("0", ""), true);
+});
+
+Deno.test("no-contact-info: phone='', email='' → skip", () => {
+  assertEquals(shouldSkipNoContactInfo("", ""), true);
+});
+
+Deno.test("no-contact-info: phone=null, email='' → skip", () => {
+  assertEquals(shouldSkipNoContactInfo(null, ""), true);
+});
+
+Deno.test("no-contact-info: phone='5551234567', email='' → push (has phone)", () => {
+  assertEquals(shouldSkipNoContactInfo("5551234567", ""), false);
+});
+
+Deno.test("no-contact-info: phone='0', email='test@example.com' → push (has email)", () => {
+  assertEquals(shouldSkipNoContactInfo("0", "test@example.com"), false);
+});
+
+Deno.test("no-contact-info: phone='5551234567', email='test@example.com' → push (has both)", () => {
+  assertEquals(shouldSkipNoContactInfo("5551234567", "test@example.com"), false);
+});

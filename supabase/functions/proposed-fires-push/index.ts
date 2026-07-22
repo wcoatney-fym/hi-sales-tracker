@@ -315,6 +315,18 @@ Deno.serve(async (req: Request) => {
       continue;
     }
 
+    // No-contact-info gate (Charlie, 2026-07-22): skip when both phone and email missing.
+    const pfRawPhone = (maxRow.phone_nbr ?? "").trim();
+    const pfHasPhone = pfRawPhone !== "" && pfRawPhone !== "0";
+    // Email not in Max's DB today — always empty. Future-proofed.
+    const pfHasEmail = false;
+    if (!pfHasPhone && !pfHasEmail) {
+      console.log(`[proposed-fires-push] no-contact-info skip: ${pn} trigger=${triggerType} (no phone or email)`);
+      auditRows.push({ policy_number: pn, trigger: triggerType, ok: false, dry_run: dry, error: "no_contact_info", http_status: null, agency_id: agencyId, risk_signal: null, previous_contract_code: null, contract_code: maxRow.cntrct_code, contract_reason: contractReasonLabel(maxRow.cntrct_reason ?? null), upload_id: null });
+      failed++;
+      continue;
+    }
+
     const nameParts  = splitMiddleInitial(maxRow.first_name ?? "");
     const planName   = resolvePlanName(maxRow.plan_code);
     const planType   = derivePlanType(planName || maxRow.plan_code);
