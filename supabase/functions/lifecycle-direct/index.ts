@@ -238,6 +238,8 @@ interface ProdRow {
   at_risk_policy: boolean;
   roster_hierarchy_json: HierarchyNode[] | null;
   _dlt_load_id: string | null;
+  wa?: string;                       // per-agent writing number from Max's DB
+  wa_name?: string;                  // agent name from Max's DB
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -817,7 +819,9 @@ Deno.serve(async (req: Request) => {
     TRIM(t.billing_form)         AS billing_form,
     t.at_risk_policy,
     t.roster_hierarchy_json,
-    t._dlt_load_id
+    t._dlt_load_id,
+    TRIM(UPPER(t.wa))            AS wa,
+    TRIM(t.wa_name)              AS wa_name
   `;
 
   let triggerRows: TriggerRow[] = [];
@@ -914,9 +918,13 @@ Deno.serve(async (req: Request) => {
     if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
 
     // Resolve agency from hierarchy → confirm against agency map.
+    // Use row.wa (per-agent WN from Max's DB) as primary writing number source.
+    // agentFromHierarchy only has org-level nodes for many agencies (e.g. DH)
+    // and resolves to the root code (202NGA00) instead of the per-agent code.
     const hierarchy  = row.roster_hierarchy_json ?? [];
     const agent      = agentFromHierarchy(hierarchy);
-    const agencyName = resolveAgencyName(agencyMap, agent.writingNumber, agencyFromHierarchy(hierarchy));
+    const rowWa      = ("wa" in row ? String((row as Record<string, unknown>).wa ?? "") : "").trim().toUpperCase();
+    const agencyName = resolveAgencyName(agencyMap, rowWa || agent.writingNumber, agencyFromHierarchy(hierarchy));
     const agencyId   = agencyNameToId.get(agencyName.toLowerCase()) ?? null;
 
     // Agency gate.
@@ -927,15 +935,17 @@ Deno.serve(async (req: Request) => {
 
     // Resolve NPN.
     // NPN is NOT in Max's DB — it lives exclusively in agency_rosters (primary) and agents (fallback).
-    // Input: wa from Max's DB (the agent's UNL writing number), normalized UPPER-trim.
-    // Lookup: npnByWritingNumber map built from agents.unl_writing_number + agency_rosters.writing_number.
-    // No NPN = hold. No hierarchy walk — wrong source.
-    const npn = npnByWritingNumber.get(agent.writingNumber) ?? "";
-    const resolvedWn = agent.writingNumber;
+    // Input: row.wa from Max's DB (the agent's UNL writing number, per-agent level).
+    // agentFromHierarchy().writingNumber is WRONG for agencies without person nodes
+    // in the hierarchy (e.g. DH) — it resolves to the root code (202NGA00).
+    // row.wa is always the per-agent code. Use it as primary, hierarchy as fallback.
+    const resolvedWn = rowWa || agent.writingNumber;
+    const npn = npnByWritingNumber.get(resolvedWn) ?? "";
     const rosterName = nameByWritingNumber.get(resolvedWn);
-    const agentFirst = rosterName?.first ?? agent.firstName;
-    const agentFull  = rosterName?.full  ?? agent.fullName;
-    if (singlePolicy) console.log(`[npn-trace] pn=${pn} trigger=${row.trigger_type} changed_on=${changedOnIso} agentWn=${agent.writingNumber} npn=${npn} rosterMapSize=${npnByWritingNumber.size}`);
+    const waName     = ("wa_name" in row ? String((row as Record<string, unknown>).wa_name ?? "") : "").trim();
+    const agentFirst = rosterName?.first ?? (waName ? waName.split(/\s+/)[0] : agent.firstName);
+    const agentFull  = rosterName?.full  ?? (waName || agent.fullName);
+    if (singlePolicy) console.log(`[npn-trace] pn=${pn} trigger=${row.trigger_type} changed_on=${changedOnIso} rowWa=${rowWa} hierarchyWn=${agent.writingNumber} resolvedWn=${resolvedWn} npn=${npn} rosterMapSize=${npnByWritingNumber.size}`);
 
     // Map trigger_type to GHL trigger label (at_risk → "at risk" for GHL field value).
     const triggerLabel = row.trigger_type === "at_risk" ? "at risk" : row.trigger_type;
