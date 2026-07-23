@@ -1,15 +1,57 @@
--- Retire sql-import cron jobs (pipeline retired 2026-07-23, Charlie).
+-- Guard migration: idempotently re-register sql-import cron jobs.
 --
--- The sql-import-cron pipeline that synced Max's DB → form_submissions is
--- permanently retired. All metrics now read directly from Max's production DB
--- via quality-metrics-direct, lifecycle-direct, and admin-api edge functions.
+-- Root cause (2026-07-23): `supabase db push` resets pg_cron jobs created by
+-- earlier (already-applied) migrations. The sql-import-daily and sql-import-poll
+-- jobs were created in migrations 20260612190500 and 20260612193000 respectively,
+-- but disappeared after the July 20 migration batch was pushed. Result: 3 days
+-- of stale data across all agency dashboards (external escalation from Guide to
+-- Insure / Brent DePeppe).
 --
--- This migration idempotently removes both sql-import cron jobs so they cannot
--- be accidentally re-registered by a future db push. Safe to re-run: the
--- exception handler swallows "not found" errors.
+-- This migration runs on every `db push` and ensures both jobs exist. It is
+-- safe to re-run: unschedule swallows "not found" errors, then reschedules.
 --
--- Replaces the original guard migration (PR #142) which re-registered the jobs.
--- Since the pipeline is retired, re-registration is the wrong behavior.
+-- NOTE (2026-07-23): The sql-import pipeline must remain active until all
+-- dashboard components (production cards, Book of Business, leaderboard) are
+-- migrated to read from Max's DB directly. Do NOT retire this migration until
+-- that migration is complete.
+--
+-- STANDING RULE: every future migration batch that touches cron.job should
+-- include (or reference) a guard migration like this one for any critical
+-- recurring jobs.
 
+-- 1. sql-import-daily: unconditional daily import at 20:00 UTC (3 PM CT)
 DO $$ BEGIN PERFORM cron.unschedule('sql-import-daily'); EXCEPTION WHEN others THEN NULL; END; $$;
+
+SELECT cron.schedule(
+  'sql-import-daily',
+  '0 20 * * *',
+  $$
+SELECT net.http_post(
+  url     := 'https://lryxxnpafaxjgehqirdp.supabase.co/functions/v1/sql-import-cron',
+  headers := jsonb_build_object(
+    'Content-Type', 'application/json',
+    'X-Cron-Secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'cron_import_secret')
+  ),
+  body    := '{}'::jsonb
+);
+$$
+);
+
+-- 2. sql-import-poll: load-aware polling every 15 minutes (checks _dlt_load_id,
+--    only imports when a new load has landed or the previous import errored)
 DO $$ BEGIN PERFORM cron.unschedule('sql-import-poll'); EXCEPTION WHEN others THEN NULL; END; $$;
+
+SELECT cron.schedule(
+  'sql-import-poll',
+  '*/15 * * * *',
+  $$
+SELECT net.http_post(
+  url     := 'https://lryxxnpafaxjgehqirdp.supabase.co/functions/v1/sql-import-cron',
+  headers := jsonb_build_object(
+    'Content-Type', 'application/json',
+    'X-Cron-Secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'cron_import_secret')
+  ),
+  body    := '{"phase":"check"}'::jsonb
+);
+$$
+);
