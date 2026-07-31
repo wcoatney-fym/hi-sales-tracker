@@ -90,16 +90,11 @@ export function carrierSelectClause(carrier: CarrierId): string {
         last_name AS client_last_name,
         phone_nbr::text AS client_phone,
         NULL::text AS client_email,
-        COALESCE(
-          (SELECT e->>'writing_number'
-             FROM jsonb_array_elements(roster_hierarchy_json) e
-             WHERE e->>'depth' = '02'
-               AND COALESCE((e->>'is_person')::boolean, false) = false
-             LIMIT 1),
-          (SELECT e->>'writing_number'
-             FROM jsonb_array_elements(roster_hierarchy_json) e
-             WHERE e->>'depth' = '01'
-             LIMIT 1)
+        (SELECT e->>'writing_number'
+           FROM jsonb_array_elements(roster_hierarchy_json) e
+           WHERE COALESCE((e->>'is_person')::boolean, false) = false
+           ORDER BY e->>'depth' DESC
+           LIMIT 1
         ) AS agency_writing_number,
         at_risk_policy AS at_risk,
         NULL::text AS at_risk_reason,
