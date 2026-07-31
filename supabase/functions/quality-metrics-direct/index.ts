@@ -124,9 +124,10 @@ Deno.serve(async (req: Request) => {
     // Multi-carrier query: UNION ALL across UNL + Heartland (+ future carriers).
     // Each carrier's columns are remapped to a common schema inline.
     //
-    // Membership key (UNL): owning agency = shallowest sub-agency (depth-02)
-    // org node's writing_number from roster_hierarchy_json; if none, depth-01
-    // (FYM) writing_number (= direct-to-FYM). Rolls downlines up.
+    // Membership key (UNL): owning agency = deepest non-person node in
+    // roster_hierarchy_json. Direct agencies are at depth-02; sub-agencies
+    // (e.g. Guardian's 13 subs) are at depth-03+. Using the deepest
+    // non-person node ensures sub-agency policies map correctly.
     //
     // Membership key (Heartland): upline is a flat "NAME - CODE" text field.
     // We parse the code and match against the same writing_number set.
@@ -152,16 +153,11 @@ Deno.serve(async (req: Request) => {
         WHERE ${includeUNL}::boolean
           AND (
             ${targetWnsArr}::text[] IS NULL
-            OR COALESCE(
-                 (SELECT e->>'writing_number'
+            OR (SELECT e->>'writing_number'
                     FROM jsonb_array_elements(roster_hierarchy_json) e
-                    WHERE e->>'depth' = '02'
-                      AND COALESCE((e->>'is_person')::boolean, false) = false
-                    LIMIT 1),
-                 (SELECT e->>'writing_number'
-                    FROM jsonb_array_elements(roster_hierarchy_json) e
-                    WHERE e->>'depth' = '01'
-                    LIMIT 1)
+                    WHERE COALESCE((e->>'is_person')::boolean, false) = false
+                    ORDER BY e->>'depth' DESC
+                    LIMIT 1
                ) = ANY(${targetWnsArr}::text[])
           )
 
@@ -247,16 +243,11 @@ Deno.serve(async (req: Request) => {
         WHERE ${includeUNL}::boolean
           AND (
             ${targetWnsArr}::text[] IS NULL
-            OR COALESCE(
-                 (SELECT e->>'writing_number'
+            OR (SELECT e->>'writing_number'
                     FROM jsonb_array_elements(roster_hierarchy_json) e
-                    WHERE e->>'depth' = '02'
-                      AND COALESCE((e->>'is_person')::boolean, false) = false
-                    LIMIT 1),
-                 (SELECT e->>'writing_number'
-                    FROM jsonb_array_elements(roster_hierarchy_json) e
-                    WHERE e->>'depth' = '01'
-                    LIMIT 1)
+                    WHERE COALESCE((e->>'is_person')::boolean, false) = false
+                    ORDER BY e->>'depth' DESC
+                    LIMIT 1
                ) = ANY(${targetWnsArr}::text[])
           )
         UNION ALL

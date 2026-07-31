@@ -199,12 +199,16 @@ function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   };
 }
 
-// Depth-02 non-person node = sub-agency (maps to ancillary_agency__sorting).
+// Deepest non-person node = owning agency/sub-agency.
+// Direct agencies sit at depth-02; sub-agencies (e.g. Guardian's 13 subs) at
+// depth-03+. Using the deepest non-person node ensures sub-agency policies
+// map to the sub-agency, not the parent.
 function agencyFromHierarchy(hierarchy: HierarchyNode[] | null): string {
   if (!hierarchy) return "";
-  const depth2 = hierarchy.filter((n) => n.depth === "02" && !n.is_person);
-  if (depth2.length === 0) return "";
-  return titleCase(depth2[0].name ?? "");
+  const nonPerson = hierarchy.filter((n) => !n.is_person);
+  if (nonPerson.length === 0) return "";
+  const deepest = nonPerson.reduce((a, b) => (a.depth > b.depth ? a : b));
+  return titleCase(deepest.name ?? "");
 }
 
 // isDryRun checks the query param first (?dry=true), falls back to env var.
