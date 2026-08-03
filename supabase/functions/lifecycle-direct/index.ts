@@ -281,9 +281,6 @@ Deno.serve(async (req: Request) => {
   const expectedCronKey = Deno.env.get("LIFECYCLE_CRON_KEY") ?? "";
   const isScheduledCron = expectedCronKey.length > 0 && cronKey === expectedCronKey;
 
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200 });
-  }
 
   // Validate X-Cron-Secret against LIFECYCLE_CRON_SECRET env var.
   // Source of truth: vault cron_import_secret, stored as edge function secret.
