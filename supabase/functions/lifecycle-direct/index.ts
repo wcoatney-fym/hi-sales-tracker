@@ -12,6 +12,7 @@ import {
   pushContactToGhl,
   type LifecyclePayload,
 } from "../sql-import-cron/ghl-client.ts";
+import { createRateLimiter } from "../_shared/rate-limiter.ts";
 
 // lifecycle-direct — queries Max's DB using the trigger-query pattern from
 // docs/migration-mockup/trigger-queries.sql. No form_submissions reads.
@@ -559,6 +560,8 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Rate limiter: 80 req/60s (GHL allows 100/min; 80% ceiling leaves headroom)
+    const bfLimiter = createRateLimiter();
     const bfAudit: Record<string, unknown>[] = [];
     const bfFiredInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
     let bfFired = 0;
@@ -647,6 +650,7 @@ Deno.serve(async (req: Request) => {
       }
 
       const ghlBody = buildGhlContactBody(payload, ghlCfg.locationId);
+      await bfLimiter.acquire();
       const result  = await pushContactToGhl(ghlCfg, ghlBody);
       bfAudit.push({ policy_number: pn, trigger: "submission", ok: result.ok, dry_run: false, error: result.error, http_status: result.http_status, agency_id: backfillAgencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
       if (result.ok) {
@@ -901,6 +905,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 5. Evaluate + fire ────────────────────────────────────────────────────
+  // Rate limiter: 80 req/60s (GHL allows 100/min; 80% ceiling leaves headroom)
+  const mainLimiter = createRateLimiter();
   const auditRows:    Record<string, unknown>[] = [];
   const npnHoldRows:  Record<string, unknown>[] = [];
   const firedInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
@@ -1035,6 +1041,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (ghlConfig) {
+      await mainLimiter.acquire();
       const body = buildGhlContactBody(payload, ghlConfig.locationId);
       const r    = await pushContactToGhl(ghlConfig, body);
       auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: r.ok, dry_run: false, error: r.error, http_status: r.http_status, agency_id: agencyId, risk_signal: row.trigger_type === "at_risk" ? "at_risk_policy=true" : null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
@@ -1043,11 +1050,6 @@ Deno.serve(async (req: Request) => {
         firedSet.add(firedKey); // prevent duplicate within this run
       }
       fired++;
-      // Rate limiter: 80 req / 10s — mirrors ghl-reconcile pattern
-      if (fired % 80 === 0) {
-        console.log(`[lifecycle-direct] rate-limit pause after ${fired} pushes (80/10s ceiling)`);
-        await new Promise(r => setTimeout(r, 10_000));
-      }
     } else {
       console.warn(`[lifecycle-direct] no GHL config; skipped ${triggerLabel} ${pn}`);
       auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: null, upload_id: null });

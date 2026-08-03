@@ -330,34 +330,59 @@ export interface GhlPushResult {
   error: string | null;
 }
 
-// Best-effort upsert of one contact. Never throws.
+// Best-effort upsert of one contact with 429-retry. Never throws.
+// Retries up to 3 times on HTTP 429, respecting the Retry-After header.
+// On non-429 errors or after exhausting retries, returns the last status.
 export async function pushContactToGhl(
   cfg: GhlConfig,
   body: GhlContactBody,
 ): Promise<GhlPushResult> {
-  try {
-    // Use /contacts/ (POST create) — upsert requires email or phone which
-    // the lifecycle runner doesn't always have. Dedup handled in GHL subaccount layer.
-    const resp = await fetch(`${cfg.apiBase}/contacts/`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${cfg.token}`,
-        Version: "2021-07-28",
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    return {
-      ok: resp.ok,
-      http_status: resp.status,
-      error: resp.ok ? null : `HTTP ${resp.status}`,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      http_status: null,
-      error: err instanceof Error ? err.message : "fetch failed",
-    };
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      // Use /contacts/ (POST create) — upsert requires email or phone which
+      // the lifecycle runner doesn't always have. Dedup handled in GHL subaccount layer.
+      const resp = await fetch(`${cfg.apiBase}/contacts/`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${cfg.token}`,
+          Version: "2021-07-28",
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (resp.status === 429) {
+        const retryAfter = parseInt(resp.headers.get("Retry-After") ?? "10", 10);
+        const sleepSec = Math.min(Math.max(retryAfter, 1), 120); // clamp 1-120s
+        console.warn(
+          `[ghl-client] 429 rate-limited (attempt ${attempt + 1}/${MAX_RETRIES}), ` +
+          `Retry-After: ${retryAfter}s, sleeping ${sleepSec}s`,
+        );
+        await new Promise((r) => setTimeout(r, sleepSec * 1000));
+        continue;
+      }
+      return {
+        ok: resp.ok,
+        http_status: resp.status,
+        error: resp.ok ? null : `HTTP ${resp.status}`,
+      };
+    } catch (err) {
+      // Network-level error on last attempt → return failure; otherwise retry.
+      if (attempt === MAX_RETRIES - 1) {
+        return {
+          ok: false,
+          http_status: null,
+          error: err instanceof Error ? err.message : "fetch failed",
+        };
+      }
+      console.warn(
+        `[ghl-client] fetch error (attempt ${attempt + 1}/${MAX_RETRIES}): ` +
+        `${err instanceof Error ? err.message : "unknown"}`,
+      );
+      await new Promise((r) => setTimeout(r, 2000)); // brief backoff on network error
+    }
   }
+  // Should not reach here, but satisfy TS.
+  return { ok: false, http_status: 429, error: "Max retries exceeded" };
 }
