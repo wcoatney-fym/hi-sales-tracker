@@ -184,23 +184,28 @@ Deno.serve(async (req: Request) => {
           )
       )
       SELECT json_build_object(
-        -- HEADLINE: 90-day retention (north-star). Of policies that drafted a 1st
-        -- premium, the share that also retained through the 3rd draft. Billing-mode
-        -- rule: monthly (1 or NULL) requires paid_to_date >= effective + 3 months;
-        -- any non-monthly single successful draft (3/6/12) already covers 90+ days.
-        -- NULL billing_mode (e.g. Heartland) is treated as monthly.
-        -- Only policies old enough to have run the gauntlet (issued >= 3 months ago).
+        -- HEADLINE: 90-day retention (north-star). Cohort-scoped to the month
+        -- 3 months ago. Of policies from that cohort that drafted a 1st premium,
+        -- the share that also drafted a 3rd time AND are still alive today
+        -- (term_date IS NULL). Billing-mode rule: monthly (1 or NULL) requires
+        -- paid_to_date >= effective + 3 months; any non-monthly single successful
+        -- draft (3/6/12) already covers 90+ days. NULL billing_mode (e.g.
+        -- Heartland) is treated as monthly.
         'retention_90d', (
           SELECT json_build_object(
+            'cohort_month', to_char(date_trunc('month', CURRENT_DATE) - interval '3 months', 'YYYY-MM'),
             'drafted_first', count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'),
-            'retained', count(*) FILTER (WHERE (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                            OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')),
-            'retention_pct', round(100.0 * count(*) FILTER (WHERE (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                                              OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month'))
+            'retained', count(*) FILTER (WHERE term_date IS NULL
+                                           AND ((COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                             OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month'))),
+            'retention_pct', round(100.0 * count(*) FILTER (WHERE term_date IS NULL
+                                                             AND ((COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
+                                                               OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')))
               / nullif(count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'), 0), 1)
           )
           FROM scoped
-          WHERE issue_date <= CURRENT_DATE - interval '3 months'
+          WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
+            AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months'
         ),
         'placement', (
           SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.month), '[]'::json)
@@ -271,10 +276,14 @@ Deno.serve(async (req: Request) => {
       )
       SELECT carrier,
              count(*) AS total_policies,
-             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months') AS seasoned,
-             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months'
+             count(*) FILTER (WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
+                               AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months') AS seasoned,
+             count(*) FILTER (WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
+                               AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months'
                                AND paid_to_date >= issue_date + interval '1 month') AS drafted_first,
-             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months'
+             count(*) FILTER (WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
+                               AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months'
+                               AND term_date IS NULL
                                AND (
                                  (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
                                  OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')
