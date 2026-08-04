@@ -250,7 +250,7 @@ Deno.serve(async (req: Request) => {
     // show UNL vs Heartland (and future carriers) side-by-side.
     const carrierRows = await sql`
       WITH scoped AS (
-        SELECT issue_date, paid_to_date, billing_mode, at_risk_policy, 'UNL'::text AS carrier
+        SELECT issue_date, paid_to_date, term_date, billing_mode, at_risk_policy, 'UNL'::text AS carrier
         FROM typed.unl_fym_policy_latest_load
         WHERE ${includeUNL}::boolean
           AND (
@@ -263,7 +263,7 @@ Deno.serve(async (req: Request) => {
                ) = ANY(${targetWnsArr}::text[])
           )
         UNION ALL
-        SELECT eff_date AS issue_date, paid_to_date, NULL::integer AS billing_mode, false AS at_risk_policy, 'Heartland'::text AS carrier
+        SELECT eff_date AS issue_date, paid_to_date, end_date AS term_date, NULL::integer AS billing_mode, false AS at_risk_policy, 'Heartland'::text AS carrier
         FROM typed.heartland_inforced_policy_latest
         WHERE ${includeHeartland}::boolean
           AND hnl_status NOT IN ('Not Taken')
