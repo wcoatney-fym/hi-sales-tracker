@@ -224,7 +224,7 @@ export default function QualityMetrics({
           <div className="relative group">
             <PersistencyGauge value={retention ? retention.retention_pct : null} />
             <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-[11px] text-slate-300 leading-relaxed w-64 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 shadow-lg">
-              Of policies from {retention?.cohort_month ? monthLabel(retention.cohort_month) : "the cohort 3 months ago"} that drafted their 1st premium, the % that also drafted a 3rd time and are still active today.
+              Of policies from {retention?.cohort_month ? monthLabel(retention.cohort_month) : "the cohort 3 months ago"} that drafted their 1st premium, the % that also drafted a 3rd time, are still active today, and are not flagged at-risk.
             </div>
           </div>
           <p className="text-[11px] text-slate-400 text-center mt-1">
