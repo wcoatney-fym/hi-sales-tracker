@@ -983,19 +983,267 @@ Deno.serve(async (req: Request) => {
       }
 
       case "get-policies": {
-        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
+        const { startDate, endDate, agentFilter, carrierFilter, productTypeFilter, agencyFilter, sourceFilter, clientSearch, page = 1, pageSize = 10 } = body;
+        if (!startDate || !endDate) {
+          return jsonResponse({ error: "Date range required" }, 400);
+        }
+
+        const offset = (page - 1) * pageSize;
+
+        let agentWritingNumbers: string[] = [];
+        if (agentFilter) {
+          const { data: agentRow } = await supabase
+            .from("agents")
+            .select("unl_writing_number, gtl_writing_number")
+            .eq("id", agentFilter)
+            .maybeSingle();
+          if (agentRow) {
+            if (agentRow.unl_writing_number) agentWritingNumbers.push(agentRow.unl_writing_number);
+            if (agentRow.gtl_writing_number) agentWritingNumbers.push(agentRow.gtl_writing_number);
+          }
+        }
+
+        let countQuery = supabase
+          .from("form_submissions")
+          .select("id", { count: "exact", head: true })
+          .eq("source", "Data Source")
+          .gte("app_submit_date", startDate)
+          .lt("app_submit_date", endDate)
+          .not("status", "in", "(duplicate,superseded)");
+
+        let dataQuery = supabase
+          .from("form_submissions")
+          .select("*")
+          .eq("source", "Data Source")
+          .gte("app_submit_date", startDate)
+          .lt("app_submit_date", endDate)
+          .not("status", "in", "(duplicate,superseded)")
+          .order("app_submit_date", { ascending: false })
+          .range(offset, offset + pageSize - 1);
+
+        if (agentFilter && agentWritingNumbers.length > 0) {
+          countQuery = countQuery.in("agent_number", agentWritingNumbers);
+          dataQuery = dataQuery.in("agent_number", agentWritingNumbers);
+        } else if (agentFilter) {
+          countQuery = countQuery.eq("agent_number", "__NO_MATCH__");
+          dataQuery = dataQuery.eq("agent_number", "__NO_MATCH__");
+        }
+
+        if (carrierFilter) {
+          countQuery = countQuery.eq("carrier", carrierFilter);
+          dataQuery = dataQuery.eq("carrier", carrierFilter);
+        }
+
+        if (productTypeFilter) {
+          countQuery = countQuery.eq("product_type", productTypeFilter);
+          dataQuery = dataQuery.eq("product_type", productTypeFilter);
+        }
+
+        if (agencyFilter) {
+          countQuery = countQuery.eq("agency", agencyFilter);
+          dataQuery = dataQuery.eq("agency", agencyFilter);
+        }
+
+        if (sourceFilter) {
+          // Allow further sub-filtering within Data Source if needed;
+          // the base filter already scopes to Data Source only.
+        }
+
+        if (clientSearch && typeof clientSearch === "string" && clientSearch.trim()) {
+          const cleaned = clientSearch.trim().replace(/[%,().*]/g, " ").replace(/\s+/g, " ").trim();
+          if (cleaned) {
+            const parts = cleaned.split(" ");
+            const orParts = [
+              `client_first_name.ilike.%${cleaned}%`,
+              `client_last_name.ilike.%${cleaned}%`,
+            ];
+            if (parts.length >= 2) {
+              const first = parts[0];
+              const last = parts.slice(1).join(" ");
+              orParts.push(`and(client_first_name.ilike.%${first}%,client_last_name.ilike.%${last}%)`);
+            }
+            const orFilter = orParts.join(",");
+            countQuery = countQuery.or(orFilter);
+            dataQuery = dataQuery.or(orFilter);
+          }
+        }
+
+        const [countResult, dataResult] = await Promise.all([countQuery, dataQuery]);
+        if (countResult.error) throw countResult.error;
+        if (dataResult.error) throw dataResult.error;
+
+        const { data: allAgents } = await supabase
+          .from("agents")
+          .select("id, first_name, last_name, unl_writing_number, gtl_writing_number");
+
+        const { data: filterList } = await supabase
+          .from("form_submissions")
+          .select("agent_number, carrier, product_type, agency")
+          .eq("source", "Data Source")
+          .gte("app_submit_date", startDate)
+          .lt("app_submit_date", endDate)
+          .not("status", "in", "(duplicate,superseded)");
+
+        const activeNumbers = new Set((filterList || []).map((r: { agent_number: string }) => r.agent_number));
+
+        const uniqueAgents = (allAgents || [])
+          .filter((a: { unl_writing_number: string; gtl_writing_number: string }) => activeNumbers.has(a.unl_writing_number) || activeNumbers.has(a.gtl_writing_number))
+          .map((a: { id: string; first_name: string; last_name: string; unl_writing_number: string; gtl_writing_number: string }) => {
+            const nums = [a.unl_writing_number, a.gtl_writing_number].filter(Boolean);
+            return { id: a.id, label: `${a.first_name} ${a.last_name} (${nums.join(", ")})` };
+          })
+          .sort((a: { label: string }, b: { label: string }) => a.label.localeCompare(b.label));
+
+        const uniqueCarriers = Array.from(
+          new Set((filterList || []).map((r: { carrier: string }) => r.carrier).filter(Boolean))
+        )
+          .sort()
+          .map((name) => ({ name }));
+
+        const uniqueProductTypes = Array.from(
+          new Set((filterList || []).map((r: { product_type: string }) => r.product_type).filter(Boolean))
+        )
+          .sort()
+          .map((name) => ({ name }));
+
+        const uniqueAgencies = Array.from(
+          new Set((filterList || []).map((r: { agency: string }) => r.agency).filter(Boolean))
+        )
+          .sort()
+          .map((name) => ({ name }));
+
+        return jsonResponse({
+          policies: dataResult.data || [],
+          totalCount: countResult.count || 0,
+          agents: uniqueAgents,
+          carriers: uniqueCarriers,
+          productTypes: uniqueProductTypes,
+          agencies: uniqueAgencies,
+        });
       }
+
       case "export-policies": {
-        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
+        const { startDate, endDate, agentFilter: expAgentFilter, carrierFilter: expCarrierFilter, productTypeFilter: expProductTypeFilter, agencyFilter: expAgencyFilter } = body;
+        if (!startDate || !endDate) {
+          return jsonResponse({ error: "Date range required" }, 400);
+        }
+
+        let exportAgentWritingNumbers: string[] = [];
+        if (expAgentFilter) {
+          const { data: agentRow } = await supabase
+            .from("agents")
+            .select("unl_writing_number, gtl_writing_number")
+            .eq("id", expAgentFilter)
+            .maybeSingle();
+          if (agentRow) {
+            if (agentRow.unl_writing_number) exportAgentWritingNumbers.push(agentRow.unl_writing_number);
+            if (agentRow.gtl_writing_number) exportAgentWritingNumbers.push(agentRow.gtl_writing_number);
+          }
+        }
+
+        let exportQuery = supabase
+          .from("form_submissions")
+          .select("*")
+          .eq("source", "Data Source")
+          .gte("app_submit_date", startDate)
+          .lt("app_submit_date", endDate)
+          .not("status", "in", "(duplicate,superseded)")
+          .order("app_submit_date", { ascending: false })
+          .limit(10000);
+
+        if (expAgentFilter && exportAgentWritingNumbers.length > 0) {
+          exportQuery = exportQuery.in("agent_number", exportAgentWritingNumbers);
+        } else if (expAgentFilter) {
+          exportQuery = exportQuery.eq("agent_number", "__NO_MATCH__");
+        }
+
+        if (expCarrierFilter) {
+          exportQuery = exportQuery.eq("carrier", expCarrierFilter);
+        }
+
+        if (expProductTypeFilter) {
+          exportQuery = exportQuery.eq("product_type", expProductTypeFilter);
+        }
+
+        if (expAgencyFilter) {
+          exportQuery = exportQuery.eq("agency", expAgencyFilter);
+        }
+
+        const exportResult = await exportQuery;
+        if (exportResult.error) throw exportResult.error;
+
+        return jsonResponse({ policies: exportResult.data || [] });
       }
+
       case "export-leaderboard": {
-        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
+        const { startDate, endDate, agencyFilter: lbAgencyFilter } = body;
+        if (!startDate || !endDate) {
+          return jsonResponse({ error: "Date range required" }, 400);
+        }
+
+        let lbQuery = supabase
+          .from("form_submissions")
+          .select("agent_number, agent_first_name, agent_last_name, agency, plan_premium")
+          .eq("source", "Data Source")
+          .gte("app_submit_date", startDate)
+          .lt("app_submit_date", endDate)
+          .not("status", "in", "(duplicate,superseded)")
+          .limit(50000);
+
+        if (lbAgencyFilter) {
+          lbQuery = lbQuery.eq("agency", lbAgencyFilter);
+        }
+
+        const lbResult = await lbQuery;
+        if (lbResult.error) throw lbResult.error;
+
+        // Enrich with NPN from agents table
+        const lbRows = lbResult.data || [];
+        const lbNums = Array.from(new Set(lbRows.map((r: { agent_number: string }) => r.agent_number).filter(Boolean)));
+        let lbNpnMap: Record<string, string> = {};
+        if (lbNums.length > 0) {
+          const { data: npnAgents } = await supabase
+            .from("agents")
+            .select("npn, unl_writing_number, gtl_writing_number")
+            .or(lbNums.map((n: string) => `unl_writing_number.eq.${n},gtl_writing_number.eq.${n}`).join(","));
+          if (npnAgents) {
+            for (const a of npnAgents) {
+              if (a.unl_writing_number && a.npn) lbNpnMap[a.unl_writing_number] = a.npn;
+              if (a.gtl_writing_number && a.npn) lbNpnMap[a.gtl_writing_number] = a.npn;
+            }
+          }
+        }
+
+        // Aggregate by agent_number
+        const lbMap: Record<string, { firstName: string; lastName: string; agentNumber: string; npn: string; agency: string; count: number; totalAnnualizedPremium: number }> = {};
+        for (const r of lbRows) {
+          const key = (r as { agent_number: string }).agent_number;
+          if (!key) continue;
+          if (!lbMap[key]) {
+            lbMap[key] = {
+              firstName: (r as { agent_first_name: string }).agent_first_name,
+              lastName: (r as { agent_last_name: string }).agent_last_name,
+              agentNumber: key,
+              npn: lbNpnMap[key] || "",
+              agency: (r as { agency: string }).agency || "",
+              count: 0,
+              totalAnnualizedPremium: 0,
+            };
+          }
+          lbMap[key].count += 1;
+          lbMap[key].totalAnnualizedPremium += (Number((r as { plan_premium: number }).plan_premium) || 0) * 12;
+        }
+
+        const leaderboard = Object.values(lbMap).sort((a, b) => b.totalAnnualizedPremium - a.totalAnnualizedPremium);
+
+        return jsonResponse({ leaderboard });
       }
+
       case "delete-policies": {
-        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
+        return jsonResponse({ error: "Policy deletion is disabled. Data Source rows are managed by Max's DB." }, 403);
       }
       case "get-submissions": {
-        return jsonResponse({ error: "This endpoint has been removed. Data is sourced directly from Max's DB." }, 410);
+        return jsonResponse({ error: "This endpoint has been removed. Use get-policies or get-intake-submissions instead." }, 410);
       }
       case "get-intake-submissions": {
         const { startDate, endDate, agentFilter, npnFilter, agencyFilter, page = 1, pageSize = 20 } = body;

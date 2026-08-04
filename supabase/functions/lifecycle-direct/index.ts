@@ -12,6 +12,7 @@ import {
   pushContactToGhl,
   type LifecyclePayload,
 } from "../sql-import-cron/ghl-client.ts";
+import { createRateLimiter } from "../_shared/rate-limiter.ts";
 
 // lifecycle-direct — queries Max's DB using the trigger-query pattern from
 // docs/migration-mockup/trigger-queries.sql. No form_submissions reads.
@@ -199,12 +200,16 @@ function agentFromHierarchy(hierarchy: HierarchyNode[] | null): {
   };
 }
 
-// Depth-02 non-person node = sub-agency (maps to ancillary_agency__sorting).
+// Deepest non-person node = owning agency/sub-agency.
+// Direct agencies sit at depth-02; sub-agencies (e.g. Guardian's 13 subs) at
+// depth-03+. Using the deepest non-person node ensures sub-agency policies
+// map to the sub-agency, not the parent.
 function agencyFromHierarchy(hierarchy: HierarchyNode[] | null): string {
   if (!hierarchy) return "";
-  const depth2 = hierarchy.filter((n) => n.depth === "02" && !n.is_person);
-  if (depth2.length === 0) return "";
-  return titleCase(depth2[0].name ?? "");
+  const nonPerson = hierarchy.filter((n) => !n.is_person);
+  if (nonPerson.length === 0) return "";
+  const deepest = nonPerson.reduce((a, b) => (a.depth > b.depth ? a : b));
+  return titleCase(deepest.name ?? "");
 }
 
 // isDryRun checks the query param first (?dry=true), falls back to env var.
@@ -276,9 +281,6 @@ Deno.serve(async (req: Request) => {
   const expectedCronKey = Deno.env.get("LIFECYCLE_CRON_KEY") ?? "";
   const isScheduledCron = expectedCronKey.length > 0 && cronKey === expectedCronKey;
 
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200 });
-  }
 
   // Validate X-Cron-Secret against LIFECYCLE_CRON_SECRET env var.
   // Source of truth: vault cron_import_secret, stored as edge function secret.
@@ -558,6 +560,8 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Rate limiter: 80 req/60s (GHL allows 100/min; 80% ceiling leaves headroom)
+    const bfLimiter = createRateLimiter();
     const bfAudit: Record<string, unknown>[] = [];
     const bfFiredInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
     let bfFired = 0;
@@ -646,6 +650,7 @@ Deno.serve(async (req: Request) => {
       }
 
       const ghlBody = buildGhlContactBody(payload, ghlCfg.locationId);
+      await bfLimiter.acquire();
       const result  = await pushContactToGhl(ghlCfg, ghlBody);
       bfAudit.push({ policy_number: pn, trigger: "submission", ok: result.ok, dry_run: false, error: result.error, http_status: result.http_status, agency_id: backfillAgencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
       if (result.ok) {
@@ -900,6 +905,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 5. Evaluate + fire ────────────────────────────────────────────────────
+  // Rate limiter: 80 req/60s (GHL allows 100/min; 80% ceiling leaves headroom)
+  const mainLimiter = createRateLimiter();
   const auditRows:    Record<string, unknown>[] = [];
   const npnHoldRows:  Record<string, unknown>[] = [];
   const firedInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
@@ -1034,6 +1041,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (ghlConfig) {
+      await mainLimiter.acquire();
       const body = buildGhlContactBody(payload, ghlConfig.locationId);
       const r    = await pushContactToGhl(ghlConfig, body);
       auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: r.ok, dry_run: false, error: r.error, http_status: r.http_status, agency_id: agencyId, risk_signal: row.trigger_type === "at_risk" ? "at_risk_policy=true" : null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: contractReasonLabel(row.cntrct_reason ?? null), upload_id: null });
@@ -1042,11 +1050,6 @@ Deno.serve(async (req: Request) => {
         firedSet.add(firedKey); // prevent duplicate within this run
       }
       fired++;
-      // Rate limiter: 80 req / 10s — mirrors ghl-reconcile pattern
-      if (fired % 80 === 0) {
-        console.log(`[lifecycle-direct] rate-limit pause after ${fired} pushes (80/10s ceiling)`);
-        await new Promise(r => setTimeout(r, 10_000));
-      }
     } else {
       console.warn(`[lifecycle-direct] no GHL config; skipped ${triggerLabel} ${pn}`);
       auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: null, upload_id: null });
