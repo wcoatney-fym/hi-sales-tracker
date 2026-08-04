@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getQualityMetricsDirect } from "../lib/api";
 
 interface Retention90d {
+  cohort_month: string;
   drafted_first: number;
   retained: number;
   retention_pct: number | null;
@@ -91,9 +92,9 @@ function PersistencyGauge({ value }: { value: number | null }) {
 }
 
 // Placement = submitted apps whose first premium drafted (paid-to moved past
-// effective). Persistency = of policies that went active in a month, the share
-// still active today. The gauge surfaces the *current 90-day* number (the
-// 3-months-ago cohort: policies old enough to have had their 3rd draw).
+// effective). The gauge is cohort-scoped: of the 3-months-ago cohort that
+// drafted a 1st premium, the share that also drafted a 3rd time AND are still
+// active today (term_date IS NULL).
 interface CarrierBreakdownRow {
   carrier: string;
   total_policies: number;
@@ -149,9 +150,6 @@ export default function QualityMetrics({
     return new Date(y, m - 1, 1).toLocaleString("en-US", { month: "short" });
   };
 
-  // "Current 90-day persistency" = the 3-months-ago cohort.
-  const current = persistency.find((p) => p.months_ago === 3);
-
   return (
     <div className="bg-navy rounded-xl border border-slate-700/50 p-5 mt-6">
       <div className="flex items-center justify-between mb-1">
@@ -186,10 +184,9 @@ export default function QualityMetrics({
         )}
       </div>
       <p className="text-xs text-slate-400 mb-4">
-        90-day retention (north-star): of policies that drafted a 1st premium, the share that also
-        retained through the 3rd draft (a single successful draft on non-monthly billing counts as
-        retained). Placement: of apps that have reached their effective date, the share that drafted
-        their first premium. Live from production.
+        90-day retention (north-star): of the cohort that drafted a 1st premium 3 months ago, the
+        share that also drafted a 3rd time and are still active today. Placement: of apps that have
+        reached their effective date, the share that drafted their first premium. Live from production.
       </p>
       {/* Carrier breakdown mini-cards — show when combined view and multiple carriers */}
       {!carrierFilter && carrierBreakdown.length > 1 && (
@@ -224,17 +221,17 @@ export default function QualityMetrics({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <div className="flex flex-col">
           <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">90-Day Retention</h4>
-          <PersistencyGauge value={retention ? retention.retention_pct : null} />
+          <div className="relative group">
+            <PersistencyGauge value={retention ? retention.retention_pct : null} />
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-[11px] text-slate-300 leading-relaxed w-64 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 shadow-lg">
+              Of policies from {retention?.cohort_month ? monthLabel(retention.cohort_month) : "the cohort 3 months ago"} that drafted their 1st premium, the % that also drafted a 3rd time, are still active today, and are not flagged at-risk.
+            </div>
+          </div>
           <p className="text-[11px] text-slate-400 text-center mt-1">
             {retention && retention.drafted_first
-              ? `${retention.retained}/${retention.drafted_first} policies retained through the 3rd draft`
+              ? `${retention.retained}/${retention.drafted_first} from ${monthLabel(retention.cohort_month)} retained & still active`
               : "Not enough seasoned policies yet"}
           </p>
-          {current && current.went_active ? (
-            <p className="text-[10px] text-slate-500 text-center mt-1">
-              Cohort survival (still active today): {fmtPct(current.persistency_pct)} · {current.still_active}/{current.went_active} from {monthLabel(current.cohort_month)}
-            </p>
-          ) : null}
         </div>
         <div>
           <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-2">Placement (last 3 months)</h4>
