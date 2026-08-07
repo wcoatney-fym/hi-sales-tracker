@@ -212,6 +212,24 @@ function agencyFromHierarchy(hierarchy: HierarchyNode[] | null): string {
   return titleCase(deepest.name ?? "");
 }
 
+// Extract the depth-02 org writing number from the hierarchy.
+// This is the root agency code (e.g. 202JVV00 for FYM, 202NGA00 for DH,
+// 202LAX00 for Wisechoice) that IS stored in agency_writing_numbers.
+// Per-agent wa codes from Max's DB don't match agency_writing_numbers;
+// this is the reliable secondary lookup key.
+function agencyWnFromHierarchy(hierarchy: HierarchyNode[] | null): string {
+  if (!hierarchy) return "";
+  // Depth-02 non-person node = the sub-agency root code.
+  // For FYM-direct (depth-01 only), use depth-01.
+  const nonPerson = hierarchy.filter((n) => !n.is_person);
+  if (nonPerson.length === 0) return "";
+  // Use the shallowest non-person node at depth-02 if available, else depth-01.
+  // This matches the membership rule: depth-02 = owning agency.
+  const depth02 = nonPerson.find((n) => n.depth === "02");
+  const target = depth02 ?? nonPerson[0]; // fallback to shallowest (FYM root)
+  return (target.writing_number ?? "").trim().toUpperCase();
+}
+
 // isDryRun checks the query param first (?dry=true), falls back to env var.
 // The query param is the primary control surface for both backfill and cron paths.
 let _dryFromUrl: boolean | null = null;
@@ -939,7 +957,8 @@ Deno.serve(async (req: Request) => {
     const hierarchy  = row.roster_hierarchy_json ?? [];
     const agent      = agentFromHierarchy(hierarchy);
     const rowWa      = ("wa" in row ? String((row as Record<string, unknown>).wa ?? "") : "").trim().toUpperCase();
-    const agencyName = resolveAgencyName(agencyMap, rowWa || agent.writingNumber, agencyFromHierarchy(hierarchy));
+    const hierarchyOrgWn = agencyWnFromHierarchy(hierarchy);
+    const agencyName = resolveAgencyName(agencyMap, rowWa || agent.writingNumber, agencyFromHierarchy(hierarchy), hierarchyOrgWn);
     const agencyId   = agencyNameToId.get(agencyName.toLowerCase()) ?? null;
 
     // Agency gate.

@@ -128,24 +128,43 @@ export async function buildAgencyMap(
 
 // ---------------------------------------------------------------------------
 // resolveAgencyName
-// Primary:  wa (writing number) → AgencyMap → agencies.name (canonical, Title Case)
-// Fallback: titleCase(ga_name)  — used when wa has no entry in agency_writing_numbers
-//           (signals a missing roster entry; logs a warning so it's trackable)
+// Primary:     wa (per-agent writing number) → AgencyMap → agencies.name
+// Secondary:   hierarchyWn (depth-02 org writing number from roster_hierarchy_json)
+//              → AgencyMap → agencies.name
+// Fallback:    titleCase(ga_name)
+//
+// Why three tiers:
+//   agency_writing_numbers only stores root-level codes (e.g. 202JVV00).
+//   Max's DB `wa` column holds per-agent codes (e.g. 202JVV05) that don't
+//   match. The depth-02 org node in roster_hierarchy_json always carries the
+//   root code that IS in agency_writing_numbers, so it's the reliable
+//   secondary key. The ga_name fallback covers edge cases where neither
+//   writing number is mapped.
 // ---------------------------------------------------------------------------
 export function resolveAgencyName(
   agencyMap: AgencyMap,
   wa: string | null,
   ga_name: string | null,
+  hierarchyWn?: string | null,
 ): string {
   const normalizedWn = (wa ?? "").trim().toUpperCase();
 
   if (normalizedWn) {
     const canonical = agencyMap.get(normalizedWn);
     if (canonical) return canonical;
+  }
 
-    // No match in agency_writing_numbers — warn and fall back
+  // Secondary: depth-02 org writing number from the hierarchy
+  const normalizedHierarchyWn = (hierarchyWn ?? "").trim().toUpperCase();
+  if (normalizedHierarchyWn && normalizedHierarchyWn !== normalizedWn) {
+    const canonical = agencyMap.get(normalizedHierarchyWn);
+    if (canonical) return canonical;
+  }
+
+  if (normalizedWn || normalizedHierarchyWn) {
+    // No match in agency_writing_numbers for either key — warn and fall back
     console.warn(
-      `[agency-map] no agency match for writing_number=${normalizedWn} ga_name="${ga_name ?? ""}" — falling back to titleCase(ga_name)`,
+      `[agency-map] no agency match for wa=${normalizedWn} hierarchyWn=${normalizedHierarchyWn} ga_name="${ga_name ?? ""}" — falling back to titleCase(ga_name)`,
     );
   }
 
