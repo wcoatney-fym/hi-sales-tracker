@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
 import {
   Search,
   ChevronUp,
@@ -16,6 +16,7 @@ import {
   Type,
   DatabaseZap,
   Filter,
+  AlertTriangle,
 } from "lucide-react";
 import { adminGetAgents, adminDeleteAgent, adminUpdateAgent, adminCreateAgent, adminBulkFixNames, adminResyncAgents } from "../../lib/api";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -38,8 +39,6 @@ const COLUMNS: { key: SortField; label: string }[] = [
   { key: "firstName", label: "First Name" },
   { key: "lastName", label: "Last Name" },
   { key: "npn", label: "NPN" },
-  { key: "unlWritingNumber", label: "UNL Writing Number" },
-  { key: "gtlWritingNumber", label: "GTL Writing Number" },
   { key: "agency", label: "Agency" },
   { key: "source", label: "Source" },
 ];
@@ -62,6 +61,7 @@ export default function AgentsTable({ token }: AgentsTableProps) {
   const [fixingNames, setFixingNames] = useState(false);
   const [agencyFilter, setAgencyFilter] = useState("FYM");
   const [resyncing, setResyncing] = useState(false);
+  const [expandedAgentIdx, setExpandedAgentIdx] = useState<number | null>(null);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -131,6 +131,7 @@ export default function AgentsTable({ token }: AgentsTableProps) {
 
   useEffect(() => {
     setPage(1);
+    setExpandedAgentIdx(null);
   }, [search, sortField, sortDir, agencyFilter]);
 
   const handleSort = (field: SortField) => {
@@ -389,63 +390,98 @@ export default function AgentsTable({ token }: AgentsTableProps) {
         <>
           {/* Mobile Card View */}
           <div className="md:hidden divide-y divide-slate-700/30">
-            {paginated.map((agent, idx) => (
-              <div
-                key={`${agent.firstName}-${agent.lastName}-${idx}`}
-                className="p-4 hover:bg-navy-light/20 transition-colors"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-white font-medium">
-                      {displayVal(agent.firstName)} {displayVal(agent.lastName)}
-                    </p>
-                    <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                      {agent.agency && (
-                        <span className="text-xs text-slate-300 bg-navy-light px-2 py-0.5 rounded">{agent.agency}</span>
-                      )}
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                          agent.source === "Contracting Portal"
-                            ? "bg-gold/10 text-gold border border-gold/30"
-                            : agent.source === "Data Source"
-                            ? "bg-blue-900/30 text-blue-300 border border-blue-700/50"
-                            : "bg-navy-light/50 text-slate-300 border border-slate-700/50"
-                        }`}
-                      >
-                        {agent.source}
-                      </span>
+            {paginated.map((agent, idx) => {
+              const globalIdx = (safePage - 1) * PAGE_SIZE + idx;
+              const isExpanded = expandedAgentIdx === globalIdx;
+              const missingWn = !agent.unlWritingNumber && !agent.gtlWritingNumber;
+              return (
+                <div
+                  key={`${agent.firstName}-${agent.lastName}-${idx}`}
+                  className="hover:bg-navy-light/20 transition-colors"
+                >
+                  <button
+                    onClick={() => setExpandedAgentIdx(isExpanded ? null : globalIdx)}
+                    className="w-full p-4 text-left"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-white font-medium">
+                            {displayVal(agent.firstName)} {displayVal(agent.lastName)}
+                          </p>
+                          {missingWn && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-900/30 text-rose-400 border border-rose-700/40">
+                              <AlertTriangle size={10} /> No WN
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                          {agent.agency && (
+                            <span className="text-xs text-slate-300 bg-navy-light px-2 py-0.5 rounded">{agent.agency}</span>
+                          )}
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              agent.source === "Contracting Portal"
+                                ? "bg-gold/10 text-gold border border-gold/30"
+                                : agent.source === "Data Source"
+                                ? "bg-blue-900/30 text-blue-300 border border-blue-700/50"
+                                : "bg-navy-light/50 text-slate-300 border border-slate-700/50"
+                            }`}
+                          >
+                            {agent.source}
+                          </span>
+                        </div>
+                      </div>
+                      <ChevronDown
+                        size={16}
+                        className={`text-slate-500 flex-shrink-0 mt-1 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                      />
                     </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-xs">
-                      {agent.npn && (
-                        <div><span className="text-slate-500">NPN:</span> <span className="text-slate-300 font-mono">{agent.npn}</span></div>
-                      )}
-                      {agent.unlWritingNumber && (
-                        <div><span className="text-slate-500">UNL:</span> <span className="text-sky-300">{agent.unlWritingNumber}</span></div>
-                      )}
-                      {agent.gtlWritingNumber && (
-                        <div><span className="text-slate-500">GTL:</span> <span className="text-emerald-300">{agent.gtlWritingNumber}</span></div>
-                      )}
+                  </button>
+                  {isExpanded && (
+                    <div className="px-4 pb-4 pt-0 space-y-3">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                        {agent.npn && (
+                          <div><span className="text-slate-500">NPN:</span> <span className="text-slate-300 font-mono">{agent.npn}</span></div>
+                        )}
+                        <div>
+                          <span className="text-slate-500">UNL:</span>{" "}
+                          {agent.unlWritingNumber ? (
+                            <span className="text-sky-300 font-mono">{agent.unlWritingNumber}</span>
+                          ) : (
+                            <span className="text-rose-400 italic">Missing</span>
+                          )}
+                        </div>
+                        <div>
+                          <span className="text-slate-500">GTL:</span>{" "}
+                          {agent.gtlWritingNumber ? (
+                            <span className="text-emerald-300 font-mono">{agent.gtlWritingNumber}</span>
+                          ) : (
+                            <span className="text-slate-500 italic">—</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setEditTarget(agent)}
+                          className="p-2 rounded-md text-slate-500 hover:text-gold hover:bg-gold/10 transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
+                          title="Edit agent"
+                        >
+                          <Pencil size={16} />
+                        </button>
+                        <button
+                          onClick={() => setDeleteTarget(agent)}
+                          className="p-2 rounded-md text-slate-500 hover:text-rose-400 hover:bg-rose-900/20 transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
+                          title="Delete agent"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <button
-                      onClick={() => setEditTarget(agent)}
-                      className="p-2 rounded-md text-slate-500 hover:text-gold hover:bg-gold/10 transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
-                      title="Edit agent"
-                    >
-                      <Pencil size={16} />
-                    </button>
-                    <button
-                      onClick={() => setDeleteTarget(agent)}
-                      className="p-2 rounded-md text-slate-500 hover:text-rose-400 hover:bg-rose-900/20 transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
-                      title="Delete agent"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Desktop Table View */}
@@ -453,6 +489,7 @@ export default function AgentsTable({ token }: AgentsTableProps) {
             <table className="w-full">
               <thead>
                 <tr className="bg-navy-light/50">
+                  <th className="w-8 px-2 py-3" />
                   {COLUMNS.map((col) => (
                     <th
                       key={col.key}
@@ -469,64 +506,107 @@ export default function AgentsTable({ token }: AgentsTableProps) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-700/30">
-                {paginated.map((agent, idx) => (
-                  <tr
-                    key={`${agent.firstName}-${agent.lastName}-${idx}`}
-                    className="hover:bg-navy-light/30 transition-colors"
-                  >
-                    <td className="px-5 py-3.5 text-sm text-white font-medium whitespace-nowrap">{displayVal(agent.firstName)}</td>
-                    <td className="px-5 py-3.5 text-sm text-white font-medium whitespace-nowrap">{displayVal(agent.lastName)}</td>
-                    <td className="px-5 py-3.5 text-sm text-slate-300 whitespace-nowrap font-mono">{displayVal(agent.npn)}</td>
-                    <td className="px-5 py-3.5 text-sm whitespace-nowrap">
-                      {agent.unlWritingNumber ? (
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium bg-sky-900/30 text-sky-300 border border-sky-700/50">{agent.unlWritingNumber}</span>
-                      ) : (
-                        <span className="text-slate-500">-</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3.5 text-sm whitespace-nowrap">
-                      {agent.gtlWritingNumber ? (
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium bg-emerald-900/30 text-emerald-300 border border-emerald-700/50">{agent.gtlWritingNumber}</span>
-                      ) : (
-                        <span className="text-slate-500">-</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3.5 text-sm whitespace-nowrap">
-                      {agent.agency ? <span className="text-slate-200">{agent.agency}</span> : <span className="text-slate-500">-</span>}
-                    </td>
-                    <td className="px-5 py-3.5 text-sm whitespace-nowrap">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${
-                          agent.source === "Contracting Portal"
-                            ? "bg-gold/10 text-gold border border-gold/30"
-                            : agent.source === "Data Source"
-                            ? "bg-blue-900/30 text-blue-300 border border-blue-700/50"
-                            : "bg-navy-light/50 text-slate-300 border border-slate-700/50"
-                        }`}
+                {paginated.map((agent, idx) => {
+                  const globalIdx = (safePage - 1) * PAGE_SIZE + idx;
+                  const isExpanded = expandedAgentIdx === globalIdx;
+                  const missingWn = !agent.unlWritingNumber && !agent.gtlWritingNumber;
+                  return (
+                    <Fragment key={`${agent.firstName}-${agent.lastName}-${idx}`}>
+                      <tr
+                        className={`hover:bg-navy-light/30 transition-colors cursor-pointer ${isExpanded ? "bg-navy-light/20" : ""}`}
+                        onClick={() => setExpandedAgentIdx(isExpanded ? null : globalIdx)}
                       >
-                        {agent.source}
-                      </span>
-                    </td>
-                    <td className="px-3 py-3.5 text-sm whitespace-nowrap">
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => setEditTarget(agent)}
-                          className="p-1.5 rounded-md text-slate-500 hover:text-gold hover:bg-gold/10 transition-colors"
-                          title="Edit agent"
-                        >
-                          <Pencil size={15} />
-                        </button>
-                        <button
-                          onClick={() => setDeleteTarget(agent)}
-                          className="p-1.5 rounded-md text-slate-500 hover:text-rose-400 hover:bg-rose-900/20 transition-colors"
-                          title="Delete agent"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                        <td className="px-2 py-3.5 text-center">
+                          <ChevronRight
+                            size={14}
+                            className={`text-slate-500 transition-transform inline-block ${isExpanded ? "rotate-90" : ""}`}
+                          />
+                        </td>
+                        <td className="px-5 py-3.5 text-sm whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <span className="text-white font-medium">{displayVal(agent.firstName)}</span>
+                            {missingWn && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-900/30 text-rose-400 border border-rose-700/40">
+                                <AlertTriangle size={10} /> No WN
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-5 py-3.5 text-sm text-white font-medium whitespace-nowrap">{displayVal(agent.lastName)}</td>
+                        <td className="px-5 py-3.5 text-sm text-slate-300 whitespace-nowrap font-mono">{displayVal(agent.npn)}</td>
+                        <td className="px-5 py-3.5 text-sm whitespace-nowrap">
+                          {agent.agency ? <span className="text-slate-200">{agent.agency}</span> : <span className="text-slate-500">-</span>}
+                        </td>
+                        <td className="px-5 py-3.5 text-sm whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${
+                              agent.source === "Contracting Portal"
+                                ? "bg-gold/10 text-gold border border-gold/30"
+                                : agent.source === "Data Source"
+                                ? "bg-blue-900/30 text-blue-300 border border-blue-700/50"
+                                : "bg-navy-light/50 text-slate-300 border border-slate-700/50"
+                            }`}
+                          >
+                            {agent.source}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3.5 text-sm whitespace-nowrap">
+                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              onClick={() => setEditTarget(agent)}
+                              className="p-1.5 rounded-md text-slate-500 hover:text-gold hover:bg-gold/10 transition-colors"
+                              title="Edit agent"
+                            >
+                              <Pencil size={15} />
+                            </button>
+                            <button
+                              onClick={() => setDeleteTarget(agent)}
+                              className="p-1.5 rounded-md text-slate-500 hover:text-rose-400 hover:bg-rose-900/20 transition-colors"
+                              title="Delete agent"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr key={`${agent.firstName}-${agent.lastName}-${idx}-detail`} className="bg-navy-light/10">
+                          <td />
+                          <td colSpan={COLUMNS.length + 1} className="px-5 py-3">
+                            <div className="flex items-center gap-6 text-xs">
+                              <div>
+                                <span className="text-slate-500 uppercase tracking-wider text-[10px] font-medium">UNL Writing Number</span>
+                                <div className="mt-0.5">
+                                  {agent.unlWritingNumber ? (
+                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium bg-sky-900/30 text-sky-300 border border-sky-700/50">
+                                      {agent.unlWritingNumber}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-rose-900/20 text-rose-400 border border-rose-700/30">
+                                      <AlertTriangle size={11} /> Missing
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div>
+                                <span className="text-slate-500 uppercase tracking-wider text-[10px] font-medium">GTL Writing Number</span>
+                                <div className="mt-0.5">
+                                  {agent.gtlWritingNumber ? (
+                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium bg-emerald-900/30 text-emerald-300 border border-emerald-700/50">
+                                      {agent.gtlWritingNumber}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500 italic">—</span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
