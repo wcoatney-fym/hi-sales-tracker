@@ -393,7 +393,7 @@ export default function AgentsTable({ token }: AgentsTableProps) {
             {paginated.map((agent, idx) => {
               const globalIdx = (safePage - 1) * PAGE_SIZE + idx;
               const isExpanded = expandedAgentIdx === globalIdx;
-              const missingWn = !agent.unlWritingNumber && !agent.gtlWritingNumber;
+              const missingUnl = !agent.unlWritingNumber;
               return (
                 <div
                   key={`${agent.firstName}-${agent.lastName}-${idx}`}
@@ -409,9 +409,9 @@ export default function AgentsTable({ token }: AgentsTableProps) {
                           <p className="text-white font-medium">
                             {displayVal(agent.firstName)} {displayVal(agent.lastName)}
                           </p>
-                          {missingWn && (
+                          {missingUnl && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-900/30 text-rose-400 border border-rose-700/40">
-                              <AlertTriangle size={10} /> No WN
+                              <AlertTriangle size={10} /> No UNL
                             </span>
                           )}
                         </div>
@@ -509,7 +509,7 @@ export default function AgentsTable({ token }: AgentsTableProps) {
                 {paginated.map((agent, idx) => {
                   const globalIdx = (safePage - 1) * PAGE_SIZE + idx;
                   const isExpanded = expandedAgentIdx === globalIdx;
-                  const missingWn = !agent.unlWritingNumber && !agent.gtlWritingNumber;
+                  const missingUnl = !agent.unlWritingNumber;
                   return (
                     <Fragment key={`${agent.firstName}-${agent.lastName}-${idx}`}>
                       <tr
@@ -525,9 +525,9 @@ export default function AgentsTable({ token }: AgentsTableProps) {
                         <td className="px-5 py-3.5 text-sm whitespace-nowrap">
                           <div className="flex items-center gap-2">
                             <span className="text-white font-medium">{displayVal(agent.firstName)}</span>
-                            {missingWn && (
+                            {missingUnl && (
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-900/30 text-rose-400 border border-rose-700/40">
-                                <AlertTriangle size={10} /> No WN
+                                <AlertTriangle size={10} /> No UNL
                               </span>
                             )}
                           </div>
