@@ -1035,11 +1035,25 @@ Deno.serve(async (req: Request) => {
         .ilike("first_name", firstName)
         .ilike("last_name", lastName);
 
-      const matched = (agents || []).find((a) => {
+      // First try UNL/GTL columns on the agents table
+      let matched = (agents || []).find((a) => {
         const unlMatch = a.unl_writing_number && a.unl_writing_number.toLowerCase() === writingNumber.toLowerCase();
         const gtlMatch = a.gtl_writing_number && a.gtl_writing_number.toLowerCase() === writingNumber.toLowerCase();
         return unlMatch || gtlMatch;
       });
+
+      // Fallback: check agent_writing_numbers table (AHL, Heartland, Manhattan, etc.)
+      if (!matched && (agents || []).length > 0) {
+        const agentIds = (agents || []).map((a) => a.id);
+        const { data: awnRows } = await supabase
+          .from("agent_writing_numbers")
+          .select("agent_id, writing_number")
+          .in("agent_id", agentIds)
+          .ilike("writing_number", writingNumber);
+        if (awnRows && awnRows.length > 0) {
+          matched = (agents || []).find((a) => a.id === awnRows[0].agent_id);
+        }
+      }
 
       if (!matched) {
         return errorResponse("Invalid credentials. Please check your name and writing number.", 401);
