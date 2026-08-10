@@ -75,8 +75,20 @@ function policy(overrides: Partial<PolicyState> = {}): PolicyState {
 
 // ---- transitions ----
 
-Deno.test("submission fires by default on new P (enabled 2026-07-02)", () => {
+Deno.test("submission fires on new P (first appearance)", () => {
   const evts = computeLifecycleEvents(policy({ contract_code: "P" }), undefined, NOW);
+  assertEquals(evts.map((e) => e.trigger), ["submission"]);
+  assertEquals(evts[0].previous_contract_code, null);
+});
+
+Deno.test("submission fires on new A (first appearance — skipped Pending)", () => {
+  const evts = computeLifecycleEvents(policy({ contract_code: "A" }), undefined, NOW);
+  assertEquals(evts.map((e) => e.trigger), ["submission"]);
+  assertEquals(evts[0].previous_contract_code, null);
+});
+
+Deno.test("submission fires on new T (first appearance — arrived terminated)", () => {
+  const evts = computeLifecycleEvents(policy({ contract_code: "T" }), undefined, NOW);
   assertEquals(evts.map((e) => e.trigger), ["submission"]);
   assertEquals(evts[0].previous_contract_code, null);
 });
@@ -97,15 +109,29 @@ Deno.test("submission does NOT re-fire when already P (daily full-state pull)", 
   assertEquals(evts.length, 0);
 });
 
+Deno.test("submission fires on rewrite T→P (existing policy flips back to Pending)", () => {
+  const prior: PriorState = { contract_code: "T", at_risk_fired_at: null };
+  const evts = computeLifecycleEvents(policy({ contract_code: "P" }), prior, NOW);
+  assertEquals(evts.map((e) => e.trigger), ["submission"]);
+  assertEquals(evts[0].previous_contract_code, "T");
+});
+
+Deno.test("no event when contract code unchanged A→A (daily full-state pull, existing policy)", () => {
+  const prior: PriorState = { contract_code: "A", at_risk_fired_at: null };
+  const evts = computeLifecycleEvents(policy({ contract_code: "A" }), prior, NOW);
+  assertEquals(evts.length, 0);
+});
+
 Deno.test("approved fires on P -> A", () => {
   const prior: PriorState = { contract_code: "P", at_risk_fired_at: null };
   const evts = computeLifecycleEvents(policy({ contract_code: "A" }), prior, NOW);
   assertEquals(evts.map((e) => e.trigger), ["approved"]);
 });
 
-Deno.test("approved does NOT fire on new A insert (no prior P)", () => {
+Deno.test("approved does NOT fire on new A insert (no prior P) — submission fires instead", () => {
   const evts = computeLifecycleEvents(policy({ contract_code: "A" }), undefined, NOW);
-  assertEquals(evts.length, 0);
+  // First appearance fires submission, not approved
+  assertEquals(evts.map((e) => e.trigger), ["submission"]);
 });
 
 Deno.test("terminated fires on A -> T and carries contract_reason", () => {
