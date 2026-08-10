@@ -877,7 +877,7 @@ Deno.serve(async (req: Request) => {
           (t.previous_contract_code = 'P' AND t.cntrct_code = 'A')
           OR (t.previous_contract_code = 'A' AND t.cntrct_code = 'T')
         )
-        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '30 days'
+        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
 
       UNION ALL
 
@@ -889,7 +889,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.cntrct_code = 'P'
         AND t.previous_contract_code IS NULL
-        AND t.app_recvd_date >= CURRENT_DATE - INTERVAL '30 days'
+        AND t.app_recvd_date >= CURRENT_DATE - INTERVAL '3 days'
 
       UNION ALL
 
@@ -901,7 +901,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.cntrct_code = 'P'
         AND t.previous_contract_code IN ('T', 'A')
-        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '30 days'
+        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
 
       UNION ALL
 
@@ -913,7 +913,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.at_risk_policy = true
         AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
-        AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '30 days'
+        AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
 
       ORDER BY changed_on DESC
     `) as TriggerRow[];
