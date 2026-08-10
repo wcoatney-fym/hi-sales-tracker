@@ -152,6 +152,37 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
     URL.revokeObjectURL(url);
   };
 
+  const exportRoster = () => {
+    if (roster.length === 0) return;
+    const escCsv = (v: string) => {
+      if (v.includes(",") || v.includes('"') || v.includes("\n")) return `"${v.replace(/"/g, '""')}"`;
+      return v;
+    };
+    const header = "Agent First Name,Agent Last Name,Writing Number,Carrier,NPN,Status,Match Status,Is Manager,Added,Terminated";
+    const rows = roster.map((e) =>
+      [
+        escCsv(e.agent_first_name),
+        escCsv(e.agent_last_name),
+        escCsv(e.writing_number),
+        escCsv(e.carrier),
+        escCsv(e.npn || ""),
+        e.status,
+        e.match_status,
+        e.is_agency_manager ? "Yes" : "No",
+        e.created_at ? new Date(e.created_at).toLocaleDateString() : "",
+        e.terminated_at ? new Date(e.terminated_at).toLocaleDateString() : "",
+      ].join(",")
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `roster_export_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleTerminate = async () => {
     if (!confirmAction || confirmAction.type !== "terminate") return;
     try {
@@ -204,6 +235,13 @@ export default function AgencyRosterPanel({ token, overrideAgencyId }: AgencyRos
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-white">Agent Roster</h2>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={exportRoster}
+            disabled={roster.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Download size={14} /> Export Roster
+          </button>
           <button
             onClick={downloadTemplate}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-700/50 hover:bg-slate-700 border border-slate-600/50 rounded-lg transition-colors"
