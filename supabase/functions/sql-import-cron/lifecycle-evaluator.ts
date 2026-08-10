@@ -183,12 +183,21 @@ export function computeLifecycleEvents(
     risk_signal: null as string | null,
   };
 
-  // 1. submission — Contract Code flips to P.
-  // Disabled by default while the intake form still owns this event.
-  if (emitSubmission && nextCode === "P" && prevCode !== "P") {
+  // 1. submission — first appearance of a policy in the system.
+  // Original rule: only fires when nextCode === 'P'. But many policies arrive
+  // already Active (skip Pending entirely in Max's DB), so they never triggered.
+  // Fix (2026-08-10): fire submission on ANY first appearance (prior === undefined)
+  // regardless of contract code. This ensures every new policy gets pushed to GHL
+  // on its first import. The fired_triggers / at_risk_fired_at idempotency gates
+  // in the caller prevent re-blasts on subsequent daily imports.
+  if (emitSubmission && !prior && nextCode) {
     events.push({ ...base, trigger: "submission" });
   }
-  // 2. approved — P -> A
+  // Also fire submission on non-first-appearance P flip (e.g. rewrite: T→P or A→P)
+  if (emitSubmission && prior && nextCode === "P" && prevCode !== "P") {
+    events.push({ ...base, trigger: "submission" });
+  }
+  // 2. approved — P -> A (state change detected via prior import diff)
   if (prevCode === "P" && nextCode === "A") {
     events.push({ ...base, trigger: "approved" });
   }

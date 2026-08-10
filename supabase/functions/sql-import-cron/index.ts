@@ -1449,7 +1449,18 @@ async function handleSync(
         }
 
         if (events.length > 0) {
+          console.log(`[lifecycle] ${events.length} events to fire for batch (${events.map(e => e.trigger).join(', ')})`);
           await fireLifecycleEvents(supabase, events, batchByNumber, carrier, dataSourceName, uploadId, agentNpnLookup);
+        } else {
+          // Log when a batch with enabled-agency policies produces zero events —
+          // helps detect silent evaluation failures.
+          const enabledCount = batch.filter(r => zapsEnabledAgencyIds.has(r.agency_id as string)).length;
+          if (enabledCount > 0) {
+            const newCount = batch.filter(r => !priorByNumber.has(r.policy_number as string) && zapsEnabledAgencyIds.has(r.agency_id as string)).length;
+            if (newCount > 0) {
+              console.log(`[lifecycle] 0 events from batch with ${enabledCount} enabled-agency policies (${newCount} new). Check evaluator logic.`);
+            }
+          }
         }
         // Persist at-risk fired state so the daily full-state pull doesn't
         // re-blast. set => flag now; clear => recovered, allow future re-fire.
