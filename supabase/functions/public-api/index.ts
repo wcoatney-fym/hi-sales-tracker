@@ -44,7 +44,7 @@ Deno.serve(async (req: Request) => {
         // Check agency_rosters first (agency-uploaded rosters), any carrier
         const { data: agencyRosterMatch } = await supabase
           .from("agency_rosters")
-          .select("writing_number, npn")
+          .select("writing_number, npn, agencies:agency_id(name)")
           .ilike("agent_first_name", firstName.trim())
           .ilike("agent_last_name", lastName.trim())
           .eq("status", "active")
@@ -54,7 +54,8 @@ Deno.serve(async (req: Request) => {
           .maybeSingle();
 
         if (agencyRosterMatch) {
-          return jsonResponse({ found: true, agentNumber: agencyRosterMatch.writing_number, npn: agencyRosterMatch.npn || "" });
+          const agencyName = (agencyRosterMatch.agencies as { name: string } | null)?.name || "";
+          return jsonResponse({ found: true, agentNumber: agencyRosterMatch.writing_number, npn: agencyRosterMatch.npn || "", agency: agencyName });
         }
 
         // Check global carrier rosters (any active upload, any carrier)
@@ -76,14 +77,14 @@ Deno.serve(async (req: Request) => {
 
           if (error) throw error;
           if (data) {
-            return jsonResponse({ found: true, agentNumber: data.agent_number, npn: data.npn || "" });
+            return jsonResponse({ found: true, agentNumber: data.agent_number, npn: data.npn || "", agency: "" });
           }
         }
 
         // Fall back to agents table: return whichever writing number is on file
         const { data: portalAgent, error: portalError } = await supabase
           .from("agents")
-          .select("unl_writing_number, gtl_writing_number, npn")
+          .select("unl_writing_number, gtl_writing_number, npn, agency")
           .ilike("first_name", firstName.trim())
           .ilike("last_name", lastName.trim())
           .maybeSingle();
@@ -93,7 +94,7 @@ Deno.serve(async (req: Request) => {
         if (portalAgent) {
           const writingNumber = portalAgent.unl_writing_number || portalAgent.gtl_writing_number || "";
           if (writingNumber) {
-            return jsonResponse({ found: true, agentNumber: writingNumber, npn: portalAgent.npn || "" });
+            return jsonResponse({ found: true, agentNumber: writingNumber, npn: portalAgent.npn || "", agency: portalAgent.agency || "" });
           }
         }
 
@@ -249,6 +250,7 @@ Deno.serve(async (req: Request) => {
                   return y ? `${m}/${d}/${y}` : "";
                 })(),
                 plan_premium: parseFloat(formData.planPremium) || 0,
+                agency,
               }),
             }
           );
