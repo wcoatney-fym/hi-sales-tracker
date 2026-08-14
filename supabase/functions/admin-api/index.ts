@@ -5169,7 +5169,7 @@ Deno.serve(async (req: Request) => {
       // ---------------------------------------------------------------
       case "list-carrier-agency-mappings": {
         const camCarrier = body.carrier as string | undefined;
-        let query = trackerClient
+        let query = supabase
           .from("carrier_agency_mappings")
           .select("*")
           .order("carrier", { ascending: true })
@@ -5214,7 +5214,7 @@ Deno.serve(async (req: Request) => {
         if (cam.is_confirmed) camRow.confirmed_at = new Date().toISOString();
         if (cam.id) camRow.id = cam.id;
 
-        const { data: upserted, error: upsertErr } = await trackerClient
+        const { data: upserted, error: upsertErr } = await supabase
           .from("carrier_agency_mappings")
           .upsert(camRow, { onConflict: "carrier,carrier_agency_name" })
           .select()
@@ -5226,7 +5226,7 @@ Deno.serve(async (req: Request) => {
       case "confirm-carrier-agency-mapping": {
         const confirmId = body.id as string;
         if (!confirmId) return jsonResponse({ error: "id required" }, 400);
-        const { data: confirmed, error: confirmErr } = await trackerClient
+        const { data: confirmed, error: confirmErr } = await supabase
           .from("carrier_agency_mappings")
           .update({
             is_confirmed: true,
@@ -5243,7 +5243,7 @@ Deno.serve(async (req: Request) => {
       case "delete-carrier-agency-mapping": {
         const delId = body.id as string;
         if (!delId) return jsonResponse({ error: "id required" }, 400);
-        const { error: delErr } = await trackerClient
+        const { error: delErr } = await supabase
           .from("carrier_agency_mappings")
           .delete()
           .eq("id", delId);
@@ -5276,7 +5276,7 @@ Deno.serve(async (req: Request) => {
           is_confirmed: false,
           policy_count: m.policy_count ?? 0,
         }));
-        const { data: seeded, error: seedErr } = await trackerClient
+        const { data: seeded, error: seedErr } = await supabase
           .from("carrier_agency_mappings")
           .upsert(seedRows, { onConflict: "carrier,carrier_agency_name" })
           .select();
@@ -5290,7 +5290,7 @@ Deno.serve(async (req: Request) => {
       case "list-carrier-agent-mappings": {
         const agentCarrier = body.carrier as string | undefined;
         const agencyMappingId = body.agency_mapping_id as string | undefined;
-        let agentQuery = trackerClient
+        let agentQuery = supabase
           .from("carrier_agent_mappings")
           .select("*")
           .order("policy_count", { ascending: false });
@@ -5335,7 +5335,7 @@ Deno.serve(async (req: Request) => {
         if (agm.is_confirmed) agmRow.confirmed_at = new Date().toISOString();
         if (agm.id) agmRow.id = agm.id;
 
-        const { data: agmUpserted, error: agmUpsertErr } = await trackerClient
+        const { data: agmUpserted, error: agmUpsertErr } = await supabase
           .from("carrier_agent_mappings")
           .upsert(agmRow, { onConflict: "carrier,carrier_agent_code" })
           .select()
@@ -5367,7 +5367,7 @@ Deno.serve(async (req: Request) => {
           is_confirmed: false,
           policy_count: m.policy_count ?? 0,
         }));
-        const { data: agentSeeded, error: agentSeedErr } = await trackerClient
+        const { data: agentSeeded, error: agentSeedErr } = await supabase
           .from("carrier_agent_mappings")
           .upsert(agentSeedRows, { onConflict: "carrier,carrier_agent_code" })
           .select();
@@ -5393,7 +5393,7 @@ Deno.serve(async (req: Request) => {
           database: Deno.env.get("PROD_DB_NAME"),
           username: Deno.env.get("PROD_DB_USER"),
           password: Deno.env.get("PROD_DB_PASSWORD"),
-          ssl: "require",
+          ssl: { ca: AKAMAI_CA_CERT },
         });
 
         try {
@@ -5469,7 +5469,7 @@ Deno.serve(async (req: Request) => {
           database: Deno.env.get("PROD_DB_NAME"),
           username: Deno.env.get("PROD_DB_USER"),
           password: Deno.env.get("PROD_DB_PASSWORD"),
-          ssl: "require",
+          ssl: { ca: AKAMAI_CA_CERT },
         });
 
         try {
@@ -5522,6 +5522,25 @@ Deno.serve(async (req: Request) => {
           try { await sqlAgents.end(); } catch {}
           return jsonResponse({ error: agErr instanceof Error ? agErr.message : "Query failed" }, 500);
         }
+      }
+
+      case "search-portal-agencies": {
+        const searchQ = (body.query as string || "").trim();
+        if (!searchQ || searchQ.length < 2) return jsonResponse({ error: "query must be at least 2 characters" }, 400);
+
+        // Query Portal DB hierarchy_agencies
+        const portalUrl = Deno.env.get("CONTRACTING_SUPABASE_URL")!;
+        const portalKey = Deno.env.get("CONTRACTING_SUPABASE_ANON_KEY") || Deno.env.get("CONTRACTING_SUPABASE_PUBLISHABLE_KEY") || "";
+        const portalClient = createClient(portalUrl, portalKey);
+
+        const { data: portalRows, error: portalErr } = await portalClient
+          .from("hierarchy_agencies")
+          .select("id, name, unl_writing_number, carriers, aliases, agency_type")
+          .or(`name.ilike.%${searchQ}%,unl_writing_number.ilike.%${searchQ}%`)
+          .order("name")
+          .limit(20);
+        if (portalErr) return jsonResponse({ error: portalErr.message }, 500);
+        return jsonResponse({ agencies: portalRows ?? [] });
       }
 
       default:

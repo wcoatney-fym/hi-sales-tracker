@@ -1633,6 +1633,22 @@ export async function adminBulkSeedCarrierAgentMappings(
   return callApi("admin-api", { action: "bulk-seed-carrier-agent-mappings", token, mappings }) as Promise<{ ok: boolean; count: number }>;
 }
 
+export interface PortalAgencySearchResult {
+  id: string;
+  name: string;
+  unl_writing_number: string | null;
+  carriers: string[] | null;
+  aliases: string[] | null;
+  agency_type: string | null;
+}
+
+export async function adminSearchPortalAgencies(
+  token: string,
+  query: string
+): Promise<{ agencies: PortalAgencySearchResult[] }> {
+  return callApi("admin-api", { action: "search-portal-agencies", token, query }) as Promise<{ agencies: PortalAgencySearchResult[] }>;
+}
+
 export async function adminFetchCarrierAgenciesFromProd(
   token: string,
   carrier: string
