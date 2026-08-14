@@ -3,7 +3,6 @@ import {
   Building2,
   Users,
   ChevronRight,
-  ChevronDown,
   Check,
   X,
   Link2,
@@ -16,7 +15,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   HelpCircle,
-  Download,
 } from "lucide-react";
 import {
   adminListCarrierAgencyMappings,
@@ -24,11 +22,9 @@ import {
   adminConfirmCarrierAgencyMapping,
   adminDeleteCarrierAgencyMapping,
   adminListCarrierAgentMappings,
-  adminFetchCarrierAgenciesFromProd,
   adminFetchCarrierAgentsFromProd,
   type CarrierAgencyMapping,
   type CarrierAgentMapping,
-  type CarrierProdAgency,
   type CarrierProdAgent,
 } from "../../lib/api";
 
@@ -53,12 +49,6 @@ export default function CarrierMappingPanel({ token }: CarrierMappingPanelProps)
   const [prodAgents, setProdAgents] = useState<CarrierProdAgent[]>([]);
   const [agentLoading, setAgentLoading] = useState(false);
 
-  // Portal agency picker state (for manual matching)
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [portalSearch, setPortalSearch] = useState("");
-
-  // Fetch from prod state
-  const [fetchingCarrier, setFetchingCarrier] = useState<string | null>(null);
 
   // Stats
   const [stats, setStats] = useState({ total: 0, matched: 0, confirmed: 0, totalPolicies: 0, matchedPolicies: 0 });
@@ -122,18 +112,6 @@ export default function CarrierMappingPanel({ token }: CarrierMappingPanelProps)
     }
   };
 
-  const handleFetchFromProd = async (carrierToFetch: string) => {
-    setFetchingCarrier(carrierToFetch);
-    try {
-      const res = await adminFetchCarrierAgenciesFromProd(token, carrierToFetch);
-      // Show count
-      alert(`Found ${res.agencies.length} agencies for ${carrierToFetch} in production data. Use the seed script to import them.`);
-    } catch (err) {
-      alert(`Error fetching: ${err instanceof Error ? err.message : "Unknown"}`);
-    } finally {
-      setFetchingCarrier(null);
-    }
-  };
 
   // Agent drill-down
   const openAgencyDrillDown = async (mapping: CarrierAgencyMapping) => {
