@@ -1523,3 +1523,127 @@ export async function adminRunGhlBackfill(
     dry: opts?.dry ?? false,
   }) as Promise<{ ok: boolean; agency_id: string; date_from: string; result: Record<string, unknown> }>;
 }
+
+// ---------------------------------------------------------------------------
+// Carrier Agency / Agent Mappings
+// ---------------------------------------------------------------------------
+export interface CarrierAgencyMapping {
+  id: string;
+  carrier: string;
+  carrier_agency_name: string;
+  carrier_agency_code: string | null;
+  portal_agency_id: string | null;
+  portal_agency_name: string | null;
+  unl_writing_number: string | null;
+  match_method: string;
+  match_confidence: number | null;
+  is_confirmed: boolean;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  policy_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CarrierAgentMapping {
+  id: string;
+  carrier: string;
+  carrier_agent_name: string;
+  carrier_agent_code: string | null;
+  carrier_agency_mapping_id: string | null;
+  canonical_agent_name: string | null;
+  tracker_agent_id: string | null;
+  match_method: string;
+  match_confidence: number | null;
+  is_confirmed: boolean;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  policy_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CarrierProdAgency {
+  name: string;
+  code: string;
+  policy_count: number;
+}
+
+export interface CarrierProdAgent {
+  name: string;
+  code: string;
+  policy_count: number;
+}
+
+export async function adminListCarrierAgencyMappings(
+  token: string,
+  carrier?: string
+): Promise<{ mappings: CarrierAgencyMapping[] }> {
+  return callApi("admin-api", { action: "list-carrier-agency-mappings", token, carrier }) as Promise<{ mappings: CarrierAgencyMapping[] }>;
+}
+
+export async function adminUpsertCarrierAgencyMapping(
+  token: string,
+  mapping: Partial<CarrierAgencyMapping> & { carrier: string; carrier_agency_name: string }
+): Promise<{ mapping: CarrierAgencyMapping }> {
+  return callApi("admin-api", { action: "upsert-carrier-agency-mapping", token, mapping }) as Promise<{ mapping: CarrierAgencyMapping }>;
+}
+
+export async function adminConfirmCarrierAgencyMapping(
+  token: string,
+  id: string,
+  confirmedBy?: string
+): Promise<{ mapping: CarrierAgencyMapping }> {
+  return callApi("admin-api", { action: "confirm-carrier-agency-mapping", token, id, confirmed_by: confirmedBy }) as Promise<{ mapping: CarrierAgencyMapping }>;
+}
+
+export async function adminDeleteCarrierAgencyMapping(
+  token: string,
+  id: string
+): Promise<{ ok: boolean }> {
+  return callApi("admin-api", { action: "delete-carrier-agency-mapping", token, id }) as Promise<{ ok: boolean }>;
+}
+
+export async function adminBulkSeedCarrierAgencyMappings(
+  token: string,
+  mappings: Partial<CarrierAgencyMapping>[]
+): Promise<{ ok: boolean; count: number }> {
+  return callApi("admin-api", { action: "bulk-seed-carrier-agency-mappings", token, mappings }) as Promise<{ ok: boolean; count: number }>;
+}
+
+export async function adminListCarrierAgentMappings(
+  token: string,
+  carrier?: string,
+  agencyMappingId?: string
+): Promise<{ mappings: CarrierAgentMapping[] }> {
+  return callApi("admin-api", { action: "list-carrier-agent-mappings", token, carrier, agency_mapping_id: agencyMappingId }) as Promise<{ mappings: CarrierAgentMapping[] }>;
+}
+
+export async function adminUpsertCarrierAgentMapping(
+  token: string,
+  mapping: Partial<CarrierAgentMapping> & { carrier: string; carrier_agent_name: string }
+): Promise<{ mapping: CarrierAgentMapping }> {
+  return callApi("admin-api", { action: "upsert-carrier-agent-mapping", token, mapping }) as Promise<{ mapping: CarrierAgentMapping }>;
+}
+
+export async function adminBulkSeedCarrierAgentMappings(
+  token: string,
+  mappings: Partial<CarrierAgentMapping>[]
+): Promise<{ ok: boolean; count: number }> {
+  return callApi("admin-api", { action: "bulk-seed-carrier-agent-mappings", token, mappings }) as Promise<{ ok: boolean; count: number }>;
+}
+
+export async function adminFetchCarrierAgenciesFromProd(
+  token: string,
+  carrier: string
+): Promise<{ carrier: string; agencies: CarrierProdAgency[] }> {
+  return callApi("admin-api", { action: "fetch-carrier-agencies-from-prod", token, carrier }) as Promise<{ carrier: string; agencies: CarrierProdAgency[] }>;
+}
+
+export async function adminFetchCarrierAgentsFromProd(
+  token: string,
+  carrier: string,
+  agencyCode: string
+): Promise<{ carrier: string; agency_code: string; agents: CarrierProdAgent[] }> {
+  return callApi("admin-api", { action: "fetch-carrier-agents-from-prod", token, carrier, agency_code: agencyCode }) as Promise<{ carrier: string; agency_code: string; agents: CarrierProdAgent[] }>;
+}

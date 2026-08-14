@@ -5164,6 +5164,366 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ ok: true, agency_id: agencyId, date_from: effectiveDateFrom, result: backfillBody });
       }
 
+      // ---------------------------------------------------------------
+      // Carrier Agency Mappings — CRUD
+      // ---------------------------------------------------------------
+      case "list-carrier-agency-mappings": {
+        const camCarrier = body.carrier as string | undefined;
+        let query = trackerClient
+          .from("carrier_agency_mappings")
+          .select("*")
+          .order("carrier", { ascending: true })
+          .order("policy_count", { ascending: false });
+        if (camCarrier) query = query.eq("carrier", camCarrier);
+        const { data: camRows, error: camErr } = await query;
+        if (camErr) return jsonResponse({ error: camErr.message }, 500);
+        return jsonResponse({ mappings: camRows ?? [] });
+      }
+
+      case "upsert-carrier-agency-mapping": {
+        const cam = body.mapping as {
+          id?: string;
+          carrier: string;
+          carrier_agency_name: string;
+          carrier_agency_code?: string;
+          portal_agency_id?: string;
+          portal_agency_name?: string;
+          unl_writing_number?: string;
+          match_method?: string;
+          match_confidence?: number;
+          is_confirmed?: boolean;
+          confirmed_by?: string;
+          policy_count?: number;
+        };
+        if (!cam?.carrier || !cam?.carrier_agency_name) {
+          return jsonResponse({ error: "carrier and carrier_agency_name required" }, 400);
+        }
+        const camRow: Record<string, unknown> = {
+          carrier: cam.carrier,
+          carrier_agency_name: cam.carrier_agency_name,
+          carrier_agency_code: cam.carrier_agency_code ?? null,
+          portal_agency_id: cam.portal_agency_id ?? null,
+          portal_agency_name: cam.portal_agency_name ?? null,
+          unl_writing_number: cam.unl_writing_number ?? null,
+          match_method: cam.match_method ?? "manual",
+          match_confidence: cam.match_confidence ?? null,
+          is_confirmed: cam.is_confirmed ?? false,
+          confirmed_by: cam.confirmed_by ?? null,
+          policy_count: cam.policy_count ?? 0,
+        };
+        if (cam.is_confirmed) camRow.confirmed_at = new Date().toISOString();
+        if (cam.id) camRow.id = cam.id;
+
+        const { data: upserted, error: upsertErr } = await trackerClient
+          .from("carrier_agency_mappings")
+          .upsert(camRow, { onConflict: "carrier,carrier_agency_name" })
+          .select()
+          .single();
+        if (upsertErr) return jsonResponse({ error: upsertErr.message }, 500);
+        return jsonResponse({ mapping: upserted });
+      }
+
+      case "confirm-carrier-agency-mapping": {
+        const confirmId = body.id as string;
+        if (!confirmId) return jsonResponse({ error: "id required" }, 400);
+        const { data: confirmed, error: confirmErr } = await trackerClient
+          .from("carrier_agency_mappings")
+          .update({
+            is_confirmed: true,
+            confirmed_by: body.confirmed_by ?? "admin",
+            confirmed_at: new Date().toISOString(),
+          })
+          .eq("id", confirmId)
+          .select()
+          .single();
+        if (confirmErr) return jsonResponse({ error: confirmErr.message }, 500);
+        return jsonResponse({ mapping: confirmed });
+      }
+
+      case "delete-carrier-agency-mapping": {
+        const delId = body.id as string;
+        if (!delId) return jsonResponse({ error: "id required" }, 400);
+        const { error: delErr } = await trackerClient
+          .from("carrier_agency_mappings")
+          .delete()
+          .eq("id", delId);
+        if (delErr) return jsonResponse({ error: delErr.message }, 500);
+        return jsonResponse({ ok: true });
+      }
+
+      case "bulk-seed-carrier-agency-mappings": {
+        const seedMappings = body.mappings as {
+          carrier: string;
+          carrier_agency_name: string;
+          carrier_agency_code?: string;
+          portal_agency_id?: string;
+          portal_agency_name?: string;
+          unl_writing_number?: string;
+          match_method?: string;
+          match_confidence?: number;
+          policy_count?: number;
+        }[];
+        if (!seedMappings?.length) return jsonResponse({ error: "mappings array required" }, 400);
+        const seedRows = seedMappings.map((m) => ({
+          carrier: m.carrier,
+          carrier_agency_name: m.carrier_agency_name,
+          carrier_agency_code: m.carrier_agency_code ?? null,
+          portal_agency_id: m.portal_agency_id ?? null,
+          portal_agency_name: m.portal_agency_name ?? null,
+          unl_writing_number: m.unl_writing_number ?? null,
+          match_method: m.match_method ?? "automated",
+          match_confidence: m.match_confidence ?? null,
+          is_confirmed: false,
+          policy_count: m.policy_count ?? 0,
+        }));
+        const { data: seeded, error: seedErr } = await trackerClient
+          .from("carrier_agency_mappings")
+          .upsert(seedRows, { onConflict: "carrier,carrier_agency_name" })
+          .select();
+        if (seedErr) return jsonResponse({ error: seedErr.message }, 500);
+        return jsonResponse({ ok: true, count: (seeded ?? []).length });
+      }
+
+      // ---------------------------------------------------------------
+      // Carrier Agent Mappings — CRUD
+      // ---------------------------------------------------------------
+      case "list-carrier-agent-mappings": {
+        const agentCarrier = body.carrier as string | undefined;
+        const agencyMappingId = body.agency_mapping_id as string | undefined;
+        let agentQuery = trackerClient
+          .from("carrier_agent_mappings")
+          .select("*")
+          .order("policy_count", { ascending: false });
+        if (agentCarrier) agentQuery = agentQuery.eq("carrier", agentCarrier);
+        if (agencyMappingId) agentQuery = agentQuery.eq("carrier_agency_mapping_id", agencyMappingId);
+        const { data: agentRows, error: agentErr } = await agentQuery;
+        if (agentErr) return jsonResponse({ error: agentErr.message }, 500);
+        return jsonResponse({ mappings: agentRows ?? [] });
+      }
+
+      case "upsert-carrier-agent-mapping": {
+        const agm = body.mapping as {
+          id?: string;
+          carrier: string;
+          carrier_agent_name: string;
+          carrier_agent_code?: string;
+          carrier_agency_mapping_id?: string;
+          canonical_agent_name?: string;
+          tracker_agent_id?: string;
+          match_method?: string;
+          match_confidence?: number;
+          is_confirmed?: boolean;
+          confirmed_by?: string;
+          policy_count?: number;
+        };
+        if (!agm?.carrier || !agm?.carrier_agent_name) {
+          return jsonResponse({ error: "carrier and carrier_agent_name required" }, 400);
+        }
+        const agmRow: Record<string, unknown> = {
+          carrier: agm.carrier,
+          carrier_agent_name: agm.carrier_agent_name,
+          carrier_agent_code: agm.carrier_agent_code ?? null,
+          carrier_agency_mapping_id: agm.carrier_agency_mapping_id ?? null,
+          canonical_agent_name: agm.canonical_agent_name ?? null,
+          tracker_agent_id: agm.tracker_agent_id ?? null,
+          match_method: agm.match_method ?? "manual",
+          match_confidence: agm.match_confidence ?? null,
+          is_confirmed: agm.is_confirmed ?? false,
+          confirmed_by: agm.confirmed_by ?? null,
+          policy_count: agm.policy_count ?? 0,
+        };
+        if (agm.is_confirmed) agmRow.confirmed_at = new Date().toISOString();
+        if (agm.id) agmRow.id = agm.id;
+
+        const { data: agmUpserted, error: agmUpsertErr } = await trackerClient
+          .from("carrier_agent_mappings")
+          .upsert(agmRow, { onConflict: "carrier,carrier_agent_code" })
+          .select()
+          .single();
+        if (agmUpsertErr) return jsonResponse({ error: agmUpsertErr.message }, 500);
+        return jsonResponse({ mapping: agmUpserted });
+      }
+
+      case "bulk-seed-carrier-agent-mappings": {
+        const agentSeedMappings = body.mappings as {
+          carrier: string;
+          carrier_agent_name: string;
+          carrier_agent_code?: string;
+          carrier_agency_mapping_id?: string;
+          canonical_agent_name?: string;
+          match_method?: string;
+          match_confidence?: number;
+          policy_count?: number;
+        }[];
+        if (!agentSeedMappings?.length) return jsonResponse({ error: "mappings array required" }, 400);
+        const agentSeedRows = agentSeedMappings.map((m) => ({
+          carrier: m.carrier,
+          carrier_agent_name: m.carrier_agent_name,
+          carrier_agent_code: m.carrier_agent_code ?? null,
+          carrier_agency_mapping_id: m.carrier_agency_mapping_id ?? null,
+          canonical_agent_name: m.canonical_agent_name ?? null,
+          match_method: m.match_method ?? "automated",
+          match_confidence: m.match_confidence ?? null,
+          is_confirmed: false,
+          policy_count: m.policy_count ?? 0,
+        }));
+        const { data: agentSeeded, error: agentSeedErr } = await trackerClient
+          .from("carrier_agent_mappings")
+          .upsert(agentSeedRows, { onConflict: "carrier,carrier_agent_code" })
+          .select();
+        if (agentSeedErr) return jsonResponse({ error: agentSeedErr.message }, 500);
+        return jsonResponse({ ok: true, count: (agentSeeded ?? []).length });
+      }
+
+      // ---------------------------------------------------------------
+      // Carrier Mapping — Live Agency/Agent Data from Max's DB
+      // ---------------------------------------------------------------
+      case "fetch-carrier-agencies-from-prod": {
+        const fetchCarrier = body.carrier as string;
+        if (!fetchCarrier) return jsonResponse({ error: "carrier required" }, 400);
+
+        const { default: pgFetchCarrier } = await import("npm:postgres@3.4.5");
+        const rawHost = Deno.env.get("PROD_DB_HOST") ?? "";
+        const cleanHost = rawHost.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        const rawPort = Deno.env.get("PROD_DB_PORT") ?? "5432";
+        const cleanPort = rawPort.replace(/\D/g, "");
+        const sqlFetch = pgFetchCarrier({
+          host: cleanHost,
+          port: Number(cleanPort),
+          database: Deno.env.get("PROD_DB_NAME"),
+          username: Deno.env.get("PROD_DB_USER"),
+          password: Deno.env.get("PROD_DB_PASSWORD"),
+          ssl: "require",
+        });
+
+        try {
+          await sqlFetch.unsafe("SET statement_timeout = '30s'");
+          let agencies: { name: string; code: string; policy_count: number }[] = [];
+
+          if (fetchCarrier === "AHL") {
+            const rows = await sqlFetch.unsafe(`
+              SELECT ga_name AS name, ga_number AS code, COUNT(*)::int AS policy_count
+              FROM typed.ahl_fym_policy_latest_load
+              WHERE ga_name IS NOT NULL
+              GROUP BY ga_name, ga_number
+              ORDER BY COUNT(*) DESC
+            `);
+            agencies = rows as typeof agencies;
+          } else if (fetchCarrier === "GTL") {
+            const rows = await sqlFetch.unsafe(`
+              SELECT ga_name AS name, ga AS code, COUNT(*)::int AS policy_count
+              FROM typed.gtl_fym_policy_latest_load
+              WHERE ga_name IS NOT NULL
+              GROUP BY ga_name, ga
+              ORDER BY COUNT(*) DESC
+            `);
+            agencies = rows as typeof agencies;
+          } else if (fetchCarrier === "Manhattan") {
+            // Manhattan has no GA-level field — return distinct writing agents grouped by group_no_name
+            const rows = await sqlFetch.unsafe(`
+              SELECT
+                COALESCE(NULLIF(TRIM(group_no_name), ''), 'Ungrouped') AS name,
+                COALESCE(NULLIF(TRIM(group_no_name), ''), 'UNGROUPED') AS code,
+                COUNT(*)::int AS policy_count
+              FROM typed.manhattan_policy_latest_load
+              GROUP BY group_no_name
+              ORDER BY COUNT(*) DESC
+            `);
+            agencies = rows as typeof agencies;
+          } else if (fetchCarrier === "Heartland") {
+            const rows = await sqlFetch.unsafe(`
+              SELECT
+                COALESCE(NULLIF(TRIM(split_part(upline, ' - ', 2)), ''), upline, 'Unknown') AS name,
+                COALESCE(NULLIF(TRIM(split_part(upline, ' - ', 1)), ''), 'UNKNOWN') AS code,
+                COUNT(*)::int AS policy_count
+              FROM typed.heartland_inforced_policy_latest
+              GROUP BY upline
+              ORDER BY COUNT(*) DESC
+            `);
+            agencies = rows as typeof agencies;
+          } else {
+            await sqlFetch.end();
+            return jsonResponse({ error: `Unknown carrier: ${fetchCarrier}` }, 400);
+          }
+          await sqlFetch.end();
+          return jsonResponse({ carrier: fetchCarrier, agencies });
+        } catch (fetchErr) {
+          try { await sqlFetch.end(); } catch {}
+          return jsonResponse({ error: fetchErr instanceof Error ? fetchErr.message : "Query failed" }, 500);
+        }
+      }
+
+      case "fetch-carrier-agents-from-prod": {
+        const agCarrier = body.carrier as string;
+        const agAgencyCode = body.agency_code as string;
+        if (!agCarrier || !agAgencyCode) return jsonResponse({ error: "carrier and agency_code required" }, 400);
+
+        const { default: pgFetchAgents } = await import("npm:postgres@3.4.5");
+        const rawHost2 = Deno.env.get("PROD_DB_HOST") ?? "";
+        const cleanHost2 = rawHost2.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        const rawPort2 = Deno.env.get("PROD_DB_PORT") ?? "5432";
+        const cleanPort2 = rawPort2.replace(/\D/g, "");
+        const sqlAgents = pgFetchAgents({
+          host: cleanHost2,
+          port: Number(cleanPort2),
+          database: Deno.env.get("PROD_DB_NAME"),
+          username: Deno.env.get("PROD_DB_USER"),
+          password: Deno.env.get("PROD_DB_PASSWORD"),
+          ssl: "require",
+        });
+
+        try {
+          await sqlAgents.unsafe("SET statement_timeout = '30s'");
+          let agents: { name: string; code: string; policy_count: number }[] = [];
+
+          if (agCarrier === "AHL") {
+            const rows = await sqlAgents.unsafe(`
+              SELECT writing_agent_name AS name, writing_agent_number AS code, COUNT(*)::int AS policy_count
+              FROM typed.ahl_fym_policy_latest_load
+              WHERE ga_number = $1
+              GROUP BY writing_agent_name, writing_agent_number
+              ORDER BY COUNT(*) DESC
+            `, [agAgencyCode]);
+            agents = rows as typeof agents;
+          } else if (agCarrier === "GTL") {
+            const rows = await sqlAgents.unsafe(`
+              SELECT wa_name AS name, wa AS code, COUNT(*)::int AS policy_count
+              FROM typed.gtl_fym_policy_latest_load
+              WHERE ga = $1
+              GROUP BY wa_name, wa
+              ORDER BY COUNT(*) DESC
+            `, [agAgencyCode]);
+            agents = rows as typeof agents;
+          } else if (agCarrier === "Manhattan") {
+            const rows = await sqlAgents.unsafe(`
+              SELECT writing_agent_1_name AS name, writing_agent_1_number AS code, COUNT(*)::int AS policy_count
+              FROM typed.manhattan_policy_latest_load
+              WHERE TRIM(group_no_name) = $1 OR ($1 = 'UNGROUPED' AND (group_no_name IS NULL OR TRIM(group_no_name) = ''))
+              GROUP BY writing_agent_1_name, writing_agent_1_number
+              ORDER BY COUNT(*) DESC
+            `, [agAgencyCode]);
+            agents = rows as typeof agents;
+          } else if (agCarrier === "Heartland") {
+            const rows = await sqlAgents.unsafe(`
+              SELECT (agt_first_name || ' ' || agt_last_name) AS name, agt_code AS code, COUNT(*)::int AS policy_count
+              FROM typed.heartland_inforced_policy_latest
+              WHERE upline ILIKE $1 || '%'
+              GROUP BY agt_first_name, agt_last_name, agt_code
+              ORDER BY COUNT(*) DESC
+            `, [agAgencyCode]);
+            agents = rows as typeof agents;
+          } else {
+            await sqlAgents.end();
+            return jsonResponse({ error: `Unknown carrier: ${agCarrier}` }, 400);
+          }
+          await sqlAgents.end();
+          return jsonResponse({ carrier: agCarrier, agency_code: agAgencyCode, agents });
+        } catch (agErr) {
+          try { await sqlAgents.end(); } catch {}
+          return jsonResponse({ error: agErr instanceof Error ? agErr.message : "Query failed" }, 500);
+        }
+      }
+
       default:
         return jsonResponse({ error: "Unknown action" }, 400);
     }
