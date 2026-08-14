@@ -23,9 +23,11 @@ import {
   adminDeleteCarrierAgencyMapping,
   adminListCarrierAgentMappings,
   adminFetchCarrierAgentsFromProd,
+  adminSearchPortalAgencies,
   type CarrierAgencyMapping,
   type CarrierAgentMapping,
   type CarrierProdAgent,
+  type PortalAgencySearchResult,
 } from "../../lib/api";
 
 const CARRIERS = ["AHL", "GTL", "Manhattan", "Heartland"] as const;
@@ -49,6 +51,12 @@ export default function CarrierMappingPanel({ token }: CarrierMappingPanelProps)
   const [prodAgents, setProdAgents] = useState<CarrierProdAgent[]>([]);
   const [agentLoading, setAgentLoading] = useState(false);
 
+
+  // Manual match state
+  const [matchingId, setMatchingId] = useState<string | null>(null);
+  const [portalSearch, setPortalSearch] = useState("");
+  const [portalResults, setPortalResults] = useState<PortalAgencySearchResult[]>([]);
+  const [portalSearching, setPortalSearching] = useState(false);
 
   // Stats
   const [stats, setStats] = useState({ total: 0, matched: 0, confirmed: 0, totalPolicies: 0, matchedPolicies: 0 });
@@ -106,6 +114,41 @@ export default function CarrierMappingPanel({ token }: CarrierMappingPanelProps)
         match_confidence: undefined,
         is_confirmed: false,
       });
+      fetchMappings();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // Manual match: search Portal agencies
+  const handlePortalSearch = async (query: string) => {
+    setPortalSearch(query);
+    if (query.length < 2) { setPortalResults([]); return; }
+    setPortalSearching(true);
+    try {
+      const res = await adminSearchPortalAgencies(token, query);
+      setPortalResults(res.agencies);
+    } catch {
+      setPortalResults([]);
+    } finally {
+      setPortalSearching(false);
+    }
+  };
+
+  const handleManualMatch = async (mapping: CarrierAgencyMapping, portal: PortalAgencySearchResult) => {
+    try {
+      await adminUpsertCarrierAgencyMapping(token, {
+        ...mapping,
+        portal_agency_id: portal.id,
+        portal_agency_name: portal.name,
+        unl_writing_number: portal.unl_writing_number || undefined,
+        match_method: "manual",
+        match_confidence: 1.0,
+        is_confirmed: false,
+      });
+      setMatchingId(null);
+      setPortalSearch("");
+      setPortalResults([]);
       fetchMappings();
     } catch {
       /* ignore */
@@ -450,11 +493,55 @@ export default function CarrierMappingPanel({ token }: CarrierMappingPanelProps)
                             </p>
                           </div>
                         </>
+                      ) : matchingId === m.id ? (
+                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <div className="relative">
+                            <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500" />
+                            <input
+                              type="text"
+                              value={portalSearch}
+                              onChange={(e) => handlePortalSearch(e.target.value)}
+                              placeholder="Search Portal agencies..."
+                              className="pl-7 pr-2 py-1.5 text-xs bg-slate-800 border border-gold/50 rounded-md text-white placeholder:text-slate-500 focus:outline-none focus:border-gold w-[220px]"
+                              autoFocus
+                            />
+                            {(portalResults.length > 0 || portalSearching) && (
+                              <div className="absolute top-full left-0 mt-1 w-[320px] bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 max-h-[200px] overflow-y-auto">
+                                {portalSearching ? (
+                                  <div className="p-3 text-center text-xs text-slate-400">
+                                    <Loader2 size={14} className="animate-spin inline mr-1" /> Searching...
+                                  </div>
+                                ) : portalResults.map((pa) => (
+                                  <button
+                                    key={pa.id}
+                                    onClick={() => handleManualMatch(m, pa)}
+                                    className="w-full text-left px-3 py-2 hover:bg-slate-700/50 transition-colors border-b border-slate-700/30 last:border-0"
+                                  >
+                                    <p className="text-xs text-white font-medium">{pa.name}</p>
+                                    <p className="text-xs text-slate-500">
+                                      WN: {pa.unl_writing_number || "—"}
+                                      {pa.agency_type ? ` · ${pa.agency_type}` : ""}
+                                    </p>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setMatchingId(null); setPortalSearch(""); setPortalResults([]); }}
+                            className="text-xs text-slate-400 hover:text-red-300"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
                       ) : (
-                        <span className="flex items-center gap-1 text-xs text-yellow-400">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setMatchingId(m.id); setPortalSearch(""); setPortalResults([]); }}
+                          className="flex items-center gap-1 text-xs text-yellow-400 hover:text-gold transition-colors"
+                        >
                           <AlertTriangle size={12} />
-                          Unmatched
-                        </span>
+                          Unmatched — click to assign
+                        </button>
                       )}
                     </div>
 

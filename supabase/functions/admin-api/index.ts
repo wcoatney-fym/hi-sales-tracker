@@ -5393,7 +5393,7 @@ Deno.serve(async (req: Request) => {
           database: Deno.env.get("PROD_DB_NAME"),
           username: Deno.env.get("PROD_DB_USER"),
           password: Deno.env.get("PROD_DB_PASSWORD"),
-          ssl: "require",
+          ssl: { ca: AKAMAI_CA_CERT },
         });
 
         try {
@@ -5469,7 +5469,7 @@ Deno.serve(async (req: Request) => {
           database: Deno.env.get("PROD_DB_NAME"),
           username: Deno.env.get("PROD_DB_USER"),
           password: Deno.env.get("PROD_DB_PASSWORD"),
-          ssl: "require",
+          ssl: { ca: AKAMAI_CA_CERT },
         });
 
         try {
@@ -5522,6 +5522,25 @@ Deno.serve(async (req: Request) => {
           try { await sqlAgents.end(); } catch {}
           return jsonResponse({ error: agErr instanceof Error ? agErr.message : "Query failed" }, 500);
         }
+      }
+
+      case "search-portal-agencies": {
+        const searchQ = (body.query as string || "").trim();
+        if (!searchQ || searchQ.length < 2) return jsonResponse({ error: "query must be at least 2 characters" }, 400);
+
+        // Query Portal DB hierarchy_agencies
+        const portalUrl = Deno.env.get("CONTRACTING_SUPABASE_URL")!;
+        const portalKey = Deno.env.get("CONTRACTING_SUPABASE_ANON_KEY") || Deno.env.get("CONTRACTING_SUPABASE_PUBLISHABLE_KEY") || "";
+        const portalClient = createClient(portalUrl, portalKey);
+
+        const { data: portalRows, error: portalErr } = await portalClient
+          .from("hierarchy_agencies")
+          .select("id, name, unl_writing_number, carriers, aliases, agency_type")
+          .or(`name.ilike.%${searchQ}%,unl_writing_number.ilike.%${searchQ}%`)
+          .order("name")
+          .limit(20);
+        if (portalErr) return jsonResponse({ error: portalErr.message }, 500);
+        return jsonResponse({ agencies: portalRows ?? [] });
       }
 
       default:
