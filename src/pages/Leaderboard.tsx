@@ -67,6 +67,7 @@ export default function Leaderboard() {
   } | null>(null);
   const [promoCountdown, setPromoCountdown] = useState("");
   const [boardMode, setBoardMode] = useState<BoardMode>("agency");
+  const [carrierFilter, setCarrierFilter] = useState<string>("");
 
   // Resolve agencyId from either auth source; FYM/global admins default to the FYM agency
   const FYM_AGENCY_ID = "04813b3b-4a2c-4c55-9f7d-3964d26533f3";
@@ -78,10 +79,11 @@ export default function Leaderboard() {
   const fetchData = useCallback(async (mode: BoardMode) => {
     setLoading(true);
     try {
+      const cf = carrierFilter || null;
       const fetchFn = (period: string) =>
         mode === "overall"
-          ? getLeaderboard(period)
-          : getAgencyLeaderboard(agencyId!, period);
+          ? getLeaderboard(period, cf)
+          : getAgencyLeaderboard(agencyId!, period, cf);
 
       const [daily, weekly, monthly, yearly, ch, bg] = await Promise.all([
         fetchFn("daily"),
@@ -132,7 +134,7 @@ export default function Leaderboard() {
     }
     if (!agencyId && boardMode === "agency") return;
     fetchData(boardMode);
-  }, [fetchData, authLoading, isAuthenticated, adminToken, agencyId, boardMode, navigate]);
+  }, [fetchData, authLoading, isAuthenticated, adminToken, agencyId, boardMode, carrierFilter, navigate]);
 
   useEffect(() => {
     if (!dailyData?.resetTime) return;
@@ -227,6 +229,28 @@ export default function Leaderboard() {
                   <Globe size={13} />
                   Overall Hierarchy
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Carrier filter */}
+          {showToggle && (
+            <div className="flex items-center justify-center mb-3">
+              <div className="flex items-center gap-1 px-1.5 py-1 rounded-lg bg-navy-light/60 border border-slate-700/50">
+                <Filter size={11} className="text-slate-500 ml-1" />
+                {([["" , "All"], ["UNL", "UNL"], ["AHL", "AHL"], ["GTL", "GTL"], ["Heartland", "Heartland"]] as [string, string][]).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => setCarrierFilter(val)}
+                    className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${
+                      carrierFilter === val
+                        ? "bg-gold text-navy-dark"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
             </div>
           )}

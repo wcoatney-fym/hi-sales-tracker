@@ -229,6 +229,7 @@ Deno.serve(async (req: Request) => {
 
     if (action === "get-leaderboard") {
       const period = url.searchParams.get("period") || "weekly";
+      const carrierFilter = url.searchParams.get("carrier") || null;
       const { start, end } = getDateRange(period);
 
       // Get all agent writing numbers (for matching Intake Form submissions)
@@ -267,7 +268,7 @@ Deno.serve(async (req: Request) => {
       const resolveNumber = (num: string) => agentCanonicalMap[num] || num;
 
       // Get all submissions in the period (agency-tagged)
-      const { data: agencySubmissions } = await supabase
+      let agencyQuery = supabase
         .from("form_submissions")
         .select(
           "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, agency, policy_number"
@@ -275,8 +276,10 @@ Deno.serve(async (req: Request) => {
         .not("agency", "is", null)
         .gte("app_submit_date", start)
         .lte("app_submit_date", end);
+      if (carrierFilter) agencyQuery = agencyQuery.eq("carrier", carrierFilter);
+      const { data: agencySubmissions } = await agencyQuery;
 
-      const { data: intakeSubmissions } = await supabase
+      let intakeQuery = supabase
         .from("form_submissions")
         .select(
           "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, agency, policy_number"
@@ -285,6 +288,8 @@ Deno.serve(async (req: Request) => {
         .is("agency", null)
         .gte("app_submit_date", start)
         .lte("app_submit_date", end);
+      if (carrierFilter) intakeQuery = intakeQuery.eq("carrier", carrierFilter);
+      const { data: intakeSubmissions } = await intakeQuery;
 
       // Combine, filtering intake submissions to known agents only
       const submissions = [
@@ -540,6 +545,7 @@ Deno.serve(async (req: Request) => {
       const agencyId = url.searchParams.get("agency_id");
       if (!agencyId) return errorResponse("agency_id is required");
       const period = url.searchParams.get("period") || "weekly";
+      const carrierFilter2 = url.searchParams.get("carrier") || null;
       const { start, end } = getDateRange(period);
 
       // Verify agency exists
@@ -581,7 +587,7 @@ Deno.serve(async (req: Request) => {
       const resolveNumber2 = (num: string) => agentCanonicalMap2[num] || num;
 
       // Get submissions for this agency in the period
-      const { data: agencySubs } = await supabase
+      let agencySubsQuery = supabase
         .from("form_submissions")
         .select(
           "agent_first_name, agent_last_name, agent_number, client_first_name, client_last_name, carrier, plan_premium, app_submit_date, created_at, source, status, policy_number"
@@ -589,6 +595,8 @@ Deno.serve(async (req: Request) => {
         .eq("agency_id", agencyId)
         .gte("app_submit_date", start)
         .lte("app_submit_date", end);
+      if (carrierFilter2) agencySubsQuery = agencySubsQuery.eq("carrier", carrierFilter2);
+      const { data: agencySubs } = await agencySubsQuery;
 
       const submissions = (agencySubs || [])
         .filter((s) => s.status !== "duplicate")
@@ -827,6 +835,7 @@ Deno.serve(async (req: Request) => {
       // admins only.
       let qmAgencyId = url.searchParams.get("agency_id");
       const qmAgencyName = url.searchParams.get("agency_name");
+      const qmCarrierFilter = url.searchParams.get("carrier") || null;
       // Multi-agency scope (e.g. "All Internal" = FYM + Wisechoice): comma list.
       const qmAgencyNames = url.searchParams.get("agency_names");
       if (!qmAgencyId && qmAgencyName) {
@@ -859,6 +868,7 @@ Deno.serve(async (req: Request) => {
         const { data: multiData, error: multiErr } = await supabase.rpc("get_quality_metrics", {
           p_agency_id: null,
           p_agency_ids: ids,
+          p_carrier: qmCarrierFilter,
         });
         if (multiErr) return errorResponse(multiErr.message, 500);
         return jsonResponse(multiData || { placement: [], persistency: [] });
@@ -869,6 +879,7 @@ Deno.serve(async (req: Request) => {
       }
       const { data: qmData, error: qmError } = await supabase.rpc("get_quality_metrics", {
         p_agency_id: qmAgencyId || null,
+        p_carrier: qmCarrierFilter,
       });
       if (qmError) return errorResponse(qmError.message, 500);
       return jsonResponse(qmData || { placement: [], persistency: [] });

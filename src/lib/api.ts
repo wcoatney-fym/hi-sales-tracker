@@ -582,20 +582,21 @@ async function callLeaderboardApi(params: Record<string, string>) {
   return data;
 }
 
-export async function getLeaderboard(period: string) {
-  return callLeaderboardApi({ action: "get-leaderboard", period });
+export async function getLeaderboard(period: string, carrier?: string | null) {
+  return callLeaderboardApi({ action: "get-leaderboard", period, ...(carrier ? { carrier } : {}) });
 }
 
-export async function getAgencyLeaderboard(agencyId: string, period: string) {
+export async function getAgencyLeaderboard(agencyId: string, period: string, carrier?: string | null) {
   // Agency data requires an authorized session (admin, agent, or manager)
   const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
-  return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token });
+  return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token, ...(carrier ? { carrier } : {}) });
 }
 
 export async function getQualityMetrics(
   agencyId?: string | null,
   agencyName?: string | null,
   agencyNames?: string[] | null,
+  carrier?: string | null,
 ) {
   // Quality data requires an authorized session (admin, agent, or manager)
   const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
@@ -604,6 +605,7 @@ export async function getQualityMetrics(
     ...(agencyNames && agencyNames.length ? { agency_names: agencyNames.join(",") } : {}),
     ...(!agencyNames && agencyId ? { agency_id: agencyId } : {}),
     ...(!agencyNames && !agencyId && agencyName ? { agency_name: agencyName } : {}),
+    ...(carrier ? { carrier } : {}),
     token,
   });
 }
