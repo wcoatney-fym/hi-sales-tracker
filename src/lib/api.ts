@@ -1698,6 +1698,21 @@ export async function adminGetCarrierColumnMappingStats(
   return callApi("admin-api", { action: "get-carrier-column-mapping-stats", token }) as Promise<{ stats: Record<string, { total: number; active: number }> }>;
 }
 
+export async function adminApplyCarrierTemplate(
+  token: string,
+  sourceId: string,
+  carrier: string,
+  sourceColumns?: string[]
+): Promise<{ success: boolean; applied: number; total_template: number; skipped: number }> {
+  return callApi("admin-api", {
+    action: "apply-carrier-template",
+    token,
+    sourceId,
+    carrier,
+    sourceColumns: sourceColumns || [],
+  }) as Promise<{ success: boolean; applied: number; total_template: number; skipped: number }>;
+}
+
 export async function adminFetchCarrierAgenciesFromProd(
   token: string,
   carrier: string

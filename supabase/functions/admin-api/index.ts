@@ -2269,6 +2269,49 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ success: true });
       }
 
+      case "apply-carrier-template": {
+        // Copy carrier_column_mappings → column_mappings for a specific data source
+        const { sourceId: actSourceId, carrier: actCarrier, sourceColumns: actSourceCols } = body;
+        if (!actSourceId || !actCarrier) {
+          return jsonResponse({ error: "sourceId and carrier required" }, 400);
+        }
+
+        const { data: carrierTpl } = await supabase
+          .from("carrier_column_mappings")
+          .select("carrier_column, unl_column")
+          .eq("carrier", actCarrier);
+
+        if (!carrierTpl || carrierTpl.length === 0) {
+          return jsonResponse({ error: `No carrier template found for ${actCarrier}` }, 404);
+        }
+
+        // Only apply mappings where the carrier_column exists in the source's actual columns
+        const sourceColSet = new Set(Array.isArray(actSourceCols) ? actSourceCols : []);
+        const applicableMappings = sourceColSet.size > 0
+          ? carrierTpl.filter((m: { carrier_column: string }) => sourceColSet.has(m.carrier_column))
+          : carrierTpl;
+
+        // Delete existing per-source mappings and replace with carrier template
+        await supabase.from("column_mappings").delete().eq("data_source_id", actSourceId);
+
+        if (applicableMappings.length > 0) {
+          const rows = applicableMappings.map((m: { carrier_column: string; unl_column: string }) => ({
+            data_source_id: actSourceId,
+            source_column: m.carrier_column,
+            target_field: m.unl_column,
+          }));
+          const { error: insErr } = await supabase.from("column_mappings").insert(rows);
+          if (insErr) throw insErr;
+        }
+
+        return jsonResponse({
+          success: true,
+          applied: applicableMappings.length,
+          total_template: carrierTpl.length,
+          skipped: carrierTpl.length - applicableMappings.length,
+        });
+      }
+
       case "analyze-source-upload": {
         const { sourceId: asSourceId, records: asRecords, carrier: asCarrier, filename: asFilename } = body;
         if (!asSourceId || !asRecords || !Array.isArray(asRecords) || asRecords.length === 0) {
@@ -2288,7 +2331,26 @@ Deno.serve(async (req: Request) => {
 
         const headers = Object.keys(asRecords[0] || {});
 
-        // Fallback: if no mappings for this source, look for matching mappings from other data sources
+        // Priority 1: if no per-source mappings, check carrier_column_mappings template
+        if (Object.keys(mappingMap).length === 0 && asCarrier) {
+          const { data: carrierMappings } = await supabase
+            .from("carrier_column_mappings")
+            .select("carrier_column, unl_column")
+            .eq("carrier", asCarrier);
+
+          if (carrierMappings && carrierMappings.length > 0) {
+            for (const cm of carrierMappings) {
+              // carrier_column_mappings maps carrier col → UNL col name
+              // column_mappings maps source DB col → target field (UNL name)
+              // So carrier_column = source DB col, unl_column = target field
+              if (headers.includes(cm.carrier_column)) {
+                mappingMap[cm.carrier_column] = cm.unl_column;
+              }
+            }
+          }
+        }
+
+        // Priority 2: fallback to matching mappings from other data sources
         if (Object.keys(mappingMap).length === 0) {
           const { data: allMappings } = await supabase
             .from("column_mappings")
