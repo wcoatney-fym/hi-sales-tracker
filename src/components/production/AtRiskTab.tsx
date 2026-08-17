@@ -12,6 +12,7 @@ import {
   X,
   Activity,
   Building2,
+  Filter,
 } from "lucide-react";
 import {
   adminGetAtRiskAgentsSummary,
@@ -103,6 +104,8 @@ interface AtRiskTabProps {
   lockedAgency?: string;
 }
 
+const CARRIER_OPTIONS = ["", "UNL", "AHL", "GTL", "Heartland", "Manhattan"] as const;
+
 export default function AtRiskTab({ token, agencyFilter, agencies, lockedAgency }: AtRiskTabProps) {
   const [subtab, setSubtab] = useState<Subtab>(lockedAgency ? "all" : "internal");
   const [selectedAgency, setSelectedAgency] = useState<string>(lockedAgency || "");
@@ -115,6 +118,7 @@ export default function AtRiskTab({ token, agencyFilter, agencies, lockedAgency 
   const [agentPolicies, setAgentPolicies] = useState<AtRiskPolicy[]>([]);
   const [policiesLoading, setPoliciesLoading] = useState(false);
   const [activityModal, setActivityModal] = useState<{ policyId: string; clientName: string } | null>(null);
+  const [carrierFilter, setCarrierFilter] = useState<string>("");
 
   useEffect(() => {
     adminGetAgencies(token).then((result) => {
@@ -132,10 +136,11 @@ export default function AtRiskTab({ token, agencyFilter, agencies, lockedAgency 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
+      const cf = carrierFilter || undefined;
       const [agentsResult, agingResult, trendResult] = await Promise.all([
-        adminGetAtRiskAgentsSummary(token, effectiveAgencyFilter, effectiveAgencies),
-        adminGetAtRiskAging(token, effectiveAgencyFilter, effectiveAgencies),
-        adminGetAtRiskTrend(token, effectiveAgencyFilter, effectiveAgencies),
+        adminGetAtRiskAgentsSummary(token, effectiveAgencyFilter, effectiveAgencies, cf),
+        adminGetAtRiskAging(token, effectiveAgencyFilter, effectiveAgencies, cf),
+        adminGetAtRiskTrend(token, effectiveAgencyFilter, effectiveAgencies, cf),
       ]);
       setAgents(Array.isArray(agentsResult) ? agentsResult : []);
       setAging(agingResult || null);
@@ -145,7 +150,7 @@ export default function AtRiskTab({ token, agencyFilter, agencies, lockedAgency 
     } finally {
       setLoading(false);
     }
-  }, [token, effectiveAgencyFilter, effectiveAgencies]);
+  }, [token, effectiveAgencyFilter, effectiveAgencies, carrierFilter]);
 
   useEffect(() => {
     fetchData();
@@ -160,7 +165,7 @@ export default function AtRiskTab({ token, agencyFilter, agencies, lockedAgency 
     setExpandedAgent(agentNumber);
     setPoliciesLoading(true);
     try {
-      const result = await adminGetAtRiskPoliciesForAgent(token, agentNumber);
+      const result = await adminGetAtRiskPoliciesForAgent(token, agentNumber, carrierFilter || undefined);
       setAgentPolicies(Array.isArray(result) ? result : []);
     } catch {
       setAgentPolicies([]);
@@ -242,6 +247,24 @@ export default function AtRiskTab({ token, agencyFilter, agencies, lockedAgency 
           )}
         </div>
       )}
+
+      {/* Carrier Filter */}
+      <div className="flex items-center gap-1 px-1.5 py-1 rounded-lg bg-navy-light/60 border border-slate-700/50 w-fit">
+        <Filter size={11} className="text-slate-500 ml-1" />
+        {CARRIER_OPTIONS.map((c) => (
+          <button
+            key={c}
+            onClick={() => setCarrierFilter(c)}
+            className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${
+              carrierFilter === c
+                ? "bg-amber-400 text-navy-dark"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            {c || "All Carriers"}
+          </button>
+        ))}
+      </div>
 
       {/* KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

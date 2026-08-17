@@ -582,20 +582,21 @@ async function callLeaderboardApi(params: Record<string, string>) {
   return data;
 }
 
-export async function getLeaderboard(period: string) {
-  return callLeaderboardApi({ action: "get-leaderboard", period });
+export async function getLeaderboard(period: string, carrier?: string | null) {
+  return callLeaderboardApi({ action: "get-leaderboard", period, ...(carrier ? { carrier } : {}) });
 }
 
-export async function getAgencyLeaderboard(agencyId: string, period: string) {
+export async function getAgencyLeaderboard(agencyId: string, period: string, carrier?: string | null) {
   // Agency data requires an authorized session (admin, agent, or manager)
   const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
-  return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token });
+  return callLeaderboardApi({ action: "get-agency-leaderboard", agency_id: agencyId, period, token, ...(carrier ? { carrier } : {}) });
 }
 
 export async function getQualityMetrics(
   agencyId?: string | null,
   agencyName?: string | null,
   agencyNames?: string[] | null,
+  carrier?: string | null,
 ) {
   // Quality data requires an authorized session (admin, agent, or manager)
   const token = localStorage.getItem("admin_token") || localStorage.getItem("agent_session_token") || localStorage.getItem("manager_token") || "";
@@ -604,6 +605,7 @@ export async function getQualityMetrics(
     ...(agencyNames && agencyNames.length ? { agency_names: agencyNames.join(",") } : {}),
     ...(!agencyNames && agencyId ? { agency_id: agencyId } : {}),
     ...(!agencyNames && !agencyId && agencyName ? { agency_name: agencyName } : {}),
+    ...(carrier ? { carrier } : {}),
     token,
   });
 }
@@ -861,20 +863,20 @@ export async function adminPruneSourceRecords(token: string, dryRun = true, rete
   return callApi("admin-api", { action: "prune-source-records", token, dryRun, retentionDays });
 }
 
-export async function adminGetAtRiskAgentsSummary(token: string, agencyFilter?: string, agencies?: string[]) {
-  return callApi("admin-api", { action: "at-risk-agents-summary", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
+export async function adminGetAtRiskAgentsSummary(token: string, agencyFilter?: string, agencies?: string[], carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-agents-summary", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined, carrierFilter: carrierFilter || undefined });
 }
 
-export async function adminGetAtRiskPoliciesForAgent(token: string, agentNumber: string) {
-  return callApi("admin-api", { action: "at-risk-policies-for-agent", token, agentNumber });
+export async function adminGetAtRiskPoliciesForAgent(token: string, agentNumber: string, carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-policies-for-agent", token, agentNumber, carrierFilter: carrierFilter || undefined });
 }
 
-export async function adminGetAtRiskAging(token: string, agencyFilter?: string, agencies?: string[]) {
-  return callApi("admin-api", { action: "at-risk-aging", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
+export async function adminGetAtRiskAging(token: string, agencyFilter?: string, agencies?: string[], carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-aging", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined, carrierFilter: carrierFilter || undefined });
 }
 
-export async function adminGetAtRiskTrend(token: string, agencyFilter?: string, agencies?: string[]) {
-  return callApi("admin-api", { action: "at-risk-trend", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
+export async function adminGetAtRiskTrend(token: string, agencyFilter?: string, agencies?: string[], carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-trend", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined, carrierFilter: carrierFilter || undefined });
 }
 
 export async function adminLogAtRiskActivity(token: string, policyId: string, actionType: string, note: string) {
@@ -1647,6 +1649,68 @@ export async function adminSearchPortalAgencies(
   query: string
 ): Promise<{ agencies: PortalAgencySearchResult[] }> {
   return callApi("admin-api", { action: "search-portal-agencies", token, query }) as Promise<{ agencies: PortalAgencySearchResult[] }>;
+}
+
+// ── Carrier Column Mappings (carrier source col → UNL col) ──────────
+export interface CarrierColumnMapping {
+  id: string;
+  carrier: string;
+  carrier_column: string;
+  unl_column: string;
+  description: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function adminListCarrierColumnMappings(
+  token: string,
+  carrier?: string
+): Promise<{ mappings: CarrierColumnMapping[] }> {
+  return callApi("admin-api", { action: "list-carrier-column-mappings", token, carrier }) as Promise<{ mappings: CarrierColumnMapping[] }>;
+}
+
+export async function adminUpsertCarrierColumnMapping(
+  token: string,
+  mapping: Partial<CarrierColumnMapping> & { carrier: string; carrier_column: string; unl_column: string }
+): Promise<{ success: boolean; mapping: CarrierColumnMapping }> {
+  return callApi("admin-api", { action: "upsert-carrier-column-mapping", token, mapping }) as Promise<{ success: boolean; mapping: CarrierColumnMapping }>;
+}
+
+export async function adminDeleteCarrierColumnMapping(
+  token: string,
+  id: string
+): Promise<{ success: boolean }> {
+  return callApi("admin-api", { action: "delete-carrier-column-mapping", token, id }) as Promise<{ success: boolean }>;
+}
+
+export async function adminBulkUpsertCarrierColumnMappings(
+  token: string,
+  carrier: string,
+  mappings: { carrier_column: string; unl_column: string; description?: string }[]
+): Promise<{ success: boolean; count: number }> {
+  return callApi("admin-api", { action: "bulk-upsert-carrier-column-mappings", token, carrier, mappings }) as Promise<{ success: boolean; count: number }>;
+}
+
+export async function adminGetCarrierColumnMappingStats(
+  token: string
+): Promise<{ stats: Record<string, { total: number; active: number }> }> {
+  return callApi("admin-api", { action: "get-carrier-column-mapping-stats", token }) as Promise<{ stats: Record<string, { total: number; active: number }> }>;
+}
+
+export async function adminApplyCarrierTemplate(
+  token: string,
+  sourceId: string,
+  carrier: string,
+  sourceColumns?: string[]
+): Promise<{ success: boolean; applied: number; total_template: number; skipped: number }> {
+  return callApi("admin-api", {
+    action: "apply-carrier-template",
+    token,
+    sourceId,
+    carrier,
+    sourceColumns: sourceColumns || [],
+  }) as Promise<{ success: boolean; applied: number; total_template: number; skipped: number }>;
 }
 
 export async function adminFetchCarrierAgenciesFromProd(

@@ -2269,6 +2269,49 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ success: true });
       }
 
+      case "apply-carrier-template": {
+        // Copy carrier_column_mappings → column_mappings for a specific data source
+        const { sourceId: actSourceId, carrier: actCarrier, sourceColumns: actSourceCols } = body;
+        if (!actSourceId || !actCarrier) {
+          return jsonResponse({ error: "sourceId and carrier required" }, 400);
+        }
+
+        const { data: carrierTpl } = await supabase
+          .from("carrier_column_mappings")
+          .select("carrier_column, unl_column")
+          .eq("carrier", actCarrier);
+
+        if (!carrierTpl || carrierTpl.length === 0) {
+          return jsonResponse({ error: `No carrier template found for ${actCarrier}` }, 404);
+        }
+
+        // Only apply mappings where the carrier_column exists in the source's actual columns
+        const sourceColSet = new Set(Array.isArray(actSourceCols) ? actSourceCols : []);
+        const applicableMappings = sourceColSet.size > 0
+          ? carrierTpl.filter((m: { carrier_column: string }) => sourceColSet.has(m.carrier_column))
+          : carrierTpl;
+
+        // Delete existing per-source mappings and replace with carrier template
+        await supabase.from("column_mappings").delete().eq("data_source_id", actSourceId);
+
+        if (applicableMappings.length > 0) {
+          const rows = applicableMappings.map((m: { carrier_column: string; unl_column: string }) => ({
+            data_source_id: actSourceId,
+            source_column: m.carrier_column,
+            target_field: m.unl_column,
+          }));
+          const { error: insErr } = await supabase.from("column_mappings").insert(rows);
+          if (insErr) throw insErr;
+        }
+
+        return jsonResponse({
+          success: true,
+          applied: applicableMappings.length,
+          total_template: carrierTpl.length,
+          skipped: carrierTpl.length - applicableMappings.length,
+        });
+      }
+
       case "analyze-source-upload": {
         const { sourceId: asSourceId, records: asRecords, carrier: asCarrier, filename: asFilename } = body;
         if (!asSourceId || !asRecords || !Array.isArray(asRecords) || asRecords.length === 0) {
@@ -2288,7 +2331,26 @@ Deno.serve(async (req: Request) => {
 
         const headers = Object.keys(asRecords[0] || {});
 
-        // Fallback: if no mappings for this source, look for matching mappings from other data sources
+        // Priority 1: if no per-source mappings, check carrier_column_mappings template
+        if (Object.keys(mappingMap).length === 0 && asCarrier) {
+          const { data: carrierMappings } = await supabase
+            .from("carrier_column_mappings")
+            .select("carrier_column, unl_column")
+            .eq("carrier", asCarrier);
+
+          if (carrierMappings && carrierMappings.length > 0) {
+            for (const cm of carrierMappings) {
+              // carrier_column_mappings maps carrier col → UNL col name
+              // column_mappings maps source DB col → target field (UNL name)
+              // So carrier_column = source DB col, unl_column = target field
+              if (headers.includes(cm.carrier_column)) {
+                mappingMap[cm.carrier_column] = cm.unl_column;
+              }
+            }
+          }
+        }
+
+        // Priority 2: fallback to matching mappings from other data sources
         if (Object.keys(mappingMap).length === 0) {
           const { data: allMappings } = await supabase
             .from("column_mappings")
@@ -2665,40 +2727,44 @@ Deno.serve(async (req: Request) => {
       }
 
       case "at-risk-agents-summary": {
-        const { agencyFilter: arAgency, agencies: arAgencies } = body;
+        const { agencyFilter: arAgency, agencies: arAgencies, carrierFilter: arCarrier } = body;
         const { data, error } = await supabase.rpc("get_at_risk_agents_summary", {
           p_agency: arAgency || null,
           p_agencies: Array.isArray(arAgencies) ? arAgencies : null,
+          p_carrier: arCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
       }
 
       case "at-risk-policies-for-agent": {
-        const { agentNumber } = body;
+        const { agentNumber, carrierFilter: arPCarrier } = body;
         if (!agentNumber) return jsonResponse({ error: "agentNumber required" }, 400);
         const { data, error } = await supabase.rpc("get_at_risk_policies_for_agent", {
           p_agent_number: agentNumber,
+          p_carrier: arPCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
       }
 
       case "at-risk-aging": {
-        const { agencyFilter: agAgency, agencies: agAgencies } = body;
+        const { agencyFilter: agAgency, agencies: agAgencies, carrierFilter: agCarrier } = body;
         const { data, error } = await supabase.rpc("get_at_risk_aging_distribution", {
           p_agency: agAgency || null,
           p_agencies: Array.isArray(agAgencies) ? agAgencies : null,
+          p_carrier: agCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
       }
 
       case "at-risk-trend": {
-        const { agencyFilter: trAgency, agencies: trAgencies } = body;
+        const { agencyFilter: trAgency, agencies: trAgencies, carrierFilter: trCarrier } = body;
         const { data, error } = await supabase.rpc("get_at_risk_trend", {
           p_agency: trAgency || null,
           p_agencies: Array.isArray(trAgencies) ? trAgencies : null,
+          p_carrier: trCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
@@ -5522,6 +5588,99 @@ Deno.serve(async (req: Request) => {
           try { await sqlAgents.end(); } catch {}
           return jsonResponse({ error: agErr instanceof Error ? agErr.message : "Query failed" }, 500);
         }
+      }
+
+      // ── Carrier Column Mappings (carrier source col → UNL col) ──────────
+      case "list-carrier-column-mappings": {
+        const { carrier: ccmCarrier } = body;
+        let ccmQuery = supabase
+          .from("carrier_column_mappings")
+          .select("*")
+          .order("carrier")
+          .order("carrier_column");
+        if (ccmCarrier) ccmQuery = ccmQuery.eq("carrier", ccmCarrier);
+        const { data: ccmRows, error: ccmErr } = await ccmQuery;
+        if (ccmErr) return jsonResponse({ error: ccmErr.message }, 500);
+        return jsonResponse({ mappings: ccmRows ?? [] });
+      }
+
+      case "upsert-carrier-column-mapping": {
+        const { mapping: ccmMapping } = body;
+        if (!ccmMapping || !ccmMapping.carrier || !ccmMapping.carrier_column || !ccmMapping.unl_column) {
+          return jsonResponse({ error: "carrier, carrier_column, and unl_column are required" }, 400);
+        }
+        const ccmRow = {
+          carrier: ccmMapping.carrier,
+          carrier_column: ccmMapping.carrier_column,
+          unl_column: ccmMapping.unl_column,
+          description: ccmMapping.description || "",
+          is_active: ccmMapping.is_active !== false,
+        };
+        if (ccmMapping.id) {
+          const { data: updated, error: upErr } = await supabase
+            .from("carrier_column_mappings")
+            .update(ccmRow)
+            .eq("id", ccmMapping.id)
+            .select()
+            .single();
+          if (upErr) return jsonResponse({ error: upErr.message }, 500);
+          return jsonResponse({ success: true, mapping: updated });
+        }
+        const { data: inserted, error: insErr } = await supabase
+          .from("carrier_column_mappings")
+          .insert(ccmRow)
+          .select()
+          .single();
+        if (insErr) return jsonResponse({ error: insErr.message }, 500);
+        return jsonResponse({ success: true, mapping: inserted });
+      }
+
+      case "delete-carrier-column-mapping": {
+        const { id: ccmDelId } = body;
+        if (!ccmDelId) return jsonResponse({ error: "id required" }, 400);
+        const { error: delErr } = await supabase
+          .from("carrier_column_mappings")
+          .delete()
+          .eq("id", ccmDelId);
+        if (delErr) return jsonResponse({ error: delErr.message }, 500);
+        return jsonResponse({ success: true });
+      }
+
+      case "bulk-upsert-carrier-column-mappings": {
+        const { carrier: bulkCarrier, mappings: bulkMappings } = body;
+        if (!bulkCarrier || !Array.isArray(bulkMappings) || bulkMappings.length === 0) {
+          return jsonResponse({ error: "carrier and mappings array required" }, 400);
+        }
+        // Delete existing for this carrier, then insert fresh
+        await supabase.from("carrier_column_mappings").delete().eq("carrier", bulkCarrier);
+        const bulkRows = bulkMappings
+          .filter((m: { carrier_column?: string; unl_column?: string }) => m.carrier_column && m.unl_column)
+          .map((m: { carrier_column: string; unl_column: string; description?: string }) => ({
+            carrier: bulkCarrier,
+            carrier_column: m.carrier_column,
+            unl_column: m.unl_column,
+            description: m.description || "",
+            is_active: true,
+          }));
+        if (bulkRows.length > 0) {
+          const { error: bulkErr } = await supabase.from("carrier_column_mappings").insert(bulkRows);
+          if (bulkErr) return jsonResponse({ error: bulkErr.message }, 500);
+        }
+        return jsonResponse({ success: true, count: bulkRows.length });
+      }
+
+      case "get-carrier-column-mapping-stats": {
+        const { data: allCcm, error: statsErr } = await supabase
+          .from("carrier_column_mappings")
+          .select("carrier, is_active");
+        if (statsErr) return jsonResponse({ error: statsErr.message }, 500);
+        const statsMap: Record<string, { total: number; active: number }> = {};
+        for (const row of allCcm || []) {
+          if (!statsMap[row.carrier]) statsMap[row.carrier] = { total: 0, active: 0 };
+          statsMap[row.carrier].total++;
+          if (row.is_active) statsMap[row.carrier].active++;
+        }
+        return jsonResponse({ stats: statsMap });
       }
 
       case "search-portal-agencies": {

@@ -31,6 +31,7 @@ interface AdminLeaderboardTabProps {
 type APPeriod = "daily" | "weekly" | "monthly";
 type ClubFilter = "all" | "10" | "15";
 type BoardMode = "agency" | "overall";
+type CarrierFilterOption = "" | "UNL" | "AHL" | "GTL" | "Heartland" | "Manhattan";
 
 function formatCountdown(ms: number): string {
   if (ms <= 0) return "00:00:00";
@@ -67,15 +68,17 @@ export default function AdminLeaderboardTab({ agencyId: rawAgencyId, agencyName:
   } | null>(null);
   const [promoCountdown, setPromoCountdown] = useState("");
   const [boardMode, setBoardMode] = useState<BoardMode>("agency");
+  const [carrierFilter, setCarrierFilter] = useState<CarrierFilterOption>("");
 
   const fetchData = useCallback(async (mode: BoardMode) => {
     if (mode === "agency" && !agencyId) return;
     setLoading(true);
     try {
+      const cf = carrierFilter || null;
       const fetchFn = (period: string) =>
         mode === "overall"
-          ? getLeaderboard(period)
-          : getAgencyLeaderboard(agencyId!, period);
+          ? getLeaderboard(period, cf)
+          : getAgencyLeaderboard(agencyId!, period, cf);
 
       const [daily, weekly, monthly, yearly, ch, bg] = await Promise.all([
         fetchFn("daily"),
@@ -113,7 +116,7 @@ export default function AdminLeaderboardTab({ agencyId: rawAgencyId, agencyName:
 
   useEffect(() => {
     fetchData(boardMode);
-  }, [fetchData, boardMode]);
+  }, [fetchData, boardMode, carrierFilter]);
 
   useEffect(() => {
     if (!dailyData?.resetTime) return;
@@ -209,6 +212,26 @@ export default function AdminLeaderboardTab({ agencyId: rawAgencyId, agencyName:
           </div>
         </div>
       )}
+
+      {/* Carrier filter */}
+      <div className="flex items-center justify-center">
+        <div className="flex items-center gap-1 px-1.5 py-1 rounded-lg bg-navy-light/60 border border-slate-700/50">
+          <Filter size={11} className="text-slate-500 ml-1" />
+          {([["", "All Carriers"], ["UNL", "UNL"], ["AHL", "AHL"], ["GTL", "GTL"], ["Heartland", "Heartland"], ["Manhattan", "Manhattan"]] as [CarrierFilterOption, string][]).map(([val, label]) => (
+            <button
+              key={val}
+              onClick={() => setCarrierFilter(val)}
+              className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${
+                carrierFilter === val
+                  ? "bg-gold text-navy-dark"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Status bar */}
       <div className="flex items-center justify-center gap-3 flex-wrap">

@@ -40,6 +40,7 @@ import SourceUploadFlow from "./SourceUploadFlow";
 import SqlImportFlow from "./SqlImportFlow";
 import SourceRecordsTable from "./SourceRecordsTable";
 import ConfirmDialog from "../ui/ConfirmDialog";
+import CarrierColumnMappingPanel from "./CarrierColumnMappingPanel";
 
 class ImportErrorBoundary extends Component<
   { children: React.ReactNode; onReset: () => void },
@@ -109,8 +110,10 @@ interface SourceUpload {
 }
 
 type View = "list" | "detail" | "upload" | "sql-import" | "records";
+type TopTab = "sources" | "column-mapping";
 
 export default function DataSourcesPanel({ token }: { token: string }) {
+  const [topTab, setTopTab] = useState<TopTab>("sources");
   const [sources, setSources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<View>("list");
@@ -1046,8 +1049,46 @@ export default function DataSourcesPanel({ token }: { token: string }) {
     );
   }
 
+  // Column Mapping subtab
+  if (topTab === "column-mapping") {
+    return (
+      <div className="space-y-6">
+        {/* Subtab switcher */}
+        <div className="flex items-center gap-1 bg-navy rounded-lg border border-slate-700/50 p-1">
+          <button
+            onClick={() => setTopTab("sources")}
+            className="px-4 py-2 text-xs font-medium rounded-md transition-colors text-slate-400 hover:text-white hover:bg-slate-800/50"
+          >
+            Sources
+          </button>
+          <button
+            className="px-4 py-2 text-xs font-medium rounded-md transition-colors bg-gold text-navy-dark"
+          >
+            Column Mapping
+          </button>
+        </div>
+        <CarrierColumnMappingPanel token={token} />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
+      {/* Subtab switcher */}
+      <div className="flex items-center gap-1 bg-navy rounded-lg border border-slate-700/50 p-1">
+        <button
+          className="px-4 py-2 text-xs font-medium rounded-md transition-colors bg-gold text-navy-dark"
+        >
+          Sources
+        </button>
+        <button
+          onClick={() => setTopTab("column-mapping")}
+          className="px-4 py-2 text-xs font-medium rounded-md transition-colors text-slate-400 hover:text-white hover:bg-slate-800/50"
+        >
+          Column Mapping
+        </button>
+      </div>
+
       <div className="bg-navy rounded-xl shadow-sm border border-slate-700/50 p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
