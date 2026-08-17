@@ -1649,6 +1649,53 @@ export async function adminSearchPortalAgencies(
   return callApi("admin-api", { action: "search-portal-agencies", token, query }) as Promise<{ agencies: PortalAgencySearchResult[] }>;
 }
 
+// ── Carrier Column Mappings (carrier source col → UNL col) ──────────
+export interface CarrierColumnMapping {
+  id: string;
+  carrier: string;
+  carrier_column: string;
+  unl_column: string;
+  description: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function adminListCarrierColumnMappings(
+  token: string,
+  carrier?: string
+): Promise<{ mappings: CarrierColumnMapping[] }> {
+  return callApi("admin-api", { action: "list-carrier-column-mappings", token, carrier }) as Promise<{ mappings: CarrierColumnMapping[] }>;
+}
+
+export async function adminUpsertCarrierColumnMapping(
+  token: string,
+  mapping: Partial<CarrierColumnMapping> & { carrier: string; carrier_column: string; unl_column: string }
+): Promise<{ success: boolean; mapping: CarrierColumnMapping }> {
+  return callApi("admin-api", { action: "upsert-carrier-column-mapping", token, mapping }) as Promise<{ success: boolean; mapping: CarrierColumnMapping }>;
+}
+
+export async function adminDeleteCarrierColumnMapping(
+  token: string,
+  id: string
+): Promise<{ success: boolean }> {
+  return callApi("admin-api", { action: "delete-carrier-column-mapping", token, id }) as Promise<{ success: boolean }>;
+}
+
+export async function adminBulkUpsertCarrierColumnMappings(
+  token: string,
+  carrier: string,
+  mappings: { carrier_column: string; unl_column: string; description?: string }[]
+): Promise<{ success: boolean; count: number }> {
+  return callApi("admin-api", { action: "bulk-upsert-carrier-column-mappings", token, carrier, mappings }) as Promise<{ success: boolean; count: number }>;
+}
+
+export async function adminGetCarrierColumnMappingStats(
+  token: string
+): Promise<{ stats: Record<string, { total: number; active: number }> }> {
+  return callApi("admin-api", { action: "get-carrier-column-mapping-stats", token }) as Promise<{ stats: Record<string, { total: number; active: number }> }>;
+}
+
 export async function adminFetchCarrierAgenciesFromProd(
   token: string,
   carrier: string

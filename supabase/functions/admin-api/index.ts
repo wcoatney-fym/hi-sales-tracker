@@ -5524,6 +5524,99 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      // ── Carrier Column Mappings (carrier source col → UNL col) ──────────
+      case "list-carrier-column-mappings": {
+        const { carrier: ccmCarrier } = body;
+        let ccmQuery = supabase
+          .from("carrier_column_mappings")
+          .select("*")
+          .order("carrier")
+          .order("carrier_column");
+        if (ccmCarrier) ccmQuery = ccmQuery.eq("carrier", ccmCarrier);
+        const { data: ccmRows, error: ccmErr } = await ccmQuery;
+        if (ccmErr) return jsonResponse({ error: ccmErr.message }, 500);
+        return jsonResponse({ mappings: ccmRows ?? [] });
+      }
+
+      case "upsert-carrier-column-mapping": {
+        const { mapping: ccmMapping } = body;
+        if (!ccmMapping || !ccmMapping.carrier || !ccmMapping.carrier_column || !ccmMapping.unl_column) {
+          return jsonResponse({ error: "carrier, carrier_column, and unl_column are required" }, 400);
+        }
+        const ccmRow = {
+          carrier: ccmMapping.carrier,
+          carrier_column: ccmMapping.carrier_column,
+          unl_column: ccmMapping.unl_column,
+          description: ccmMapping.description || "",
+          is_active: ccmMapping.is_active !== false,
+        };
+        if (ccmMapping.id) {
+          const { data: updated, error: upErr } = await supabase
+            .from("carrier_column_mappings")
+            .update(ccmRow)
+            .eq("id", ccmMapping.id)
+            .select()
+            .single();
+          if (upErr) return jsonResponse({ error: upErr.message }, 500);
+          return jsonResponse({ success: true, mapping: updated });
+        }
+        const { data: inserted, error: insErr } = await supabase
+          .from("carrier_column_mappings")
+          .insert(ccmRow)
+          .select()
+          .single();
+        if (insErr) return jsonResponse({ error: insErr.message }, 500);
+        return jsonResponse({ success: true, mapping: inserted });
+      }
+
+      case "delete-carrier-column-mapping": {
+        const { id: ccmDelId } = body;
+        if (!ccmDelId) return jsonResponse({ error: "id required" }, 400);
+        const { error: delErr } = await supabase
+          .from("carrier_column_mappings")
+          .delete()
+          .eq("id", ccmDelId);
+        if (delErr) return jsonResponse({ error: delErr.message }, 500);
+        return jsonResponse({ success: true });
+      }
+
+      case "bulk-upsert-carrier-column-mappings": {
+        const { carrier: bulkCarrier, mappings: bulkMappings } = body;
+        if (!bulkCarrier || !Array.isArray(bulkMappings) || bulkMappings.length === 0) {
+          return jsonResponse({ error: "carrier and mappings array required" }, 400);
+        }
+        // Delete existing for this carrier, then insert fresh
+        await supabase.from("carrier_column_mappings").delete().eq("carrier", bulkCarrier);
+        const bulkRows = bulkMappings
+          .filter((m: { carrier_column?: string; unl_column?: string }) => m.carrier_column && m.unl_column)
+          .map((m: { carrier_column: string; unl_column: string; description?: string }) => ({
+            carrier: bulkCarrier,
+            carrier_column: m.carrier_column,
+            unl_column: m.unl_column,
+            description: m.description || "",
+            is_active: true,
+          }));
+        if (bulkRows.length > 0) {
+          const { error: bulkErr } = await supabase.from("carrier_column_mappings").insert(bulkRows);
+          if (bulkErr) return jsonResponse({ error: bulkErr.message }, 500);
+        }
+        return jsonResponse({ success: true, count: bulkRows.length });
+      }
+
+      case "get-carrier-column-mapping-stats": {
+        const { data: allCcm, error: statsErr } = await supabase
+          .from("carrier_column_mappings")
+          .select("carrier, is_active");
+        if (statsErr) return jsonResponse({ error: statsErr.message }, 500);
+        const statsMap: Record<string, { total: number; active: number }> = {};
+        for (const row of allCcm || []) {
+          if (!statsMap[row.carrier]) statsMap[row.carrier] = { total: 0, active: 0 };
+          statsMap[row.carrier].total++;
+          if (row.is_active) statsMap[row.carrier].active++;
+        }
+        return jsonResponse({ stats: statsMap });
+      }
+
       case "search-portal-agencies": {
         const searchQ = (body.query as string || "").trim();
         if (!searchQ || searchQ.length < 2) return jsonResponse({ error: "query must be at least 2 characters" }, 400);
