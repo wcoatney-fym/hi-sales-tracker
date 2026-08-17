@@ -863,20 +863,20 @@ export async function adminPruneSourceRecords(token: string, dryRun = true, rete
   return callApi("admin-api", { action: "prune-source-records", token, dryRun, retentionDays });
 }
 
-export async function adminGetAtRiskAgentsSummary(token: string, agencyFilter?: string, agencies?: string[]) {
-  return callApi("admin-api", { action: "at-risk-agents-summary", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
+export async function adminGetAtRiskAgentsSummary(token: string, agencyFilter?: string, agencies?: string[], carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-agents-summary", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined, carrierFilter: carrierFilter || undefined });
 }
 
-export async function adminGetAtRiskPoliciesForAgent(token: string, agentNumber: string) {
-  return callApi("admin-api", { action: "at-risk-policies-for-agent", token, agentNumber });
+export async function adminGetAtRiskPoliciesForAgent(token: string, agentNumber: string, carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-policies-for-agent", token, agentNumber, carrierFilter: carrierFilter || undefined });
 }
 
-export async function adminGetAtRiskAging(token: string, agencyFilter?: string, agencies?: string[]) {
-  return callApi("admin-api", { action: "at-risk-aging", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
+export async function adminGetAtRiskAging(token: string, agencyFilter?: string, agencies?: string[], carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-aging", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined, carrierFilter: carrierFilter || undefined });
 }
 
-export async function adminGetAtRiskTrend(token: string, agencyFilter?: string, agencies?: string[]) {
-  return callApi("admin-api", { action: "at-risk-trend", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined });
+export async function adminGetAtRiskTrend(token: string, agencyFilter?: string, agencies?: string[], carrierFilter?: string) {
+  return callApi("admin-api", { action: "at-risk-trend", token, agencyFilter: agencyFilter || undefined, agencies: agencies || undefined, carrierFilter: carrierFilter || undefined });
 }
 
 export async function adminLogAtRiskActivity(token: string, policyId: string, actionType: string, note: string) {

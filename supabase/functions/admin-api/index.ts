@@ -2665,40 +2665,44 @@ Deno.serve(async (req: Request) => {
       }
 
       case "at-risk-agents-summary": {
-        const { agencyFilter: arAgency, agencies: arAgencies } = body;
+        const { agencyFilter: arAgency, agencies: arAgencies, carrierFilter: arCarrier } = body;
         const { data, error } = await supabase.rpc("get_at_risk_agents_summary", {
           p_agency: arAgency || null,
           p_agencies: Array.isArray(arAgencies) ? arAgencies : null,
+          p_carrier: arCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
       }
 
       case "at-risk-policies-for-agent": {
-        const { agentNumber } = body;
+        const { agentNumber, carrierFilter: arPCarrier } = body;
         if (!agentNumber) return jsonResponse({ error: "agentNumber required" }, 400);
         const { data, error } = await supabase.rpc("get_at_risk_policies_for_agent", {
           p_agent_number: agentNumber,
+          p_carrier: arPCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
       }
 
       case "at-risk-aging": {
-        const { agencyFilter: agAgency, agencies: agAgencies } = body;
+        const { agencyFilter: agAgency, agencies: agAgencies, carrierFilter: agCarrier } = body;
         const { data, error } = await supabase.rpc("get_at_risk_aging_distribution", {
           p_agency: agAgency || null,
           p_agencies: Array.isArray(agAgencies) ? agAgencies : null,
+          p_carrier: agCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
       }
 
       case "at-risk-trend": {
-        const { agencyFilter: trAgency, agencies: trAgencies } = body;
+        const { agencyFilter: trAgency, agencies: trAgencies, carrierFilter: trCarrier } = body;
         const { data, error } = await supabase.rpc("get_at_risk_trend", {
           p_agency: trAgency || null,
           p_agencies: Array.isArray(trAgencies) ? trAgencies : null,
+          p_carrier: trCarrier || null,
         });
         if (error) throw error;
         return jsonResponse(data);
