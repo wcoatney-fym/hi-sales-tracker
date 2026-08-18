@@ -1306,6 +1306,30 @@ async function handleSync(
   }
 
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
+  // Manhattan uses descriptive status strings; map the numeric prefix to a
+  // normalised status. Unknown prefixes fall through to the single-letter
+  // CONTRACT_STATUS lookup (UNL/GTL/AHL path).
+  const MANHATTAN_STATUS: Record<string, string> = {
+    "20": "active",     // 20 - Active, Premium Paying
+    "09": "pending",    // 09 - Approved Pending Premium
+    "UN": "pending",    // UN - Underwriting
+    "08": "pending",    // 08 - Pending Information
+    "10": "pending",    // 10 - Pending Review
+    "PR": "pending",    // PR - Pending Review
+    "07": "pending",    // 07 - Pending PHI
+    "PA": "pending",    // PA - Pending Agent Appointment
+    "16": "terminated", // 16 - Application Withdrawn
+    "13": "terminated", // 13 - Declined
+    "12": "terminated", // 12 - Not Taken
+    "45": "terminated", // 45 - Cancelled At Policyholders Request
+  };
+  // Manhattan billing frequency codes → billing_mode integer
+  const FREQ_TO_BILLING_MODE: Record<string, string> = {
+    "012": "1",  // Monthly
+    "004": "3",  // Quarterly
+    "002": "6",  // SemiAnnual
+    "001": "12", // Annual
+  };
   const parseDate = (d: unknown): string | null => {
     if (d == null) return null;
     // Handle JS Date objects (from typed views with date columns)
@@ -1339,16 +1363,29 @@ async function handleSync(
 
     const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
     const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-    const agentParts = writingAgent.split(/\s+/).filter(Boolean);
-    const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
-    const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
+    // Manhattan agent names are "LAST, FIRST" — detect and flip.
+    let agentFirst: string;
+    let agentLast: string;
+    if (writingAgent.includes(",")) {
+      const [rawLast, ...rawFirst] = writingAgent.split(",").map(s => s.trim());
+      agentFirst = toProperCase(rawFirst.join(" ") || "");
+      agentLast = toProperCase(rawLast || "");
+    } else {
+      const agentParts = writingAgent.split(/\s+/).filter(Boolean);
+      agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
+      agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
+    }
 
     const annualPremium = parseFloat(md["Annual Premium"] || "0");
     const monthlyPremium = isNaN(annualPremium) ? 0 : Math.round((annualPremium / 12) * 100) / 100;
     const planCode = (md["Plan Code"] || "").trim();
     const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
     const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
-    const status = CONTRACT_STATUS[contractCode] || "pending";
+    // Manhattan stores full status strings like "20 - Active, Premium Paying".
+    // Extract the prefix before " - " and look up in MANHATTAN_STATUS first,
+    // then fall back to single-letter CONTRACT_STATUS (UNL/GTL/AHL).
+    const statusPrefix = contractCode.split(/\s*-\s*/)[0];
+    const status = MANHATTAN_STATUS[statusPrefix] || CONTRACT_STATUS[contractCode] || "pending";
     const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
     const agency = rosterAgencyLookup.get(agentCode)
       || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
@@ -1386,7 +1423,12 @@ async function handleSync(
       agency,
       agency_id: agencyNameToId.get(agency) || null,
       billing_form: (md["Billing Form"] || "").trim() || null,
-      billing_mode: (md["Billing Mode"] || "").trim() || null,
+      billing_mode: (() => {
+        const raw = (md["Billing Mode"] || "").trim();
+        // Manhattan uses frequency codes ("012", "004", etc.); convert to
+        // standard billing_mode integers.
+        return FREQ_TO_BILLING_MODE[raw] || raw || null;
+      })(),
       contract_code: (md["Contract Code"] || "").trim() || null,
       // UNL lifecycle/termination reason (mapped source column "Contract
       // Reason", e.g. Submitted / Lapsed). Feeds the terminated outreach split
