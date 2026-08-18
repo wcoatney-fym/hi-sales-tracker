@@ -1306,9 +1306,28 @@ async function handleSync(
   }
 
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
-  const parseDate = (d: string): string | null => {
-    if (!d || d.length < 8) return null;
-    return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+  const parseDate = (d: unknown): string | null => {
+    if (d == null) return null;
+    // Handle JS Date objects (from typed views with date columns)
+    if (d instanceof Date) {
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 10);
+    }
+    const s = String(d).trim();
+    if (!s || s.length < 8) return null;
+    // ISO 8601 string from typed view (e.g. "2026-04-02T05:00:00.000Z")
+    if (s.includes("-") || s.includes("T")) {
+      const parsed = new Date(s);
+      if (!isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+    }
+    // Raw YYYYMMDD text from raw tables
+    if (/^\d{8}$/.test(s.slice(0, 8))) {
+      return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    }
+    // Full JS Date.toString() from stringified Date objects in mapped_data
+    const fallback = new Date(s);
+    if (!isNaN(fallback.getTime())) return fallback.toISOString().slice(0, 10);
+    return null;
   };
 
   // Build policy rows, deduplicating by policy_number (last/greatest id wins)
