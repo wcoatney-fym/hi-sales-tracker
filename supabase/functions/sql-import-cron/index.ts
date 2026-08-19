@@ -1038,26 +1038,30 @@ async function handleSync(
     }
 
     // --- Reconciliation: remove stale Data Source policies ---
-    // After a complete sync every in-book row carries this upload's id (set by
-    // the upsert), so stale rows are exactly the Data Source rows NOT tagged.
-    // No client-side set comparison: the previous implementation silently
-    // truncated and misclassified in-book rows as orphans.
+    // After a complete sync every in-book row for THIS CARRIER carries this
+    // upload's id (set by the upsert), so stale rows are exactly the Data
+    // Source rows for the same carrier NOT tagged with this upload.
+    // CRITICAL: scope to carrier so a UNL import doesn't wipe GTL/AHL/Manhattan
+    // rows (and vice versa). Prior bug: unscoped filter deleted all other
+    // carriers' rows on every UNL daily poll (fixed 2026-08-19).
     let orphansDeleted = 0;
     let reconciliationSkipped = false;
     try {
-      const { count: totalDataSource } = await supabase
+      const { count: totalCarrierDataSource } = await supabase
         .from("form_submissions")
         .select("*", { count: "exact", head: true })
-        .eq("source", "Data Source");
+        .eq("source", "Data Source")
+        .eq("carrier", carrier);
 
       const staleFilter = `source_upload_id.is.null,source_upload_id.neq.${uploadId}`;
       const { count: staleCount } = await supabase
         .from("form_submissions")
         .select("*", { count: "exact", head: true })
         .eq("source", "Data Source")
+        .eq("carrier", carrier)
         .or(staleFilter);
 
-      const safetyThreshold = Math.floor((totalDataSource || 0) * 0.2);
+      const safetyThreshold = Math.floor((totalCarrierDataSource || 0) * 0.2);
       if ((staleCount || 0) > safetyThreshold) {
         reconciliationSkipped = true;
         await supabase.from("upload_history_log").insert({
@@ -1066,10 +1070,11 @@ async function handleSync(
           details: {
             source_id: sourceId,
             upload_id: uploadId,
+            carrier,
             orphan_count: staleCount,
-            total_data_source: totalDataSource,
+            total_carrier_data_source: totalCarrierDataSource,
             safety_cap_pct: 20,
-            reason: `Stale count (${staleCount}) exceeds 20% safety cap (${safetyThreshold})`,
+            reason: `Stale count (${staleCount}) exceeds 20% safety cap (${safetyThreshold}) for carrier ${carrier}`,
           },
         });
       } else if ((staleCount || 0) > 0) {
@@ -1077,6 +1082,7 @@ async function handleSync(
           .from("form_submissions")
           .delete({ count: "exact" })
           .eq("source", "Data Source")
+          .eq("carrier", carrier)
           .or(staleFilter);
         if (!delErr) orphansDeleted = deleted || 0;
         await supabase.from("upload_history_log").insert({
@@ -1085,8 +1091,9 @@ async function handleSync(
           details: {
             source_id: sourceId,
             upload_id: uploadId,
+            carrier,
             orphans_deleted: orphansDeleted,
-            total_data_source_before: totalDataSource,
+            total_carrier_data_source_before: totalCarrierDataSource,
           },
         });
       }
