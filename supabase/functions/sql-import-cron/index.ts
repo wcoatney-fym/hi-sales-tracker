@@ -1300,6 +1300,26 @@ async function handleSync(
     }
   }
 
+  // Carrier-agency name mapping: resolves carrier-specific agency names
+  // (e.g. GTL's "THE PRESIDENT'S CLUB") to the canonical portal agency name
+  // (e.g. "Rl Advisors"). Only confirmed mappings are used. This runs after
+  // the roster lookup and before the agency name → id resolution, so the
+  // canonical name feeds into agencyNameToId correctly.
+  const { data: carrierAgencyMappings } = await supabase
+    .from("carrier_agency_mappings")
+    .select("carrier_agency_name, portal_agency_name, portal_agency_id")
+    .eq("carrier", carrier)
+    .eq("is_confirmed", true);
+  const carrierAgencyNameMap = new Map<string, { name: string; id: string | null }>();
+  for (const m of carrierAgencyMappings || []) {
+    if (m.carrier_agency_name && m.portal_agency_name) {
+      carrierAgencyNameMap.set(
+        m.carrier_agency_name.toUpperCase(),
+        { name: m.portal_agency_name, id: m.portal_agency_id || null },
+      );
+    }
+  }
+
   // The agency-scoped leaderboard filters on agency_id, so resolve the
   // attributed agency name to its id at sync time.
   const { data: agencyRows } = await supabase.from("agencies").select("id, name, ghl_api_enabled");
@@ -1394,7 +1414,15 @@ async function handleSync(
     const statusPrefix = contractCode.split(/\s*-\s*/)[0];
     const status = MANHATTAN_STATUS[statusPrefix] || CONTRACT_STATUS[contractCode] || "pending";
     const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
+    // Agency resolution priority:
+    // 1. Roster lookup (by writing number)
+    // 2. Carrier-agency mapping (confirmed mappings from carrier_agency_mappings table)
+    // 3. Downline Agency field from source data (proper-cased)
+    // 4. Agent table lookup (by writing number)
+    // 5. Fallback: "FYM"
+    const carrierMapping = downlineAgency ? carrierAgencyNameMap.get(downlineAgency.toUpperCase()) : null;
     const agency = rosterAgencyLookup.get(agentCode)
+      || (carrierMapping ? carrierMapping.name : null)
       || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
 
     // Because batchRecs is ordered by id ASC, later entries for the same policy_number
@@ -1428,7 +1456,8 @@ async function handleSync(
       carrier,
       product_type: productType,
       agency,
-      agency_id: agencyNameToId.get(agency) || null,
+      agency_id: (carrierMapping ? (carrierMapping.id || agencyNameToId.get(carrierMapping.name)) : null)
+        || agencyNameToId.get(agency) || null,
       billing_form: (md["Billing Form"] || "").trim() || null,
       billing_mode: (() => {
         const raw = (md["Billing Mode"] || "").trim();
