@@ -1136,10 +1136,62 @@ async function handleSync(
       // Dedupe is best-effort; don't block completion
     }
 
+    // --- Unmatched agent detection ---
+    // For carriers that have roster entries in agency_rosters, detect agents
+    // who wrote policies but aren't in any roster. These fall through the
+    // resolution chain to FYM or Downline Agency defaults, which may be
+    // incorrect. Log them so the team can request updated rosters.
+    // Best-effort: never block completion.
+    let unmatchedAgents: Array<{ agent_number: string; agent_name: string; policy_count: number; carrier: string }> = [];
+    try {
+      // Only alert for carriers that have at least one roster entry
+      const { count: rosterCount } = await supabase
+        .from("agency_rosters")
+        .select("*", { count: "exact", head: true })
+        .eq("carrier", carrier)
+        .eq("status", "active");
+
+      if (rosterCount && rosterCount > 0) {
+        // Find agents who wrote policies in this upload but aren't in any
+        // roster for this carrier. These are the ones that fell through.
+        const { data: unmatchedRows } = await supabase.rpc("get_unmatched_roster_agents", {
+          p_upload_id: uploadId,
+          p_carrier: carrier,
+        });
+
+        if (unmatchedRows && unmatchedRows.length > 0) {
+          unmatchedAgents = unmatchedRows.map((r: { agent_number: string; agent_name: string; policy_count: number }) => ({
+            agent_number: r.agent_number,
+            agent_name: r.agent_name,
+            policy_count: r.policy_count,
+            carrier,
+          }));
+
+          await supabase.from("upload_history_log").insert({
+            action: "unmatched_roster_agents",
+            source: "sql_import",
+            uploaded_by: "system/cron",
+            details: {
+              source_id: sourceId,
+              upload_id: uploadId,
+              carrier,
+              unmatched_count: unmatchedAgents.length,
+              total_unmatched_policies: unmatchedAgents.reduce((s, a) => s + a.policy_count, 0),
+              agents: unmatchedAgents.slice(0, 50), // Cap log payload
+            },
+          });
+
+          console.log(`[roster] ${unmatchedAgents.length} unmatched agents for ${carrier} (${unmatchedAgents.reduce((s, a) => s + a.policy_count, 0)} policies)`);
+        }
+      }
+    } catch (unmatchErr) {
+      console.error("[roster] unmatched agent detection failed (non-fatal):", unmatchErr);
+    }
+
     // Mark complete
     await supabase
       .from("source_uploads")
-      .update({ status: "complete", resync_progress: { phase: "sync", done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted, reconciliation_skipped: reconciliationSkipped } })
+      .update({ status: "complete", resync_progress: { phase: "sync", done: true, policies_synced: totalSynced, orphans_deleted: orphansDeleted, reconciliation_skipped: reconciliationSkipped, unmatched_agents: unmatchedAgents.length } })
       .eq("id", uploadId);
 
     await supabase
@@ -1150,7 +1202,7 @@ async function handleSync(
     await supabase.from("upload_history_log").insert({
       action: "auto_import_complete",
       source: "sql_import",
-      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted, records_superseded: recordsSuperseded, duplicates_flagged: duplicatesFlagged },
+      details: { source_id: sourceId, upload_id: uploadId, policies_synced: totalSynced, orphans_deleted: orphansDeleted, records_superseded: recordsSuperseded, duplicates_flagged: duplicatesFlagged, unmatched_roster_agents: unmatchedAgents.length },
     });
 
     // Staging is intentionally retained: the admin "View" screen reads it, and the
