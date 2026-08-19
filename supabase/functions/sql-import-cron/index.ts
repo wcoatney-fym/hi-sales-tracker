@@ -1038,26 +1038,30 @@ async function handleSync(
     }
 
     // --- Reconciliation: remove stale Data Source policies ---
-    // After a complete sync every in-book row carries this upload's id (set by
-    // the upsert), so stale rows are exactly the Data Source rows NOT tagged.
-    // No client-side set comparison: the previous implementation silently
-    // truncated and misclassified in-book rows as orphans.
+    // After a complete sync every in-book row for THIS CARRIER carries this
+    // upload's id (set by the upsert), so stale rows are exactly the Data
+    // Source rows for the same carrier NOT tagged with this upload.
+    // CRITICAL: scope to carrier so a UNL import doesn't wipe GTL/AHL/Manhattan
+    // rows (and vice versa). Prior bug: unscoped filter deleted all other
+    // carriers' rows on every UNL daily poll (fixed 2026-08-19).
     let orphansDeleted = 0;
     let reconciliationSkipped = false;
     try {
-      const { count: totalDataSource } = await supabase
+      const { count: totalCarrierDataSource } = await supabase
         .from("form_submissions")
         .select("*", { count: "exact", head: true })
-        .eq("source", "Data Source");
+        .eq("source", "Data Source")
+        .eq("carrier", carrier);
 
       const staleFilter = `source_upload_id.is.null,source_upload_id.neq.${uploadId}`;
       const { count: staleCount } = await supabase
         .from("form_submissions")
         .select("*", { count: "exact", head: true })
         .eq("source", "Data Source")
+        .eq("carrier", carrier)
         .or(staleFilter);
 
-      const safetyThreshold = Math.floor((totalDataSource || 0) * 0.2);
+      const safetyThreshold = Math.floor((totalCarrierDataSource || 0) * 0.2);
       if ((staleCount || 0) > safetyThreshold) {
         reconciliationSkipped = true;
         await supabase.from("upload_history_log").insert({
@@ -1066,10 +1070,11 @@ async function handleSync(
           details: {
             source_id: sourceId,
             upload_id: uploadId,
+            carrier,
             orphan_count: staleCount,
-            total_data_source: totalDataSource,
+            total_carrier_data_source: totalCarrierDataSource,
             safety_cap_pct: 20,
-            reason: `Stale count (${staleCount}) exceeds 20% safety cap (${safetyThreshold})`,
+            reason: `Stale count (${staleCount}) exceeds 20% safety cap (${safetyThreshold}) for carrier ${carrier}`,
           },
         });
       } else if ((staleCount || 0) > 0) {
@@ -1077,6 +1082,7 @@ async function handleSync(
           .from("form_submissions")
           .delete({ count: "exact" })
           .eq("source", "Data Source")
+          .eq("carrier", carrier)
           .or(staleFilter);
         if (!delErr) orphansDeleted = deleted || 0;
         await supabase.from("upload_history_log").insert({
@@ -1085,8 +1091,9 @@ async function handleSync(
           details: {
             source_id: sourceId,
             upload_id: uploadId,
+            carrier,
             orphans_deleted: orphansDeleted,
-            total_data_source_before: totalDataSource,
+            total_carrier_data_source_before: totalCarrierDataSource,
           },
         });
       }
@@ -1293,6 +1300,26 @@ async function handleSync(
     }
   }
 
+  // Carrier-agency name mapping: resolves carrier-specific agency names
+  // (e.g. GTL's "THE PRESIDENT'S CLUB") to the canonical portal agency name
+  // (e.g. "Rl Advisors"). Only confirmed mappings are used. This runs after
+  // the roster lookup and before the agency name → id resolution, so the
+  // canonical name feeds into agencyNameToId correctly.
+  const { data: carrierAgencyMappings } = await supabase
+    .from("carrier_agency_mappings")
+    .select("carrier_agency_name, portal_agency_name, portal_agency_id")
+    .eq("carrier", carrier)
+    .eq("is_confirmed", true);
+  const carrierAgencyNameMap = new Map<string, { name: string; id: string | null }>();
+  for (const m of carrierAgencyMappings || []) {
+    if (m.carrier_agency_name && m.portal_agency_name) {
+      carrierAgencyNameMap.set(
+        m.carrier_agency_name.toUpperCase(),
+        { name: m.portal_agency_name, id: m.portal_agency_id || null },
+      );
+    }
+  }
+
   // The agency-scoped leaderboard filters on agency_id, so resolve the
   // attributed agency name to its id at sync time.
   const { data: agencyRows } = await supabase.from("agencies").select("id, name, ghl_api_enabled");
@@ -1306,6 +1333,30 @@ async function handleSync(
   }
 
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
+  // Manhattan uses descriptive status strings; map the numeric prefix to a
+  // normalised status. Unknown prefixes fall through to the single-letter
+  // CONTRACT_STATUS lookup (UNL/GTL/AHL path).
+  const MANHATTAN_STATUS: Record<string, string> = {
+    "20": "active",     // 20 - Active, Premium Paying
+    "09": "pending",    // 09 - Approved Pending Premium
+    "UN": "pending",    // UN - Underwriting
+    "08": "pending",    // 08 - Pending Information
+    "10": "pending",    // 10 - Pending Review
+    "PR": "pending",    // PR - Pending Review
+    "07": "pending",    // 07 - Pending PHI
+    "PA": "pending",    // PA - Pending Agent Appointment
+    "16": "terminated", // 16 - Application Withdrawn
+    "13": "terminated", // 13 - Declined
+    "12": "terminated", // 12 - Not Taken
+    "45": "terminated", // 45 - Cancelled At Policyholders Request
+  };
+  // Manhattan billing frequency codes → billing_mode integer
+  const FREQ_TO_BILLING_MODE: Record<string, string> = {
+    "012": "1",  // Monthly
+    "004": "3",  // Quarterly
+    "002": "6",  // SemiAnnual
+    "001": "12", // Annual
+  };
   const parseDate = (d: unknown): string | null => {
     if (d == null) return null;
     // Handle JS Date objects (from typed views with date columns)
@@ -1339,18 +1390,39 @@ async function handleSync(
 
     const agentCode = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
     const writingAgent = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-    const agentParts = writingAgent.split(/\s+/).filter(Boolean);
-    const agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
-    const agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
+    // Manhattan agent names are "LAST, FIRST" — detect and flip.
+    let agentFirst: string;
+    let agentLast: string;
+    if (writingAgent.includes(",")) {
+      const [rawLast, ...rawFirst] = writingAgent.split(",").map(s => s.trim());
+      agentFirst = toProperCase(rawFirst.join(" ") || "");
+      agentLast = toProperCase(rawLast || "");
+    } else {
+      const agentParts = writingAgent.split(/\s+/).filter(Boolean);
+      agentFirst = agentParts.length > 0 ? toProperCase(agentParts[0]) : "";
+      agentLast = agentParts.length > 1 ? toProperCase(agentParts[agentParts.length - 1]) : agentFirst;
+    }
 
     const annualPremium = parseFloat(md["Annual Premium"] || "0");
     const monthlyPremium = isNaN(annualPremium) ? 0 : Math.round((annualPremium / 12) * 100) / 100;
     const planCode = (md["Plan Code"] || "").trim();
     const productType = planCode.toUpperCase().includes("HHC") ? "HHC" : "HI";
     const contractCode = (md["Contract Code"] || "").trim().toUpperCase();
-    const status = CONTRACT_STATUS[contractCode] || "pending";
+    // Manhattan stores full status strings like "20 - Active, Premium Paying".
+    // Extract the prefix before " - " and look up in MANHATTAN_STATUS first,
+    // then fall back to single-letter CONTRACT_STATUS (UNL/GTL/AHL).
+    const statusPrefix = contractCode.split(/\s*-\s*/)[0];
+    const status = MANHATTAN_STATUS[statusPrefix] || CONTRACT_STATUS[contractCode] || "pending";
     const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
+    // Agency resolution priority:
+    // 1. Roster lookup (by writing number)
+    // 2. Carrier-agency mapping (confirmed mappings from carrier_agency_mappings table)
+    // 3. Downline Agency field from source data (proper-cased)
+    // 4. Agent table lookup (by writing number)
+    // 5. Fallback: "FYM"
+    const carrierMapping = downlineAgency ? carrierAgencyNameMap.get(downlineAgency.toUpperCase()) : null;
     const agency = rosterAgencyLookup.get(agentCode)
+      || (carrierMapping ? carrierMapping.name : null)
       || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
 
     // Because batchRecs is ordered by id ASC, later entries for the same policy_number
@@ -1384,9 +1456,15 @@ async function handleSync(
       carrier,
       product_type: productType,
       agency,
-      agency_id: agencyNameToId.get(agency) || null,
+      agency_id: (carrierMapping ? (carrierMapping.id || agencyNameToId.get(carrierMapping.name)) : null)
+        || agencyNameToId.get(agency) || null,
       billing_form: (md["Billing Form"] || "").trim() || null,
-      billing_mode: (md["Billing Mode"] || "").trim() || null,
+      billing_mode: (() => {
+        const raw = (md["Billing Mode"] || "").trim();
+        // Manhattan uses frequency codes ("012", "004", etc.); convert to
+        // standard billing_mode integers.
+        return FREQ_TO_BILLING_MODE[raw] || raw || null;
+      })(),
       contract_code: (md["Contract Code"] || "").trim() || null,
       // UNL lifecycle/termination reason (mapped source column "Contract
       // Reason", e.g. Submitted / Lapsed). Feeds the terminated outreach split
