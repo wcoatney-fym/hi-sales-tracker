@@ -1212,6 +1212,32 @@ async function handleSync(
 
   const newLastId = batchRecs[batchRecs.length - 1].id;
 
+  // --- Hierarchy-based agency resolution ---
+  // Build a lookup from agency writing_number → agency name. Used by both
+  // agent sync and policy sync to resolve the correct sub-agency from the
+  // hierarchy level columns (depth ≥ 3 sub-agencies that ga_name misses).
+  const { data: agenciesWithWn } = await supabase
+    .from("agencies")
+    .select("name, writing_number")
+    .not("writing_number", "is", null);
+  const agencyWnLookup = new Map<string, string>();
+  for (const a of agenciesWithWn || []) {
+    if (a.writing_number) agencyWnLookup.set(a.writing_number.trim().toUpperCase(), a.name);
+  }
+
+  // Resolve an agent's correct sub-agency by walking hierarchy level columns
+  // from deepest (10) to shallowest (2). The deepest hierarchy level whose
+  // writing number matches a known agency is the correct sub-agency.
+  function resolveHierarchyAgency(md: Record<string, string>): string {
+    for (let lvl = 10; lvl >= 2; lvl--) {
+      const wn = (md[`Hierarchy Level ${lvl}`] || "").trim().toUpperCase();
+      if (!wn) continue;
+      const match = agencyWnLookup.get(wn);
+      if (match) return match;
+    }
+    return "";
+  }
+
   // --- Agent Sync ---
   let agentsAdded = 0;
   let agentsUpdated = 0;
@@ -1229,7 +1255,10 @@ async function handleSync(
       agentDownlineCounts.set(code, counts);
       if (agentMap.has(code)) continue;
       const name = (md["Writing Agent"] || md["Writing Agent Name"] || "").trim();
-      agentMap.set(code, { name, agency: downline ? toProperCase(downline) : "" });
+      // Resolve agency: prefer hierarchy-based resolution (finds depth ≥ 3
+      // sub-agencies), fall back to Downline Agency (ga_name / depth-02)
+      const hierarchyAgency = resolveHierarchyAgency(md);
+      agentMap.set(code, { name, agency: hierarchyAgency || (downline ? toProperCase(downline) : "") });
     }
     for (const [code, entry] of agentMap) {
       if (!entry.agency) {
@@ -1239,6 +1268,8 @@ async function handleSync(
             const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
             const rc = (md["UNL Writing Number"] || md["Writing Agent Code"] || "").trim().toUpperCase();
             if (rc !== code) continue;
+            const hierarchyAgency = resolveHierarchyAgency(md);
+            if (hierarchyAgency) { entry.agency = hierarchyAgency; break; }
             const dl = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
             if (dl) { entry.agency = toProperCase(dl); break; }
           }
@@ -1467,15 +1498,24 @@ async function handleSync(
     const status = MANHATTAN_STATUS[statusPrefix] || CONTRACT_STATUS[contractCode] || "pending";
     const downlineAgency = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
     // Agency resolution priority:
-    // 1. Roster lookup (by writing number)
+    // 1. Roster lookup (by writing number — from agency_rosters table)
     // 2. Carrier-agency mapping (confirmed mappings from carrier_agency_mappings table)
-    // 3. Downline Agency field from source data (proper-cased)
-    // 4. Agent table lookup (by writing number)
-    // 5. Fallback: "FYM"
+    // 3. Hierarchy-based resolution (walks hierarchy level columns from
+    //    deepest to shallowest, matching against agencies.writing_number
+    //    to find the correct sub-agency at depth ≥ 3)
+    // 4. Agent table lookup (by writing number — agents table has hierarchy-
+    //    corrected agency for locked agents)
+    // 5. Downline Agency field from source data (proper-cased — only used
+    //    when the agent isn't in the agents table yet and hierarchy levels
+    //    don't match a known agency)
+    // 6. Fallback: "FYM"
     const carrierMapping = downlineAgency ? carrierAgencyNameMap.get(downlineAgency.toUpperCase()) : null;
+    const hierarchyAgency = resolveHierarchyAgency(md);
     const agency = rosterAgencyLookup.get(agentCode)
       || (carrierMapping ? carrierMapping.name : null)
-      || (downlineAgency ? toProperCase(downlineAgency) : (agencyLookup.get(agentCode) || "FYM"));
+      || hierarchyAgency
+      || agencyLookup.get(agentCode)
+      || (downlineAgency ? toProperCase(downlineAgency) : "FYM");
 
     // Because batchRecs is ordered by id ASC, later entries for the same policy_number
     // will overwrite earlier ones, giving us the greatest-id row per policy.
