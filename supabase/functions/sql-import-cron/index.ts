@@ -1371,16 +1371,27 @@ async function handleSync(
     }
   }
 
-  const { data: rosterEntries } = await supabase
-    .from("agency_rosters")
-    .select("writing_number, agency_id, agencies:agency_id(name)")
-    .eq("match_status", "confirmed")
-    .eq("status", "active");
+  // Paginate roster entries — table exceeds Supabase default 1K row cap.
   const rosterAgencyLookup = new Map<string, string>();
-  for (const r of rosterEntries || []) {
-    if (r.writing_number && r.agencies) {
-      rosterAgencyLookup.set(r.writing_number.toUpperCase(), (r.agencies as { name: string }).name);
-    }
+  {
+    const PAGE = 1000;
+    let offset = 0;
+    let page: typeof rosterAgencyLookup extends Map<string, infer _> ? unknown[] : never;
+    do {
+      const { data } = await supabase
+        .from("agency_rosters")
+        .select("writing_number, agency_id, agencies:agency_id(name)")
+        .eq("match_status", "confirmed")
+        .eq("status", "active")
+        .range(offset, offset + PAGE - 1);
+      page = data || [];
+      for (const r of page as Array<{ writing_number: string; agencies: { name: string } | null }>) {
+        if (r.writing_number && r.agencies) {
+          rosterAgencyLookup.set(r.writing_number.toUpperCase(), r.agencies.name);
+        }
+      }
+      offset += PAGE;
+    } while (page.length === PAGE);
   }
 
   // Carrier-agency name mapping: resolves carrier-specific agency names
@@ -1603,7 +1614,7 @@ async function handleSync(
       const { error: upsertErr, count } = await supabase
         .from("form_submissions")
         .upsert(batch, { onConflict: "policy_number", count: "exact" });
-      if (upsertErr) throw upsertErr;
+      if (upsertErr) throw new Error(`Upsert failed: ${upsertErr.message || JSON.stringify(upsertErr)}`);
       synced += (count || batch.length);
 
       // --- Evaluate + fire lifecycle events for this batch (best-effort) ---
