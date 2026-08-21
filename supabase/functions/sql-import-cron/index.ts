@@ -1211,6 +1211,10 @@ async function handleSync(
   }
 
   const newLastId = batchRecs[batchRecs.length - 1].id;
+  // Detect continuation calls: syncedSoFar > 0 means agent sync already ran
+  // in batch 1. Skip it on continuations to save wall-clock time (the lookup
+  // loading alone can eat 30s+ of the 60s edge-function budget).
+  const isContinuation = syncedSoFar > 0;
 
   // --- Hierarchy-based agency resolution ---
   // Build a lookup from agency writing_number → agency name. Used by both
@@ -1238,10 +1242,10 @@ async function handleSync(
     return "";
   }
 
-  // --- Agent Sync ---
+  // --- Agent Sync (skip on continuation calls) ---
   let agentsAdded = 0;
   let agentsUpdated = 0;
-  try {
+  if (!isContinuation) try {
     const agentMap = new Map<string, { name: string; agency: string }>();
     const agentDownlineCounts = new Map<string, { total: number; withDownline: number }>();
     for (const rec of batchRecs) {
