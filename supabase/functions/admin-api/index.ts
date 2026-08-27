@@ -209,13 +209,13 @@ function daysBetween(fromIso: string | null, to = Date.now()): number | null {
   return Math.floor((to - t) / 86400000);
 }
 
-// ---- 90-day persistency (per-agent) --------------------------------------
-// Mirrors the validated agency-wide retention rule (memory/sales-tracker-schema):
-//   drafted_first  = paid_to_date >= effective + 1 month
-//   retained (monthly, billing_mode '1' or null) = paid_to_date >= effective + 3 months
-//   retained (non-monthly '3'/'6'/'12') = drafted_first (one draft pays >=90d)
-// Denominator = policies old enough to have had 3 draws (effective <= today-3mo)
-// AND that drafted their first premium. Rate = retained / drafted_first.
+// ---- Persistency helpers (Method A — issue_date anchor) -------------------
+// Method A definition (Charlie, 2026-08-27):
+//   Denominator: policies issued >= windowMonths ago where
+//     paid_to_date >= issue_date + 1 month (first draft succeeded).
+//   Numerator: paid_to_date >= issue_date + windowMonths.
+//   Pure draft persistence — no term_date or at_risk filter.
+//   Anchor: issue_date (policy_effective_date in code), NOT app_recvd_date.
 type PersistPolicy = {
   policy_effective_date?: string | null;
   paid_to_date?: string | null;
@@ -228,17 +228,12 @@ function addMonthsIso(iso: string, months: number): number {
   return d.getTime();
 }
 
-function isMonthly(billingMode: string | null | undefined): boolean {
-  const m = (billingMode ?? "").trim();
-  return m === "" || m === "1"; // treat null/blank as monthly (conservative)
-}
-
-// Is this policy old enough to be counted (had the chance for 3 monthly draws)?
-function persistEligible(p: PersistPolicy, nowMs = Date.now()): boolean {
+// Is this policy old enough to be measured at a given window?
+function persistEligible(p: PersistPolicy, windowMonths = 3, nowMs = Date.now()): boolean {
   if (!p.policy_effective_date) return false;
   const eff = new Date(p.policy_effective_date).getTime();
   if (Number.isNaN(eff)) return false;
-  return addMonthsIso(p.policy_effective_date, 3) <= nowMs;
+  return addMonthsIso(p.policy_effective_date, windowMonths) <= nowMs;
 }
 
 function draftedFirst(p: PersistPolicy): boolean {
@@ -248,22 +243,28 @@ function draftedFirst(p: PersistPolicy): boolean {
   return ptd >= addMonthsIso(p.policy_effective_date, 1);
 }
 
-function retained90(p: PersistPolicy): boolean {
+// Method A retained: paid_to_date >= issue_date + windowMonths.
+// No term_date or at_risk check — pure draft persistence.
+function retainedAt(p: PersistPolicy, windowMonths = 3): boolean {
   if (!draftedFirst(p)) return false;
-  if (!isMonthly(p.billing_mode)) return true; // one non-monthly draft pays >=90d
   const ptd = new Date(p.paid_to_date as string).getTime();
-  return ptd >= addMonthsIso(p.policy_effective_date as string, 3);
+  return ptd >= addMonthsIso(p.policy_effective_date as string, windowMonths);
 }
 
-// Roll a set of policies into {drafted_first, retained, pct}. Only eligible
-// (old-enough) policies count.
-function persistencyOf(policies: PersistPolicy[]): { drafted_first: number; retained: number; pct: number } {
+// Backward-compat alias used by mgr-agent-persistency (90-day default).
+function retained90(p: PersistPolicy): boolean {
+  return retainedAt(p, 3);
+}
+
+// Roll a set of policies into {drafted_first, retained, pct}.
+// Only policies old enough for the given window count.
+function persistencyOf(policies: PersistPolicy[], windowMonths = 3): { drafted_first: number; retained: number; pct: number } {
   let df = 0, ret = 0;
   for (const p of policies) {
-    if (!persistEligible(p)) continue;
+    if (!persistEligible(p, windowMonths)) continue;
     if (!draftedFirst(p)) continue;
     df += 1;
-    if (retained90(p)) ret += 1;
+    if (retainedAt(p, windowMonths)) ret += 1;
   }
   return { drafted_first: df, retained: ret, pct: df ? Math.round((1000 * ret) / df) / 10 : 0 };
 }

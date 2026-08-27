@@ -182,33 +182,24 @@ Deno.serve(async (req: Request) => {
           )
       )
       SELECT json_build_object(
-        -- HEADLINE: 90-day retention (north-star). Cohort-scoped to the month
-        -- 3 months ago. Of policies from that cohort that drafted a 1st premium,
-        -- the share that also drafted a 3rd time, are still alive today
-        -- (term_date IS NULL), and are NOT flagged at-risk. At-risk exclusion:
-        -- at_risk_policy = true means the policy has missed a draft and is heading
-        -- toward lapse — still technically alive but not healthy retained business.
-        -- Including them inflates the gauge and masks weakness. Billing-mode rule:
-        -- monthly (1 or NULL) requires paid_to_date >= effective + 3 months; any
-        -- non-monthly single successful draft (3/6/12) already covers 90+ days.
-        -- NULL billing_mode (e.g. Heartland) is treated as monthly.
+        -- HEADLINE: 90-day retention (north-star — Method A).
+        -- Definition: of policies that drafted their first premium
+        -- (paid_to_date >= issue_date + 1 month), the share whose
+        -- paid_to_date also reaches issue_date + 3 months.
+        -- This measures draft persistence through the window, NOT
+        -- whether the policy is still alive today.
+        -- Anchor: issue_date (not app_recvd_date).
+        -- Scope: all policies issued >= 3 months ago (not cohort-month-scoped).
         'retention_90d', (
           SELECT json_build_object(
-            'cohort_month', to_char(date_trunc('month', CURRENT_DATE) - interval '3 months', 'YYYY-MM'),
             'drafted_first', count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'),
-            'retained', count(*) FILTER (WHERE term_date IS NULL
-                                           AND COALESCE(at_risk_policy, false) = false
-                                           AND ((COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                             OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month'))),
-            'retention_pct', round(100.0 * count(*) FILTER (WHERE term_date IS NULL
-                                                             AND COALESCE(at_risk_policy, false) = false
-                                                             AND ((COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                                               OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')))
+            'retained', count(*) FILTER (WHERE paid_to_date >= issue_date + interval '3 months'),
+            'retention_pct', round(100.0 * count(*) FILTER (WHERE paid_to_date >= issue_date + interval '3 months')
               / nullif(count(*) FILTER (WHERE paid_to_date >= issue_date + interval '1 month'), 0), 1)
           )
           FROM scoped
-          WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
-            AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months'
+          WHERE issue_date <= CURRENT_DATE - interval '3 months'
+            AND paid_to_date >= issue_date + interval '1 month'
         ),
         'placement', (
           SELECT COALESCE(json_agg(row_to_json(p) ORDER BY p.month), '[]'::json)
@@ -227,20 +218,36 @@ Deno.serve(async (req: Request) => {
             GROUP BY 1
           ) p
         ),
+        -- PERSISTENCY WINDOWS (Method A): 30-day, 90-day, 9-month, 13-month.
+        -- Denominator at each window: policies issued >= window ago that
+        -- drafted their first premium (paid_to_date >= issue_date + 1 month).
+        -- Numerator: paid_to_date >= issue_date + window.
+        -- This is pure draft persistence — no term_date or at_risk filter.
         'persistency', (
-          SELECT COALESCE(json_agg(row_to_json(q) ORDER BY q.months_ago), '[]'::json)
+          SELECT COALESCE(json_agg(row_to_json(q) ORDER BY q.window_months), '[]'::json)
           FROM (
-            SELECT m.months_ago,
-                   to_char(date_trunc('month', CURRENT_DATE) - make_interval(months => m.months_ago), 'YYYY-MM') AS cohort_month,
-                   count(*) FILTER (WHERE s.paid_to_date > s.issue_date) AS went_active,
-                   count(*) FILTER (WHERE s.paid_to_date > s.issue_date AND s.term_date IS NULL) AS still_active,
-                   round(100.0 * count(*) FILTER (WHERE s.paid_to_date > s.issue_date AND s.term_date IS NULL)
-                     / nullif(count(*) FILTER (WHERE s.paid_to_date > s.issue_date), 0), 1) AS persistency_pct
-            FROM (VALUES (3),(6),(9),(13)) AS m(months_ago)
-            LEFT JOIN scoped s
-              ON s.issue_date >= date_trunc('month', CURRENT_DATE) - make_interval(months => m.months_ago)
-             AND s.issue_date <  date_trunc('month', CURRENT_DATE) - make_interval(months => m.months_ago - 1)
-            GROUP BY m.months_ago
+            SELECT w.window_months,
+                   w.window_label,
+                   count(*) FILTER (
+                     WHERE s.issue_date <= CURRENT_DATE - make_interval(months => w.window_months)
+                       AND s.paid_to_date >= s.issue_date + interval '1 month'
+                   ) AS drafted_first,
+                   count(*) FILTER (
+                     WHERE s.issue_date <= CURRENT_DATE - make_interval(months => w.window_months)
+                       AND s.paid_to_date >= s.issue_date + interval '1 month'
+                       AND s.paid_to_date >= s.issue_date + make_interval(months => w.window_months)
+                   ) AS retained,
+                   round(100.0 * count(*) FILTER (
+                     WHERE s.issue_date <= CURRENT_DATE - make_interval(months => w.window_months)
+                       AND s.paid_to_date >= s.issue_date + interval '1 month'
+                       AND s.paid_to_date >= s.issue_date + make_interval(months => w.window_months)
+                   ) / nullif(count(*) FILTER (
+                     WHERE s.issue_date <= CURRENT_DATE - make_interval(months => w.window_months)
+                       AND s.paid_to_date >= s.issue_date + interval '1 month'
+                   ), 0), 1) AS persistency_pct
+            FROM (VALUES (1, '30-day'), (3, '90-day'), (9, '9-month'), (13, '13-month')) AS w(window_months, window_label)
+            CROSS JOIN scoped s
+            GROUP BY w.window_months, w.window_label
           ) q
         )
       ) AS result;
@@ -274,19 +281,13 @@ Deno.serve(async (req: Request) => {
       )
       SELECT carrier,
              count(*) AS total_policies,
-             count(*) FILTER (WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
-                               AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months') AS seasoned,
-             count(*) FILTER (WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
-                               AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months'
+             -- Method A: all policies issued >= 3 months ago
+             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months') AS seasoned,
+             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months'
                                AND paid_to_date >= issue_date + interval '1 month') AS drafted_first,
-             count(*) FILTER (WHERE issue_date >= date_trunc('month', CURRENT_DATE) - interval '3 months'
-                               AND issue_date <  date_trunc('month', CURRENT_DATE) - interval '2 months'
-                               AND term_date IS NULL
-                               AND COALESCE(at_risk_policy, false) = false
-                               AND (
-                                 (COALESCE(billing_mode, 1) = 1 AND paid_to_date >= issue_date + interval '3 months')
-                                 OR (COALESCE(billing_mode, 1) <> 1 AND paid_to_date >= issue_date + interval '1 month')
-                               )) AS retained
+             count(*) FILTER (WHERE issue_date <= CURRENT_DATE - interval '3 months'
+                               AND paid_to_date >= issue_date + interval '1 month'
+                               AND paid_to_date >= issue_date + interval '3 months') AS retained
       FROM scoped
       GROUP BY carrier
       ORDER BY carrier;
