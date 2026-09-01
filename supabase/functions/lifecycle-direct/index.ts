@@ -919,7 +919,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.cntrct_code = 'A'
         AND t.previous_contract_code IS NULL
-        AND t.issue_date >= CURRENT_DATE - INTERVAL '14 days'
+        AND t.issue_date >= CURRENT_DATE - INTERVAL '3 days'
 
       UNION ALL
 
