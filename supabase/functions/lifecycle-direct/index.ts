@@ -25,6 +25,7 @@ import { createRateLimiter } from "../_shared/rate-limiter.ts";
 // Triggers:
 //   submission  — cntrct_code = P, prev IS NULL (new) OR prev IN (T,A) (rewrite)
 //   approved    — prev = P, cntrct_code = A
+//   approved    — cntrct_code = A, prev IS NULL (direct approval — skipped Pending)
 //   terminated  — prev = A, cntrct_code = T
 //   at_risk     — at_risk_policy = true, previous_at_risk_status = false/NULL
 //
@@ -834,6 +835,8 @@ Deno.serve(async (req: Request) => {
   interface TriggerRow extends ProdRow {
     trigger_type: "approved" | "terminated" | "submission" | "at_risk";
     changed_on:   Date | string;  // date column from Max's DB
+    // Note: "direct approval" fires as trigger_type = "approved" in GHL
+    // but stored as "approved" in fired_triggers with changed_on = issue_date.
   }
 
   // ── 4c. Run trigger queries against Max's DB ──────────────────────────────
@@ -902,6 +905,21 @@ Deno.serve(async (req: Request) => {
         AND t.cntrct_code = 'P'
         AND t.previous_contract_code IN ('T', 'A')
         AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+
+      UNION ALL
+
+      -- Trigger E: direct approval (skipped Pending — UNL backlog pattern)
+      -- Policy appears in Max's DB as cntrct_code = A with no previous_contract_code.
+      -- Uses issue_date as changed_on since there's no contract_code_last_change_date
+      -- for policies that never transitioned.
+      SELECT ${POLICY_COLS},
+        'approved'::text AS trigger_type,
+        t.issue_date     AS changed_on
+      FROM typed.unl_fym_policy_latest_load t
+      WHERE ${PLAN_FILTER}
+        AND t.cntrct_code = 'A'
+        AND t.previous_contract_code IS NULL
+        AND t.issue_date >= CURRENT_DATE - INTERVAL '3 days'
 
       UNION ALL
 

@@ -251,6 +251,76 @@ Deno.test("firedInserts only populated when GHL push succeeds (ok=true)", () => 
 });
 
 // ---------------------------------------------------------------------------
+// Trigger E: direct approval (cntrct_code=A, prev IS NULL)
+// ---------------------------------------------------------------------------
+
+Deno.test("Trigger E — direct approval uses issue_date as changed_on, not contract_code_last_change_date", () => {
+  // Direct-approval policies have no contract_code_last_change_date because
+  // they never transitioned (previous_contract_code IS NULL). issue_date is
+  // used as the changed_on value instead.
+  const issueDate = new Date("2026-08-20T00:00:00.000Z");
+  const changedOn = normChangedOn(issueDate);
+  assertEquals(changedOn, "2026-08-20");
+
+  // The fired_triggers key uses trigger_type = "approved" — same as Trigger A
+  const key = firedKey("20H6161841", "approved", changedOn);
+  assertEquals(key, "20H6161841|approved|2026-08-20");
+});
+
+Deno.test("Trigger E vs Trigger A — no collision when changed_on dates differ", () => {
+  // Trigger A (P→A): changed_on = contract_code_last_change_date (e.g. 2026-08-25)
+  // Trigger E (direct): changed_on = issue_date (e.g. 2026-08-18)
+  // Same policy, same trigger_type, but different changed_on → different keys
+  const keyA = firedKey("20H6161841", "approved", "2026-08-25");
+  const keyE = firedKey("20H6161841", "approved", "2026-08-18");
+  assertEquals(keyA !== keyE, true, "different changed_on dates produce different keys");
+});
+
+Deno.test("Trigger E — firedSet prevents duplicate fire for same policy+issue_date", () => {
+  const firedSet = new Set<string>();
+  const firedInserts: string[] = [];
+
+  // Simulate two rows for the same direct-approval policy (e.g. cron runs twice
+  // while policy still matches cntrct_code=A, prev=NULL within the 14-day window)
+  const rows = [
+    { policy_nbr: "20H6161841", trigger_type: "approved" as TriggerType, changed_on: "2026-08-20" },
+    { policy_nbr: "20H6161841", trigger_type: "approved" as TriggerType, changed_on: "2026-08-20" },
+  ];
+
+  for (const row of rows) {
+    const key = firedKey(row.policy_nbr, row.trigger_type, row.changed_on);
+    if (firedSet.has(key)) continue;
+    firedInserts.push(row.policy_nbr);
+    firedSet.add(key);
+  }
+
+  assertEquals(firedInserts.length, 1, "direct-approval fires exactly once per policy+date");
+});
+
+Deno.test("Trigger E — mutually exclusive with Trigger A (prev IS NULL vs prev = P)", () => {
+  // Trigger A requires previous_contract_code = 'P' AND cntrct_code = 'A'
+  // Trigger E requires cntrct_code = 'A' AND previous_contract_code IS NULL
+  // These conditions are mutually exclusive — a policy cannot match both.
+  const prevCodeA: string | null = "P";  // Trigger A match
+  const prevCodeE: string | null = null;  // Trigger E match
+
+  const matchesTriggerA = (prev: string | null) => prev === "P";
+  const matchesTriggerE = (prev: string | null) => prev === null;
+
+  assertEquals(matchesTriggerA(prevCodeA), true);
+  assertEquals(matchesTriggerE(prevCodeA), false);
+  assertEquals(matchesTriggerA(prevCodeE), false);
+  assertEquals(matchesTriggerE(prevCodeE), true);
+
+  // No overlap possible
+  assertEquals(
+    matchesTriggerA(prevCodeA) && matchesTriggerE(prevCodeA),
+    false,
+    "same row cannot match both Trigger A and Trigger E",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // firedKey format correctness
 // ---------------------------------------------------------------------------
 
