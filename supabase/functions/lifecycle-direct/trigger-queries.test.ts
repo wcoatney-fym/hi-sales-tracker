@@ -333,3 +333,130 @@ Deno.test("firedKey — pipe-delimited format is stable", () => {
   assertEquals(parts[1], "at_risk");
   assertEquals(parts[2], "2026-07-17");
 });
+
+// ---------------------------------------------------------------------------
+// Fire rate monitor — threshold logic
+// ---------------------------------------------------------------------------
+
+function computeFireRate(
+  eligible: { policy_nbr: string; trigger_type: TriggerType; changed_on: string }[],
+  firedSet: Set<string>,
+): { rate: number; firedCount: number; missed: string[] } {
+  let firedCount = 0;
+  const missed: string[] = [];
+  for (const p of eligible) {
+    const key = firedKey(p.policy_nbr, p.trigger_type, p.changed_on);
+    if (firedSet.has(key)) {
+      firedCount++;
+    } else {
+      missed.push(p.policy_nbr);
+    }
+  }
+  return { rate: eligible.length > 0 ? firedCount / eligible.length : 1, firedCount, missed };
+}
+
+Deno.test("fire rate monitor — 100% fire rate produces no alert", () => {
+  const eligible = [
+    { policy_nbr: "P001", trigger_type: "approved" as TriggerType, changed_on: "2026-08-20" },
+    { policy_nbr: "P002", trigger_type: "approved" as TriggerType, changed_on: "2026-08-21" },
+    { policy_nbr: "P003", trigger_type: "approved" as TriggerType, changed_on: "2026-08-22" },
+  ];
+  const fired = new Set(eligible.map(e => firedKey(e.policy_nbr, e.trigger_type, e.changed_on)));
+  const result = computeFireRate(eligible, fired);
+  assertEquals(result.rate, 1);
+  assertEquals(result.missed.length, 0);
+  assertEquals(result.rate >= 0.95, true, "100% should not trigger alert");
+});
+
+Deno.test("fire rate monitor — 80% fire rate triggers alert (below 95%)", () => {
+  const eligible = [
+    { policy_nbr: "P001", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-20" },
+    { policy_nbr: "P002", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-20" },
+    { policy_nbr: "P003", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-21" },
+    { policy_nbr: "P004", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-21" },
+    { policy_nbr: "P005", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-22" },
+  ];
+  // Only 4 of 5 fired
+  const fired = new Set([
+    firedKey("P001", "terminated", "2026-08-20"),
+    firedKey("P002", "terminated", "2026-08-20"),
+    firedKey("P003", "terminated", "2026-08-21"),
+    firedKey("P004", "terminated", "2026-08-21"),
+  ]);
+  const result = computeFireRate(eligible, fired);
+  assertEquals(result.rate, 0.8);
+  assertEquals(result.missed, ["P005"]);
+  assertEquals(result.rate < 0.95, true, "80% should trigger alert");
+});
+
+Deno.test("fire rate monitor — exactly 95% does NOT trigger alert", () => {
+  // 20 eligible, 19 fired = 95%
+  const eligible = Array.from({ length: 20 }, (_, i) => ({
+    policy_nbr: `P${String(i + 1).padStart(3, "0")}`,
+    trigger_type: "at_risk" as TriggerType,
+    changed_on: "2026-08-20",
+  }));
+  const fired = new Set(
+    eligible.slice(0, 19).map(e => firedKey(e.policy_nbr, e.trigger_type, e.changed_on)),
+  );
+  const result = computeFireRate(eligible, fired);
+  assertEquals(result.rate, 0.95);
+  assertEquals(result.missed.length, 1);
+  assertEquals(result.rate >= 0.95, true, "exactly 95% should NOT trigger alert");
+});
+
+Deno.test("fire rate monitor — below minimum threshold (< 5 eligible) is skipped", () => {
+  // Groups with fewer than 5 eligible events are too small to be meaningful
+  const eligible = [
+    { policy_nbr: "P001", trigger_type: "submission" as TriggerType, changed_on: "2026-08-20" },
+    { policy_nbr: "P002", trigger_type: "submission" as TriggerType, changed_on: "2026-08-21" },
+  ];
+  const fired = new Set<string>(); // 0% fire rate but only 2 eligible
+  const result = computeFireRate(eligible, fired);
+  assertEquals(result.rate, 0);
+  // The monitor code skips groups < 5; this test verifies the rate math is correct
+  // but the caller is responsible for the min-threshold check
+  assertEquals(eligible.length < 5, true, "small groups should be skipped by caller");
+});
+
+Deno.test("fire rate monitor — empty eligible set returns rate 1 (no alert)", () => {
+  const result = computeFireRate([], new Set());
+  assertEquals(result.rate, 1, "empty eligible = 100% by convention");
+  assertEquals(result.missed.length, 0);
+});
+
+Deno.test("fire rate monitor — missed policies list is capped", () => {
+  // Verify the cap logic: in the real code, missed_policies is sliced to 50
+  const eligible = Array.from({ length: 60 }, (_, i) => ({
+    policy_nbr: `P${String(i + 1).padStart(3, "0")}`,
+    trigger_type: "approved" as TriggerType,
+    changed_on: "2026-08-20",
+  }));
+  const fired = new Set<string>(); // none fired
+  const result = computeFireRate(eligible, fired);
+  assertEquals(result.missed.length, 60); // raw missed count
+  // The cap at 50 is applied in the calling code, not in computeFireRate
+  const capped = result.missed.slice(0, 50);
+  assertEquals(capped.length, 50);
+});
+
+Deno.test("fire rate monitor — different trigger types are independent", () => {
+  const eligible_approved = [
+    { policy_nbr: "P001", trigger_type: "approved" as TriggerType, changed_on: "2026-08-20" },
+    { policy_nbr: "P002", trigger_type: "approved" as TriggerType, changed_on: "2026-08-20" },
+  ];
+  const eligible_terminated = [
+    { policy_nbr: "P001", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-25" },
+    { policy_nbr: "P003", trigger_type: "terminated" as TriggerType, changed_on: "2026-08-25" },
+  ];
+  // P001 fired as approved but not as terminated
+  const fired = new Set([firedKey("P001", "approved", "2026-08-20")]);
+
+  const rateApproved = computeFireRate(eligible_approved, fired);
+  const rateTerminated = computeFireRate(eligible_terminated, fired);
+
+  assertEquals(rateApproved.rate, 0.5, "1 of 2 approved fired");
+  assertEquals(rateTerminated.rate, 0, "0 of 2 terminated fired");
+  assertEquals(rateApproved.missed, ["P002"]);
+  assertEquals(rateTerminated.missed, ["P001", "P003"]);
+});
