@@ -1141,9 +1141,258 @@ Deno.serve(async (req: Request) => {
     console.log(`[lifecycle-direct] dry-run: would hold ${npnHoldRows.length} rows (npn_holds not written)`);
   }
 
+  // ── 8. Fire rate monitor — 95% threshold → cc_tasks in CRM Command ────
+  // Runs after every non-dry, non-single-policy cron tick.
+  // Compares eligible events in Max's DB (7-day lookback, GHL-enabled agencies)
+  // against fired_triggers entries. Any trigger_type × agency combo below 95%
+  // creates an actionable task in CRM Command (cc_tasks in portal DB).
+  const FIRE_RATE_THRESHOLD = 0.95;
+  const MONITOR_LOOKBACK_DAYS = 7;
+  const fireRateAlerts: { agency_id: string; agency_name: string; trigger_type: string; eligible: number; fired_count: number; rate: number; missed_policies: string[] }[] = [];
+
+  if (!dry && !singlePolicy) {
+    let monitorSql: ReturnType<typeof postgres> | null = null;
+    try {
+      monitorSql = postgres({
+        host: cleanHost(Deno.env.get("PROD_DB_HOST")!),
+        port: Number((Deno.env.get("PROD_DB_PORT") ?? "5432").replace(/\D/g, "")),
+        database: Deno.env.get("PROD_DB_NAME")!,
+        username: Deno.env.get("PROD_DB_USER")!,
+        password: Deno.env.get("PROD_DB_PASSWORD")!,
+        ssl: { ca: AKAMAI_CA_CERT },
+        connect_timeout: 30,
+        max: 1,
+        idle_timeout: 20,
+      });
+      await monitorSql.unsafe("SET statement_timeout = '60s'");
+
+      const PLAN_FILTER = `(
+        t.plan_code ILIKE '%HI%' OR t.plan_code ILIKE '%HHC%'
+        OR t.plan_code ILIKE '%GHI%' OR t.plan_code ILIKE '%HIP%'
+      )`;
+
+      // Query all eligible events in Max's DB for the lookback window.
+      // Each row: policy_nbr, trigger_type, changed_on, wa (for agency resolution).
+      interface EligibleRow {
+        policy_nbr: string;
+        trigger_type: string;
+        changed_on: Date | string;
+        wa: string;
+        wa_name: string;
+        roster_hierarchy_json: unknown[];
+      }
+
+      const eligibleRows: EligibleRow[] = await monitorSql.unsafe(`
+        -- Eligible approved (P→A)
+        SELECT TRIM(t.policy_nbr) AS policy_nbr, 'approved'::text AS trigger_type,
+          t.contract_code_last_change_date AS changed_on,
+          TRIM(UPPER(t.wa)) AS wa, TRIM(t.wa_name) AS wa_name,
+          t.roster_hierarchy_json
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE ${PLAN_FILTER}
+          AND t.previous_contract_code = 'P' AND t.cntrct_code = 'A'
+          AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '${MONITOR_LOOKBACK_DAYS} days'
+
+        UNION ALL
+
+        -- Eligible direct approval (A, prev IS NULL)
+        SELECT TRIM(t.policy_nbr) AS policy_nbr, 'approved'::text AS trigger_type,
+          t.issue_date AS changed_on,
+          TRIM(UPPER(t.wa)) AS wa, TRIM(t.wa_name) AS wa_name,
+          t.roster_hierarchy_json
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE ${PLAN_FILTER}
+          AND t.cntrct_code = 'A' AND t.previous_contract_code IS NULL
+          AND t.issue_date >= CURRENT_DATE - INTERVAL '${MONITOR_LOOKBACK_DAYS} days'
+
+        UNION ALL
+
+        -- Eligible terminated (A→T)
+        SELECT TRIM(t.policy_nbr) AS policy_nbr, 'terminated'::text AS trigger_type,
+          t.contract_code_last_change_date AS changed_on,
+          TRIM(UPPER(t.wa)) AS wa, TRIM(t.wa_name) AS wa_name,
+          t.roster_hierarchy_json
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE ${PLAN_FILTER}
+          AND t.previous_contract_code = 'A' AND t.cntrct_code = 'T'
+          AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '${MONITOR_LOOKBACK_DAYS} days'
+
+        UNION ALL
+
+        -- Eligible submission (new P, prev IS NULL)
+        SELECT TRIM(t.policy_nbr) AS policy_nbr, 'submission'::text AS trigger_type,
+          t.app_recvd_date AS changed_on,
+          TRIM(UPPER(t.wa)) AS wa, TRIM(t.wa_name) AS wa_name,
+          t.roster_hierarchy_json
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE ${PLAN_FILTER}
+          AND t.cntrct_code = 'P' AND t.previous_contract_code IS NULL
+          AND t.app_recvd_date >= CURRENT_DATE - INTERVAL '${MONITOR_LOOKBACK_DAYS} days'
+
+        UNION ALL
+
+        -- Eligible submission (business rewrite T/A→P)
+        SELECT TRIM(t.policy_nbr) AS policy_nbr, 'submission'::text AS trigger_type,
+          t.contract_code_last_change_date AS changed_on,
+          TRIM(UPPER(t.wa)) AS wa, TRIM(t.wa_name) AS wa_name,
+          t.roster_hierarchy_json
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE ${PLAN_FILTER}
+          AND t.cntrct_code = 'P' AND t.previous_contract_code IN ('T', 'A')
+          AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '${MONITOR_LOOKBACK_DAYS} days'
+
+        UNION ALL
+
+        -- Eligible at-risk (false/NULL → true)
+        SELECT TRIM(t.policy_nbr) AS policy_nbr, 'at_risk'::text AS trigger_type,
+          t.at_risk_status_last_change_date AS changed_on,
+          TRIM(UPPER(t.wa)) AS wa, TRIM(t.wa_name) AS wa_name,
+          t.roster_hierarchy_json
+        FROM typed.unl_fym_policy_latest_load t
+        WHERE ${PLAN_FILTER}
+          AND t.at_risk_policy = true
+          AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
+          AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '${MONITOR_LOOKBACK_DAYS} days'
+      `);
+
+      console.log(`[fire-rate-monitor] eligible rows from Max's DB: ${eligibleRows.length}`);
+
+      // Resolve each eligible row to an agency, filter to enabled agencies only.
+      // Group by agency_id × trigger_type, tracking policy_nbr + changed_on for fired check.
+      type AgencyTriggerKey = string; // "agency_id|trigger_type"
+      const eligibleByKey = new Map<AgencyTriggerKey, { agency_id: string; agency_name: string; trigger_type: string; policies: { policy_nbr: string; changed_on: string }[] }>();
+
+      for (const row of eligibleRows) {
+        const hierarchy = row.roster_hierarchy_json ?? [];
+        const agent = agentFromHierarchy(hierarchy as HierarchyNode[]);
+        const rowWa = (row.wa ?? "").trim().toUpperCase();
+        const hierarchyOrgWn = agencyWnFromHierarchy(hierarchy as HierarchyNode[]);
+        const agencyName = resolveAgencyName(agencyMap, rowWa || agent.writingNumber, agencyFromHierarchy(hierarchy as HierarchyNode[]), hierarchyOrgWn);
+        const agencyId = agencyNameToId.get(agencyName.toLowerCase()) ?? null;
+
+        // Only monitor GHL-enabled agencies
+        if (!agencyId || !enabledAgencyIds.has(agencyId)) continue;
+
+        const changedOn = (row.changed_on instanceof Date
+          ? row.changed_on.toISOString()
+          : String(row.changed_on ?? "")).slice(0, 10);
+        if (!changedOn) continue;
+
+        // at_risk trigger uses underscore in fired_triggers but space in lifecycle_event_log
+        const triggerType = row.trigger_type;
+        const key = `${agencyId}|${triggerType}`;
+        if (!eligibleByKey.has(key)) {
+          eligibleByKey.set(key, { agency_id: agencyId, agency_name: agencyName, trigger_type: triggerType, policies: [] });
+        }
+        eligibleByKey.get(key)!.policies.push({ policy_nbr: row.policy_nbr, changed_on: changedOn });
+      }
+
+      // For each agency × trigger_type, check how many have fired_triggers entries.
+      for (const [, group] of eligibleByKey) {
+        const { agency_id, agency_name, trigger_type, policies } = group;
+        // Minimum threshold: skip groups with < 5 eligible events (too small to be meaningful)
+        if (policies.length < 5) continue;
+
+        let firedCount = 0;
+        const missed: string[] = [];
+        for (const p of policies) {
+          const firedKey = `${p.policy_nbr}|${trigger_type}|${p.changed_on}`;
+          if (firedSet.has(firedKey)) {
+            firedCount++;
+          } else {
+            missed.push(p.policy_nbr);
+          }
+        }
+
+        const rate = firedCount / policies.length;
+        if (rate < FIRE_RATE_THRESHOLD) {
+          fireRateAlerts.push({
+            agency_id,
+            agency_name,
+            trigger_type,
+            eligible: policies.length,
+            fired_count: firedCount,
+            rate,
+            missed_policies: missed.slice(0, 50), // cap at 50 for task description
+          });
+        }
+      }
+
+      console.log(`[fire-rate-monitor] alerts: ${fireRateAlerts.length} (threshold: ${FIRE_RATE_THRESHOLD * 100}%)`);
+    } catch (e) {
+      console.error("[fire-rate-monitor] monitoring query failed (non-fatal):", e);
+    } finally {
+      try { if (monitorSql) await monitorSql.end(); } catch { /* ignore */ }
+    }
+
+    // ── 8b. Create cc_tasks in CRM Command for sub-threshold fire rates ────
+    if (fireRateAlerts.length > 0) {
+      const portalUrl = Deno.env.get("PORTAL_SUPABASE_URL");
+      const portalKey = Deno.env.get("PORTAL_SUPABASE_SERVICE_ROLE_KEY");
+      if (portalUrl && portalKey) {
+        try {
+          const portalClient = createClient(portalUrl, portalKey);
+
+          for (const alert of fireRateAlerts) {
+            const pct = (alert.rate * 100).toFixed(1);
+            const title = `[Pipeline Alert] ${alert.trigger_type} fire rate ${pct}% — ${alert.agency_name}`;
+            const description = [
+              `Fire rate for **${alert.trigger_type}** triggers is ${pct}% (threshold: 95%).`,
+              `Eligible events (last ${MONITOR_LOOKBACK_DAYS} days): ${alert.eligible}`,
+              `Fired: ${alert.fired_count} | Missed: ${alert.eligible - alert.fired_count}`,
+              ``,
+              `Missed policy numbers (up to 50):`,
+              alert.missed_policies.join(", "),
+              ``,
+              `Agency: ${alert.agency_name} (${alert.agency_id})`,
+              `Generated by lifecycle-direct fire rate monitor.`,
+            ].join("\n");
+
+            // Idempotency: check for existing open task with same title
+            const { data: existing } = await portalClient
+              .from("cc_tasks")
+              .select("id")
+              .eq("title", title)
+              .in("status", ["backlog", "in_progress"])
+              .limit(1);
+
+            if (existing && existing.length > 0) {
+              console.log(`[fire-rate-monitor] task already exists for: ${title}`);
+              continue;
+            }
+
+            const { error: taskErr } = await portalClient
+              .from("cc_tasks")
+              .insert({
+                title,
+                description,
+                source: "lifecycle_monitor",
+                skill_category: "crm_ops",
+                priority: "P1",
+                status: "backlog",
+              });
+
+            if (taskErr) {
+              console.error(`[fire-rate-monitor] cc_tasks insert failed: ${taskErr.message}`);
+            } else {
+              console.log(`[fire-rate-monitor] task created: ${title}`);
+            }
+          }
+        } catch (e) {
+          console.error("[fire-rate-monitor] portal task creation failed (non-fatal):", e);
+        }
+      } else {
+        console.warn("[fire-rate-monitor] PORTAL_SUPABASE_URL or PORTAL_SUPABASE_SERVICE_ROLE_KEY not set — skipping task creation");
+      }
+    }
+  }
+
   await writeCronRun({ fired, skipped, held });
+  const fireRateSummary = fireRateAlerts.length > 0
+    ? { fire_rate_alerts: fireRateAlerts.map(a => ({ agency: a.agency_name, trigger: a.trigger_type, rate: +(a.rate * 100).toFixed(1), eligible: a.eligible, fired: a.fired_count })) }
+    : {};
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...fireRateSummary, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
