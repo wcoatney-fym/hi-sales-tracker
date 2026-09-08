@@ -1426,6 +1426,79 @@ async function handleSync(
     if (a.ghl_api_enabled && a.id) zapsEnabledAgencyIds.add(a.id as string);
   }
 
+  // --- Multi-carrier agency auto-sync (Will, 2026-09-08) ---
+  // Discover agency names from this batch that don't exist in the agencies
+  // table yet and create them automatically. Ensures GTL-only, AHL-only, and
+  // any new carrier agencies get dashboards without manual migration.
+  let agenciesAutoCreated = 0;
+  try {
+    // Collect unique agency names from the batch via Downline Agency / ga_name.
+    // These are the raw carrier-reported names before hierarchy resolution.
+    const batchAgencyNames = new Set<string>();
+    for (const rec of batchRecs) {
+      const md = normalizeKeys(rec.mapped_data as Record<string, string> | null);
+      const downline = (md["Downline Agency"] || "").trim().replace(/\s+/g, " ");
+      if (downline) batchAgencyNames.add(toProperCase(downline));
+    }
+
+    // Filter to only names not already in the agencies table.
+    // Check both exact match and case-insensitive to avoid near-duplicates.
+    const existingNamesUpper = new Set(
+      (agencyRows || []).map((a: { name: string }) => (a.name || "").toUpperCase()),
+    );
+    const newAgencyNames = [...batchAgencyNames].filter(
+      (name) => !agencyNameToId.has(name) && !existingNamesUpper.has(name.toUpperCase()),
+    );
+
+    if (newAgencyNames.length > 0) {
+      // Generate slugs and insert
+      const toSlug = (name: string): string =>
+        name
+          .toLowerCase()
+          .replace(/[&]/g, "and")
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 80);
+
+      for (const name of newAgencyNames) {
+        const slug = toSlug(name);
+        if (!slug) continue;
+
+        const { data: inserted, error: insertErr } = await supabase
+          .from("agencies")
+          .insert({ name, slug })
+          .select("id, name")
+          .maybeSingle();
+
+        if (insertErr) {
+          // slug conflict = agency already exists under a different name variant;
+          // log and skip — not fatal.
+          console.warn(
+            `[agency-auto-sync] insert failed for "${name}" (slug: ${slug}): ${insertErr.message}`,
+          );
+          continue;
+        }
+
+        if (inserted) {
+          agencyNameToId.set(inserted.name, inserted.id);
+          agenciesAutoCreated++;
+          console.log(
+            `[agency-auto-sync] created agency: "${inserted.name}" (${inserted.id}, slug: ${slug})`,
+          );
+        }
+      }
+
+      if (agenciesAutoCreated > 0) {
+        console.log(
+          `[agency-auto-sync] ${agenciesAutoCreated} new agencies created from ${carrier} import batch`,
+        );
+      }
+    }
+  } catch (autoSyncErr) {
+    // Agency auto-sync is best-effort — never block the import.
+    console.error("[agency-auto-sync] error (non-fatal):", autoSyncErr);
+  }
+
   const CONTRACT_STATUS: Record<string, string> = { A: "active", T: "terminated", P: "pending", S: "suspended" };
   // Manhattan uses descriptive status strings; map the numeric prefix to a
   // normalised status. Unknown prefixes fall through to the single-letter
@@ -1705,7 +1778,7 @@ async function handleSync(
     synced: totalSyncedSoFar,
   });
 
-  return jsonResponse({ success: true, phase: "sync", lastId: newLastId, synced: totalSyncedSoFar, agentsAdded, agentsUpdated, continuing: true });
+  return jsonResponse({ success: true, phase: "sync", lastId: newLastId, synced: totalSyncedSoFar, agentsAdded, agentsUpdated, agenciesAutoCreated, continuing: true });
 }
 
 // Fire-and-forget: the next batch starts as soon as its request is received, so we
