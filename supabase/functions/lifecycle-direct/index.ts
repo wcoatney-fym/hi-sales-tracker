@@ -252,8 +252,12 @@ Deno.serve(async (req: Request) => {
   // SUPABASE_URL + SB_SECRET_KEY dropped in 7/17 redeploy — use namespaced vars.
   const supabaseUrl  = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ??
                        Deno.env.get("SUPABASE_URL") ?? "";
-  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY") ??
+  // Service role key required: agents + agency_rosters have RLS that blocks
+  // anon reads. The publishable/anon key returns 0 rows for NPN lookups,
+  // causing every trigger to NPN-hold. Use service role key first.
+  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ??
                        Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY") ??
+                       Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY") ??
                        Deno.env.get("SB_SECRET_KEY") ?? "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
   console.log(`[lifecycle-direct] GHL token present: ${!!Deno.env.get("GHL_API_KEY_SUNFIRE")} location: ${Deno.env.get("GHL_LOCATION_ID_SUNFIRE") ?? "MISSING"}`);
