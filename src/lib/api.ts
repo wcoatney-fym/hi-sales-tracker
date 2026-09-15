@@ -1659,6 +1659,8 @@ export interface CarrierColumnMapping {
   unl_column: string;
   description: string;
   is_active: boolean;
+  needs_transform: boolean;
+  transform_note: string;
   created_at: string;
   updated_at: string;
 }

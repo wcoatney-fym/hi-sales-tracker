@@ -5594,6 +5594,8 @@ Deno.serve(async (req: Request) => {
           unl_column: ccmMapping.unl_column,
           description: ccmMapping.description || "",
           is_active: ccmMapping.is_active !== false,
+          needs_transform: ccmMapping.needs_transform === true,
+          transform_note: ccmMapping.transform_note || "",
         };
         if (ccmMapping.id) {
           const { data: updated, error: upErr } = await supabase
@@ -5634,12 +5636,14 @@ Deno.serve(async (req: Request) => {
         await supabase.from("carrier_column_mappings").delete().eq("carrier", bulkCarrier);
         const bulkRows = bulkMappings
           .filter((m: { carrier_column?: string; unl_column?: string }) => m.carrier_column && m.unl_column)
-          .map((m: { carrier_column: string; unl_column: string; description?: string }) => ({
+          .map((m: { carrier_column: string; unl_column: string; description?: string; needs_transform?: boolean; transform_note?: string }) => ({
             carrier: bulkCarrier,
             carrier_column: m.carrier_column,
             unl_column: m.unl_column,
             description: m.description || "",
             is_active: true,
+            needs_transform: m.needs_transform === true,
+            transform_note: m.transform_note || "",
           }));
         if (bulkRows.length > 0) {
           const { error: bulkErr } = await supabase.from("carrier_column_mappings").insert(bulkRows);

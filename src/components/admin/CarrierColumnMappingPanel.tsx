@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   X,
   Edit3,
+  Zap,
 } from "lucide-react";
 import {
   adminListCarrierColumnMappings,
@@ -77,7 +78,7 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
   // Add/edit state
   const [showAddRow, setShowAddRow] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState({ carrier_column: "", unl_column: "", description: "" });
+  const [editForm, setEditForm] = useState({ carrier_column: "", unl_column: "", description: "", needs_transform: false, transform_note: "" });
 
   // Stats per carrier
   const [carrierCounts, setCarrierCounts] = useState<Record<string, number>>({});
@@ -126,6 +127,8 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
         carrier_column: editForm.carrier_column.trim(),
         unl_column: editForm.unl_column.trim(),
         description: editForm.description.trim(),
+        needs_transform: editForm.needs_transform,
+        transform_note: editForm.transform_note.trim(),
       });
       setShowAddRow(false);
       setEditingId(null);
@@ -154,6 +157,8 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
       carrier_column: m.carrier_column,
       unl_column: m.unl_column,
       description: m.description || "",
+      needs_transform: m.needs_transform || false,
+      transform_note: m.transform_note || "",
     });
     setShowAddRow(false);
   };
@@ -161,8 +166,10 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
   const cancelEdit = () => {
     setEditingId(null);
     setShowAddRow(false);
-    setEditForm({ carrier_column: "", unl_column: "", description: "" });
+    setEditForm({ carrier_column: "", unl_column: "", description: "", needs_transform: false, transform_note: "" });
   };
+
+  const transformCount = carrierMappings.filter((m) => m.needs_transform).length;
 
   const unmappedUNLColumns = UNL_COLUMNS.filter(
     (col) => !carrierMappings.some((m) => m.unl_column === col.value)
@@ -221,7 +228,7 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
       </div>
 
       {/* Stats bar */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <div className="bg-navy rounded-xl border border-slate-700/50 p-3">
           <div className="flex items-center gap-2 mb-1">
             <Columns size={14} className="text-slate-500" />
@@ -247,6 +254,15 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
           </div>
           <p className={`text-lg font-semibold ${unmappedUNLColumns.length === 0 ? "text-green-400" : "text-amber-400"}`}>
             {unmappedUNLColumns.length}
+          </p>
+        </div>
+        <div className="bg-navy rounded-xl border border-slate-700/50 p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Zap size={14} className="text-slate-500" />
+            <span className="text-xs text-slate-500">Needs Transform</span>
+          </div>
+          <p className={`text-lg font-semibold ${transformCount > 0 ? "text-orange-400" : "text-green-400"}`}>
+            {transformCount}
           </p>
         </div>
       </div>
@@ -316,6 +332,9 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
                 <th className="text-left px-4 py-3 font-medium text-gold/80 text-xs uppercase tracking-wider">
                   UNL Label
                 </th>
+                <th className="text-center px-2 py-3 font-medium text-gold/80 text-xs uppercase tracking-wider w-24">
+                  Transform
+                </th>
                 <th className="text-left px-4 py-3 font-medium text-gold/80 text-xs uppercase tracking-wider">
                   Notes
                 </th>
@@ -358,12 +377,29 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
                       ? UNL_COLUMNS.find((c) => c.value === editForm.unl_column)?.label || "—"
                       : "—"}
                   </td>
+                  <td className="px-2 py-2 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setEditForm({ ...editForm, needs_transform: !editForm.needs_transform })}
+                      className={`p-1.5 rounded-md transition-colors ${
+                        editForm.needs_transform
+                          ? "bg-orange-500/20 text-orange-400 border border-orange-500/50"
+                          : "text-slate-500 hover:text-slate-300 border border-slate-700/50"
+                      }`}
+                      title={editForm.needs_transform ? "Values need transformation" : "Values map directly"}
+                    >
+                      <Zap size={14} />
+                    </button>
+                  </td>
                   <td className="px-4 py-2">
                     <input
                       type="text"
-                      value={editForm.description}
-                      onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                      placeholder="Optional notes..."
+                      value={editForm.needs_transform ? editForm.transform_note : editForm.description}
+                      onChange={(e) => editForm.needs_transform
+                        ? setEditForm({ ...editForm, transform_note: e.target.value })
+                        : setEditForm({ ...editForm, description: e.target.value })
+                      }
+                      placeholder={editForm.needs_transform ? "What needs transforming..." : "Optional notes..."}
                       className="w-full px-2 py-1.5 text-xs bg-navy-light border border-slate-600 rounded-md text-white focus:outline-none focus:border-gold/50"
                     />
                   </td>
@@ -392,7 +428,7 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
               {/* Existing mappings */}
               {carrierMappings.length === 0 && !showAddRow ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center">
+                  <td colSpan={7} className="px-4 py-8 text-center">
                     <Columns size={24} className="mx-auto text-slate-500 mb-2" />
                     <p className="text-sm text-slate-400">
                       No column mappings for {activeCarrier} yet
@@ -436,12 +472,29 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
                           ? UNL_COLUMNS.find((c) => c.value === editForm.unl_column)?.label || "—"
                           : "—"}
                       </td>
+                      <td className="px-2 py-2 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setEditForm({ ...editForm, needs_transform: !editForm.needs_transform })}
+                          className={`p-1.5 rounded-md transition-colors ${
+                            editForm.needs_transform
+                              ? "bg-orange-500/20 text-orange-400 border border-orange-500/50"
+                              : "text-slate-500 hover:text-slate-300 border border-slate-700/50"
+                          }`}
+                          title={editForm.needs_transform ? "Values need transformation" : "Values map directly"}
+                        >
+                          <Zap size={14} />
+                        </button>
+                      </td>
                       <td className="px-4 py-2">
                         <input
                           type="text"
-                          value={editForm.description}
-                          onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                          placeholder="Optional notes..."
+                          value={editForm.needs_transform ? editForm.transform_note : editForm.description}
+                          onChange={(e) => editForm.needs_transform
+                            ? setEditForm({ ...editForm, transform_note: e.target.value })
+                            : setEditForm({ ...editForm, description: e.target.value })
+                          }
+                          placeholder={editForm.needs_transform ? "What needs transforming..." : "Optional notes..."}
                           className="w-full px-2 py-1.5 text-xs bg-navy-light border border-slate-600 rounded-md text-white focus:outline-none focus:border-gold/50"
                         />
                       </td>
@@ -464,7 +517,7 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
                       </td>
                     </tr>
                   ) : (
-                    <tr key={m.id} className="hover:bg-slate-800/30 transition-colors">
+                    <tr key={m.id} className={`hover:bg-slate-800/30 transition-colors ${m.needs_transform ? "border-l-2 border-l-orange-500/50" : ""}`}>
                       <td className="px-4 py-2.5">
                         <span className="text-xs font-mono text-slate-200">{m.carrier_column}</span>
                       </td>
@@ -479,8 +532,23 @@ export default function CarrierColumnMappingPanel({ token }: CarrierColumnMappin
                           {UNL_COLUMNS.find((c) => c.value === m.unl_column)?.label || "—"}
                         </span>
                       </td>
+                      <td className="px-2 py-2.5 text-center">
+                        {m.needs_transform ? (
+                          <span
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-500/20 text-orange-400 border border-orange-500/30 cursor-help"
+                            title={m.transform_note || "Values need transformation"}
+                          >
+                            <Zap size={10} />
+                            Transform
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-600">—</span>
+                        )}
+                      </td>
                       <td className="px-4 py-2.5">
-                        <span className="text-xs text-slate-500">{m.description || "—"}</span>
+                        <span className="text-xs text-slate-500">
+                          {m.needs_transform ? m.transform_note || m.description || "—" : m.description || "—"}
+                        </span>
                       </td>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-1">
