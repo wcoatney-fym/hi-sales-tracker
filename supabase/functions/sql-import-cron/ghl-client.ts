@@ -328,29 +328,97 @@ export interface GhlPushResult {
   ok: boolean;
   http_status: number | null;
   error: string | null;
+  /** true when the gated rail HELD the push (missing All Templates fields /
+   *  blocked agency) — the contact was NOT created in GHL by design. */
+  held?: boolean;
 }
 
-// Best-effort upsert of one contact with 429-retry. Never throws.
+// ── Gated push via FYM App crm-ghl-sync (2026-10-21, Charlie) ──────────────
+// Direct POST /contacts/ to GHL is retired for lifecycle pushes: every
+// contact create must carry the All Templates agent-attribution fields
+// (agent name/email/phone/CRM #/profile image/DBC link) or be HELD. That
+// gate — roster resolution included — lives in ONE place: the FYM App
+// `crm-ghl-sync` edge function (`fresh_push_all_templates` action). This
+// client extracts the agent NPN + agency from the built body and forwards
+// the LOB policy fields as extraCustomFields; crm-ghl-sync resolves the
+// roster, enforces the gate (422 {held:true} on missing fields or blocked
+// agency) and performs the GHL create. There is deliberately NO ungated
+// fallback: missing FYM App credentials fail the push loudly instead of
+// silently reverting to the old field-less behavior.
+//
+// Required function secrets (lryxx project):
+//   FYM_APP_SUPABASE_URL — FYM App project URL (https://rcbzag….supabase.co)
+//   FYM_APP_ANON_KEY     — FYM App anon/publishable key (edge fn gateway auth)
+export function loadGatedRailConfig(): { url: string; anonKey: string } | null {
+  try {
+    const base = Deno.env.get("FYM_APP_SUPABASE_URL");
+    const anonKey = Deno.env.get("FYM_APP_ANON_KEY");
+    if (!base || !anonKey) return null;
+    return { url: `${base.replace(/\/+$/, "")}/functions/v1/crm-ghl-sync`, anonKey };
+  } catch {
+    return null;
+  }
+}
+
+// Gated push of one contact with 429-retry. Never throws.
 // Retries up to 3 times on HTTP 429, respecting the Retry-After header.
 // On non-429 errors or after exhausting retries, returns the last status.
+// A 422 {held:true} response is surfaced as held — NOT retried.
 export async function pushContactToGhl(
   cfg: GhlConfig,
   body: GhlContactBody,
 ): Promise<GhlPushResult> {
+  const rail = loadGatedRailConfig();
+  if (!rail) {
+    // Fail closed. An ungated direct push is exactly the bug this exists to kill.
+    return {
+      ok: false,
+      http_status: null,
+      error:
+        "FYM_APP_SUPABASE_URL / FYM_APP_ANON_KEY not configured — gated rail unavailable, push refused (no ungated fallback)",
+    };
+  }
+
+  // Pull the gate inputs out of the built body; crm-ghl-sync writes NPN +
+  // sorting itself, so those two IDs are stripped from the pass-through set.
+  const agentNpn = (body.customFields.find((f) => f.id === AGENT_NPN_FIELD_ID)?.value || "").trim();
+  const agency = (body.customFields.find((f) => f.id === AGENCY_SORTING_FIELD_ID)?.value || "").trim();
+  const extraCustomFields = body.customFields.filter(
+    (f) => f.id !== AGENT_NPN_FIELD_ID && f.id !== AGENCY_SORTING_FIELD_ID && (f.value || "").trim() !== "",
+  );
+
+  const railBody = JSON.stringify({
+    action: "fresh_push_all_templates",
+    agentNpn,
+    agency,
+    sorting: agency,
+    contact: {
+      firstName: body.firstName,
+      lastName: body.lastName,
+      email: body.email || undefined,
+      phone: body.phone || undefined,
+      address1: body.address1 || undefined,
+      city: body.city || undefined,
+      state: body.state || undefined,
+      postalCode: body.postalCode || undefined,
+      source: body.source,
+      tags: body.tags,
+    },
+    extraCustomFields,
+  });
+
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      // Use /contacts/ (POST create) — upsert requires email or phone which
-      // the lifecycle runner doesn't always have. Dedup handled in GHL subaccount layer.
-      const resp = await fetch(`${cfg.apiBase}/contacts/`, {
+      const resp = await fetch(rail.url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${cfg.token}`,
-          Version: "2021-07-28",
+          Authorization: `Bearer ${rail.anonKey}`,
+          apikey: rail.anonKey,
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify(body),
+        body: railBody,
       });
       if (resp.status === 429) {
         const retryAfter = parseInt(resp.headers.get("Retry-After") ?? "10", 10);
@@ -362,10 +430,29 @@ export async function pushContactToGhl(
         await new Promise((r) => setTimeout(r, sleepSec * 1000));
         continue;
       }
+      if (resp.status === 422) {
+        // Gate verdict: held (missing All Templates fields, blocked agency,
+        // roster-resolution failure). Deliberate — do not retry.
+        const data = await resp.json().catch(() => ({} as Record<string, unknown>));
+        return {
+          ok: false,
+          http_status: 422,
+          held: data.held === true,
+          error: typeof data.error === "string" ? data.error : "HELD by All Templates gate",
+        };
+      }
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({} as Record<string, unknown>));
+        return {
+          ok: false,
+          http_status: resp.status,
+          error: typeof data.error === "string" ? `HTTP ${resp.status}: ${data.error}` : `HTTP ${resp.status}`,
+        };
+      }
       return {
-        ok: resp.ok,
+        ok: true,
         http_status: resp.status,
-        error: resp.ok ? null : `HTTP ${resp.status}`,
+        error: null,
       };
     } catch (err) {
       // Network-level error on last attempt → return failure; otherwise retry.
