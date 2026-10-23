@@ -247,12 +247,16 @@ interface ProdRow {
 // ── Main handler ──────────────────────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
   // Auth: cron secret header (same mechanism as sql-import-cron).
-  // Legacy service_role/anon keys disabled 2026-06-16. Use publishable key for
-  // Supabase client (reads + RLS-scoped writes like lifecycle_confirm_tokens).
-  // SUPABASE_URL + SB_SECRET_KEY dropped in 7/17 redeploy — use namespaced vars.
+  // Server-side reads (agents, agency_rosters NPN map) REQUIRE the service-role
+  // key: anon grants on agents + agency_rosters were revoked (PR #173 + live
+  // 2026-10-21/22 hardening). The publishable key gets 42501 permission denied
+  // on those tables, which silently emptied the NPN map and held the entire
+  // book from 2026-10-22 (fired=0, held 8,054/day). Root-caused 2026-10-22.
+  // npn-resolution already uses ACTIVITY_TRACKER_SERVICE_ROLE_KEY — match it.
   const supabaseUrl  = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_URL") ??
                        Deno.env.get("SUPABASE_URL") ?? "";
-  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY") ??
+  const serviceKey   = Deno.env.get("ACTIVITY_TRACKER_SERVICE_ROLE_KEY") ??
+                       Deno.env.get("ACTIVITY_TRACKER_SUPABASE_PUBLISHABLE_KEY") ??
                        Deno.env.get("ACTIVITY_TRACKER_SECRET_KEY") ??
                        Deno.env.get("SB_SECRET_KEY") ?? "";
   console.log(`[lifecycle-direct] key prefix: ${serviceKey.slice(0, 12)} url: ${supabaseUrl}`);
@@ -718,14 +722,22 @@ Deno.serve(async (req: Request) => {
   const nameByWritingNumber = new Map<string, { first: string; full: string }>();
 
   // Paginate agents: table has 1,600+ rows; JS client caps at 1,000 with no error.
+  // FAIL LOUD on read errors: a silently-empty NPN map holds the entire book
+  // (every trigger row fails the NPN gate). That exact failure ran 2026-10-22.
   {
     const PAGE = 1000;
     let off = 0;
     while (true) {
-      const { data: agentPage } = await supabase
+      const { data: agentPage, error: agentErr } = await supabase
         .from("agents")
         .select("unl_writing_number, npn")
         .range(off, off + PAGE - 1);
+      if (agentErr) {
+        const msg = `NPN map build failed: agents read error — ${agentErr.message}`;
+        console.error(`[lifecycle-direct] ${msg}`);
+        await writeCronRun({});
+        return new Response(JSON.stringify({ ok: false, error: msg }), { status: 500 });
+      }
       for (const a of agentPage ?? []) {
         const wn = (a.unl_writing_number as string ?? "").trim().toUpperCase();
         if (wn && a.npn) npnByWritingNumber.set(wn, a.npn as string);
@@ -740,13 +752,19 @@ Deno.serve(async (req: Request) => {
     const PAGE = 1000;
     let off = 0;
     while (true) {
-      const { data: rosterPage } = await supabase
+      const { data: rosterPage, error: rosterErr } = await supabase
         .from("agency_rosters")
         .select("writing_number, npn, agent_first_name, agent_last_name")
         .eq("status", "active")
         .not("npn", "is", null)
         .neq("npn", "")
         .range(off, off + PAGE - 1);
+      if (rosterErr) {
+        const msg = `NPN map build failed: agency_rosters read error — ${rosterErr.message}`;
+        console.error(`[lifecycle-direct] ${msg}`);
+        await writeCronRun({});
+        return new Response(JSON.stringify({ ok: false, error: msg }), { status: 500 });
+      }
       for (const r of rosterPage ?? []) {
         const wn = (r.writing_number as string ?? "").trim().toUpperCase();
         if (wn && r.npn && !npnByWritingNumber.has(wn)) {
@@ -762,6 +780,16 @@ Deno.serve(async (req: Request) => {
       off += PAGE;
     }
   }
+
+  // Empty-map guard: zero NPN entries means every row would hold — that is a
+  // config/grant failure, never a legitimate state (map had 1,600+ entries).
+  if (npnByWritingNumber.size === 0) {
+    const msg = "NPN map build returned 0 entries — aborting run (would hold entire book)";
+    console.error(`[lifecycle-direct] ${msg}`);
+    await writeCronRun({});
+    return new Response(JSON.stringify({ ok: false, error: msg }), { status: 500 });
+  }
+  console.log(`[lifecycle-direct] NPN map: ${npnByWritingNumber.size} entries`);
 
   // Phone comes directly from phone_nbr on Max's DB (bigint cast to text in SELECT).
   // ── 2b. form_submissions agent-number fallback REMOVED ───────────────────
