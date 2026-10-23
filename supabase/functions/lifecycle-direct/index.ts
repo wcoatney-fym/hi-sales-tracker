@@ -302,13 +302,14 @@ Deno.serve(async (req: Request) => {
   // Called before every return so cron_auth is recorded even when the
   // confirmation gate fires or an error short-circuits the main loop.
   // Best-effort — failure must not affect the caller's response.
-  async function writeCronRun(opts: { fired?: number; skipped?: number; held?: number }) {
+  async function writeCronRun(opts: { fired?: number; skipped?: number; held?: number; rejected?: number }) {
     supabase.from("lifecycle_cron_runs").insert({
       cron_auth:  isScheduledCron,
       dry,
       fired:      opts.fired   ?? 0,
       skipped:    opts.skipped ?? 0,
       held:       opts.held    ?? 0,
+      rejected:   opts.rejected ?? 0,
       deploy_sha: deployedSha,
     }).then(
       () => { /* best-effort */ },
@@ -837,6 +838,31 @@ Deno.serve(async (req: Request) => {
   }
   console.log(`[lifecycle-direct] fired_triggers loaded: ${firedSet.size}`);
 
+  // ── 4a-ii. Load hold-after-reject set from push_rejects (Supabase) ────────
+  // A 422 from the crm-ghl-sync gate is deterministic (missing roster, blocked
+  // agency, missing All Templates fields) — retrying the identical row every
+  // run cannot succeed. Rows keyed here are skipped until the policy's data
+  // changes (new changed_on = new key) or the reject is resolved manually.
+  const rejectSet = new Set<string>();
+  {
+    const PR = 1000;
+    let prOff = 0;
+    while (true) {
+      const { data: prRows, error: prErr } = await supabase
+        .from("push_rejects")
+        .select("policy_nbr, trigger_type, changed_on")
+        .eq("status", "rejected")
+        .range(prOff, prOff + PR - 1);
+      if (prErr) { console.error(`[lifecycle-direct] push_rejects read failed: ${prErr.message}`); break; }
+      for (const r of prRows ?? []) {
+        rejectSet.add(`${r.policy_nbr}|${r.trigger_type}|${r.changed_on}`);
+      }
+      if (!prRows || prRows.length < PR) break;
+      prOff += PR;
+    }
+  }
+  console.log(`[lifecycle-direct] push_rejects loaded: ${rejectSet.size}`);
+
   // ── 4b. Trigger row shape ─────────────────────────────────────────────────
   interface TriggerRow extends ProdRow {
     trigger_type: "approved" | "terminated" | "submission" | "at_risk";
@@ -952,9 +978,12 @@ Deno.serve(async (req: Request) => {
   const auditRows:    Record<string, unknown>[] = [];
   const npnHoldRows:  Record<string, unknown>[] = [];
   const firedInserts: { policy_nbr: string; trigger_type: string; changed_on: string }[] = [];
+  const rejectInserts: Record<string, unknown>[] = [];
   let   fired = 0;
   let   skipped = 0;
   let   held = 0;
+  let   rejected = 0;        // new deterministic gate rejects persisted this run
+  let   errorsTransient = 0; // 5xx / network / retry-exhausted — NOT persisted, retried next run
   let   dryRunPayload: unknown = undefined; // populated in single-policy dry-run
 
   for (const row of triggerRows) {
@@ -970,6 +999,10 @@ Deno.serve(async (req: Request) => {
     // fired_triggers idempotency gate (app-side, mirrors NOT EXISTS in spec SQL).
     const firedKey = `${pn}|${row.trigger_type}|${changedOnIso}`;
     if (firedSet.has(firedKey)) { skipped++; continue; }
+
+    // Hold-after-reject gate: previously rejected by the crm-ghl-sync gate
+    // with this exact key — deterministic verdict, do not re-attempt.
+    if (rejectSet.has(firedKey)) { skipped++; continue; }
 
     // Single-policy filter.
     if (singlePolicy && pn !== singlePolicy) { skipped++; continue; }
@@ -1091,8 +1124,28 @@ Deno.serve(async (req: Request) => {
       if (r.ok) {
         firedInserts.push({ policy_nbr: pn, trigger_type: row.trigger_type, changed_on: changedOnIso });
         firedSet.add(firedKey); // prevent duplicate within this run
+        fired++;               // fired = successful pushes only (was: all attempts)
+      } else if (r.http_status === 422) {
+        // Deterministic gate verdict — persist so we stop retrying this key.
+        rejectInserts.push({
+          policy_nbr:   pn,
+          trigger_type: row.trigger_type,
+          changed_on:   changedOnIso,
+          http_status:  r.http_status,
+          held:         r.held === true,
+          error:        r.error,
+          agency_id:    agencyId,
+          agency_name:  agencyName,
+          agent_name:   agentFull || null,
+        });
+        rejectSet.add(firedKey); // prevent duplicate within this run
+        rejected++;
+        console.log(`[lifecycle-direct] gate reject (held): ${pn} trigger=${row.trigger_type} — ${r.error}`);
+      } else {
+        // Transient (5xx / network / 429-exhausted) — leave retryable.
+        errorsTransient++;
+        console.warn(`[lifecycle-direct] transient push failure: ${pn} http=${r.http_status} — ${r.error}`);
       }
-      fired++;
     } else {
       console.warn(`[lifecycle-direct] no GHL config; skipped ${triggerLabel} ${pn}`);
       auditRows.push({ policy_number: pn, trigger: triggerLabel, ok: false, dry_run: false, error: "no GHL config", http_status: null, agency_id: agencyId, risk_signal: null, previous_contract_code: null, contract_code: row.cntrct_code, contract_reason: null, upload_id: null });
@@ -1117,6 +1170,27 @@ Deno.serve(async (req: Request) => {
     }
   } else if (dry) {
     console.log(`[lifecycle-direct] dry-run: skipping fired_triggers write (${firedInserts.length} would insert)`);
+  }
+
+  // Persist gate rejects (best-effort, non-fatal). Keyed like fired_triggers;
+  // ON CONFLICT ignore so concurrent runs can't duplicate.
+  if (!dry && rejectInserts.length > 0) {
+    try {
+      for (let i = 0; i < rejectInserts.length; i += 500) {
+        const { error: prErr } = await supabase
+          .from("push_rejects")
+          .upsert(rejectInserts.slice(i, i + 500), {
+            onConflict: "policy_nbr,trigger_type,changed_on",
+            ignoreDuplicates: true,
+          });
+        if (prErr) console.error(`[lifecycle-direct] push_rejects write failed: ${prErr.message}`);
+      }
+      console.log(`[lifecycle-direct] push_rejects written: ${rejectInserts.length}`);
+    } catch (e) {
+      console.error("[lifecycle-direct] push_rejects write error (non-fatal):", e);
+    }
+  } else if (dry && rejectInserts.length > 0) {
+    console.log(`[lifecycle-direct] dry-run: would persist ${rejectInserts.length} push_rejects`);
   }
 
   try {
@@ -1393,12 +1467,12 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  await writeCronRun({ fired, skipped, held });
+  await writeCronRun({ fired, skipped, held, rejected });
   const fireRateSummary = fireRateAlerts.length > 0
     ? { fire_rate_alerts: fireRateAlerts.map(a => ({ agency: a.agency_name, trigger: a.trigger_type, rate: +(a.rate * 100).toFixed(1), eligible: a.eligible, fired: a.fired_count })) }
     : {};
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, held, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...fireRateSummary, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, held, rejected, errors_transient: errorsTransient, reject_backlog: rejectSet.size, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...fireRateSummary, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
