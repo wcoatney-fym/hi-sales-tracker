@@ -47,3 +47,21 @@ verify_jwt = false
 # No user JWT supplied by pg_cron.
 [functions.proposed-fires-push]
 verify_jwt = false
+
+# The four below run with verify_jwt = false in production (checked
+# 2026-10-27) but were never pinned here, so any `supabase functions deploy`
+# without --no-verify-jwt (or a bulk deploy) would flip them to JWT-required.
+# ghl-oauth-callback in particular receives GHL's OAuth redirect, which
+# carries no Supabase JWT. Pinned to match production; each function's own
+# auth is the gate.
+[functions.admin-api]
+verify_jwt = false
+
+[functions.ghl-canary]
+verify_jwt = false
+
+[functions.ghl-reconcile]
+verify_jwt = false
+
+[functions.ghl-oauth-callback]
+verify_jwt = false
