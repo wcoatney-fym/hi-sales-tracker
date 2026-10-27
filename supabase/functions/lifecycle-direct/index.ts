@@ -327,11 +327,32 @@ Deno.serve(async (req: Request) => {
   // Tokens are single-use, stored in Supabase, expire after 5 minutes.
   let singlePolicy: string | null = null;
   let confirmToken: string | null = null;
+  let lookbackParam: string | null = null;
   try {
     const params = new URL(req.url).searchParams;
     singlePolicy  = params.get("single_policy");
     confirmToken  = params.get("confirm");
+    lookbackParam = params.get("lookback_days");
   } catch { /* ignore */ }
+
+  // Trigger-query lookback window. Scheduled and batch runs always use 3 days.
+  // ?lookback_days=N (1–14) widens it ONLY for single-policy runs, so a
+  // trigger that aged out while held (e.g. the 10/23–10/26 DH roster-lookup
+  // holds) can be re-fired one policy at a time — still behind the
+  // confirmation gate and the fired_triggers idempotency check.
+  const DEFAULT_LOOKBACK_DAYS = 3;
+  const MAX_LOOKBACK_DAYS = 14;
+  let lookbackDays = DEFAULT_LOOKBACK_DAYS;
+  if (singlePolicy && lookbackParam) {
+    const n = parseInt(lookbackParam, 10);
+    if (!Number.isFinite(n) || n < 1 || n > MAX_LOOKBACK_DAYS) {
+      return new Response(
+        JSON.stringify({ error: `lookback_days must be an integer from 1 to ${MAX_LOOKBACK_DAYS}` }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    lookbackDays = n;
+  }
 
   // Confirmation gate: ALL manual live fires require a confirmation token.
   // Only the pg_cron scheduled run (authenticated via X-Cron-Key) is exempt.
@@ -349,7 +370,7 @@ Deno.serve(async (req: Request) => {
         token, policy_number: scopeLabel, expires_at: expiresAt, used: false,
       }).then(() => {/* best-effort */});
       const confirmParam = singlePolicy
-        ? `?single_policy=${singlePolicy}&confirm=${token}`
+        ? `?single_policy=${singlePolicy}${lookbackDays !== DEFAULT_LOOKBACK_DAYS ? `&lookback_days=${lookbackDays}` : ""}&confirm=${token}`
         : `?confirm=${token}`;
       await writeCronRun({ fired: 0, skipped: 0 });
       return new Response(
@@ -912,7 +933,7 @@ Deno.serve(async (req: Request) => {
           (t.previous_contract_code = 'P' AND t.cntrct_code = 'A')
           OR (t.previous_contract_code = 'A' AND t.cntrct_code = 'T')
         )
-        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '${lookbackDays} days'
 
       UNION ALL
 
@@ -924,7 +945,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.cntrct_code = 'P'
         AND t.previous_contract_code IS NULL
-        AND t.app_recvd_date >= CURRENT_DATE - INTERVAL '3 days'
+        AND t.app_recvd_date >= CURRENT_DATE - INTERVAL '${lookbackDays} days'
 
       UNION ALL
 
@@ -936,7 +957,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.cntrct_code = 'P'
         AND t.previous_contract_code IN ('T', 'A')
-        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+        AND t.contract_code_last_change_date >= CURRENT_DATE - INTERVAL '${lookbackDays} days'
 
       UNION ALL
 
@@ -951,7 +972,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.cntrct_code = 'A'
         AND t.previous_contract_code IS NULL
-        AND t.issue_date >= CURRENT_DATE - INTERVAL '3 days'
+        AND t.issue_date >= CURRENT_DATE - INTERVAL '${lookbackDays} days'
 
       UNION ALL
 
@@ -963,7 +984,7 @@ Deno.serve(async (req: Request) => {
       WHERE ${PLAN_FILTER}
         AND t.at_risk_policy = true
         AND (t.previous_at_risk_status = false OR t.previous_at_risk_status IS NULL)
-        AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '3 days'
+        AND t.at_risk_status_last_change_date >= CURRENT_DATE - INTERVAL '${lookbackDays} days'
 
       ORDER BY changed_on DESC
     `) as TriggerRow[];
@@ -1472,7 +1493,7 @@ Deno.serve(async (req: Request) => {
     ? { fire_rate_alerts: fireRateAlerts.map(a => ({ agency: a.agency_name, trigger: a.trigger_type, rate: +(a.rate * 100).toFixed(1), eligible: a.eligible, fired: a.fired_count })) }
     : {};
   return new Response(
-    JSON.stringify({ ok: true, fired, skipped, held, rejected, errors_transient: errorsTransient, reject_backlog: rejectSet.size, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...fireRateSummary, ...(singlePolicy ? { single_policy: singlePolicy } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
+    JSON.stringify({ ok: true, fired, skipped, held, rejected, errors_transient: errorsTransient, reject_backlog: rejectSet.size, dry, cron_auth: isScheduledCron, deploy_sha: deployedSha, rows: triggerRows.length, ghl_config_present: !!ghlConfig, ...fireRateSummary, ...(singlePolicy ? { single_policy: singlePolicy, lookback_days: lookbackDays } : {}), ...(dryRunPayload ? { dry_run_payload: dryRunPayload } : {}) }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 });
