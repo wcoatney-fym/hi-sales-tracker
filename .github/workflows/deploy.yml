@@ -1,7 +1,13 @@
 name: Deploy backend to Supabase
+# Manual only. This used to run on every push to main, but edge functions
+# here are deployed one at a time after review (see PR deploy notes), and an
+# automatic `supabase db push` + bulk `supabase functions deploy` would ship
+# every function and migration on merge. It never got that far — db push has
+# failed on migration-history drift since August — but reconciling the
+# history would have made the next merge redeploy everything. Run it from the
+# Actions tab when a full deploy is actually intended.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 jobs:
   supabase-deploy:
     runs-on: ubuntu-latest
